@@ -1,0 +1,40 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    env:
+      GORELEASER_CROSS_VERSION: v1.23.0
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Run GoReleaser with goreleaser-cross
+        run: |
+          docker run \
+            --rm \
+            --privileged \
+            -e CGO_ENABLED=1 \
+            -e GITHUB_TOKEN="${{ secrets.GITHUB_TOKEN }}" \
+            -e HOMEBREW_TAP_GITHUB_TOKEN="${{ secrets.HOMEBREW_TAP_GITHUB_TOKEN }}" \
+            -v /var/run/docker.sock:/var/run/docker.sock \
+            -v "${{ github.workspace }}:/go/src/github.com/live-docs/live_docs" \
+            -w /go/src/github.com/live-docs/live_docs \
+            ghcr.io/goreleaser/goreleaser-cross:${GORELEASER_CROSS_VERSION} \
+            release --clean

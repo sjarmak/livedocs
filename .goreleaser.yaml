@@ -1,0 +1,98 @@
+version: 2
+
+project_name: livedocs
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - id: livedocs
+    main: ./cmd/livedocs
+    binary: livedocs
+    env:
+      - CGO_ENABLED=1
+    goos:
+      - linux
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w
+      - -X main.version={{.Version}}
+      - -X main.commit={{.Commit}}
+      - -X main.date={{.Date}}
+    overrides:
+      - goos: linux
+        goarch: amd64
+        goamd64: v1
+        env:
+          - CGO_ENABLED=1
+          - CC=x86_64-linux-gnu-gcc
+          - CXX=x86_64-linux-gnu-g++
+      - goos: linux
+        goarch: arm64
+        env:
+          - CGO_ENABLED=1
+          - CC=aarch64-linux-gnu-gcc
+          - CXX=aarch64-linux-gnu-g++
+      - goos: darwin
+        goarch: amd64
+        goamd64: v1
+        env:
+          - CGO_ENABLED=1
+          - CC=o64-clang
+          - CXX=o64-clang++
+      - goos: darwin
+        goarch: arm64
+        env:
+          - CGO_ENABLED=1
+          - CC=oa64-clang
+          - CXX=oa64-clang++
+
+archives:
+  - id: default
+    format: tar.gz
+    format_overrides:
+      - goos: darwin
+        format: zip
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    files:
+      - LICENSE*
+      - README*
+
+checksum:
+  name_template: "checksums.txt"
+  algorithm: sha256
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^chore:"
+
+brews:
+  - name: livedocs
+    repository:
+      owner: sjarmak
+      name: homebrew-tap
+      token: "{{ .Env.HOMEBREW_TAP_GITHUB_TOKEN }}"
+    directory: Formula
+    homepage: "https://github.com/live-docs/live_docs"
+    description: "Live documentation for codebases"
+    license: "MIT"
+    install: |
+      bin.install "livedocs"
+    test: |
+      system "#{bin}/livedocs", "version"
+
+release:
+  github:
+    owner: live-docs
+    name: live_docs
+  draft: false
+  prerelease: auto
+  name_template: "v{{.Version}}"
