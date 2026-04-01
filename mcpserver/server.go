@@ -15,6 +15,7 @@ import (
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
 
+	"github.com/live-docs/live_docs/aicontext"
 	"github.com/live-docs/live_docs/anchor"
 	"github.com/live-docs/live_docs/db"
 	"github.com/live-docs/live_docs/drift"
@@ -60,6 +61,7 @@ func (s *Server) buildMCPServer() *server.MCPServer {
 	srv.AddTool(queryClaimsTool(), s.handleQueryClaims)
 	srv.AddTool(checkDriftTool(), s.handleCheckDrift)
 	srv.AddTool(verifySectionTool(), s.handleVerifySection)
+	srv.AddTool(checkAIContextTool(), handleCheckAIContext)
 	return srv
 }
 
@@ -369,6 +371,76 @@ func (s *Server) handleVerifySection(_ context.Context, req mcp.CallToolRequest)
 			ObjectText: cl.ObjectText,
 			SourceLine: cl.SourceLine,
 			Status:     string(status),
+		})
+	}
+
+	data, err := json.Marshal(result)
+	if err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("marshal result: %v", err)), nil
+	}
+	return mcp.NewToolResultText(string(data)), nil
+}
+
+// --- check_ai_context tool ---
+
+func checkAIContextTool() mcp.Tool {
+	return mcp.NewTool("check_ai_context",
+		mcp.WithDescription("Verify AI context files (CLAUDE.md, AGENTS.md, .cursorrules, etc.) for stale file paths, broken package references, and outdated claims."),
+		mcp.WithString("path",
+			mcp.Required(),
+			mcp.Description("Repository root path to scan for AI context files."),
+		),
+	)
+}
+
+// aiContextResult is the JSON response for check_ai_context.
+type aiContextResult struct {
+	Path        string             `json:"path"`
+	Files       []string           `json:"files"`
+	TotalClaims int                `json:"total_claims"`
+	ValidCount  int                `json:"valid_count"`
+	StaleCount  int                `json:"stale_count"`
+	HasDrift    bool               `json:"has_drift"`
+	Findings    []aiContextFinding `json:"findings,omitempty"`
+}
+
+type aiContextFinding struct {
+	Kind       string `json:"kind"`
+	Value      string `json:"value"`
+	SourceFile string `json:"source_file"`
+	Line       int    `json:"line"`
+	Status     string `json:"status"`
+	Detail     string `json:"detail"`
+}
+
+func handleCheckAIContext(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	path, err := req.RequireString("path")
+	if err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
+	}
+
+	report, err := aicontext.Check(path)
+	if err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("check AI context: %v", err)), nil
+	}
+
+	result := aiContextResult{
+		Path:        path,
+		Files:       report.Files,
+		TotalClaims: report.TotalClaims,
+		ValidCount:  report.ValidCount,
+		StaleCount:  report.StaleCount,
+		HasDrift:    report.HasDrift(),
+	}
+
+	for _, f := range report.Findings {
+		result.Findings = append(result.Findings, aiContextFinding{
+			Kind:       string(f.Claim.Kind),
+			Value:      f.Claim.Value,
+			SourceFile: f.Claim.SourceFile,
+			Line:       f.Claim.Line,
+			Status:     string(f.Status),
+			Detail:     f.Detail,
 		})
 	}
 
