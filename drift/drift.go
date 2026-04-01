@@ -1,5 +1,5 @@
 // Package drift detects documentation drift by comparing symbol references
-// in README files against symbols actually present in Go source code.
+// in README files against symbols actually present in source code.
 //
 // It extracts three categories of references from Markdown:
 //   - Backtick-quoted identifiers (e.g. `NewInformer`)
@@ -10,8 +10,8 @@
 // Plain capitalized English words (e.g. "Backward", "Server") are not
 // extracted from prose, avoiding false positives on natural language.
 //
-// These are compared against exported symbols extracted from the Go source
-// tree to find stale references and undocumented symbols.
+// These are compared against exported symbols extracted from Go, Python,
+// and TypeScript source files to find stale references and undocumented symbols.
 package drift
 
 import (
@@ -247,9 +247,9 @@ func Detect(readmePath string, codeDir string) (*Report, error) {
 
 	readmeSymbols, pkgPaths := ExtractReadmeSymbols(string(content))
 
-	codeSymbols, err := ExtractGoExports(codeDir)
+	codeSymbols, err := ExtractCodeExports(codeDir)
 	if err != nil {
-		// If no Go files in directory, code symbols is empty.
+		// If no source files in directory, code symbols is empty.
 		codeSymbols = nil
 	}
 
