@@ -1,0 +1,190 @@
+name: "Livedocs Check"
+description: "Detect documentation drift in your repository using livedocs check"
+author: "live-docs"
+
+branding:
+  icon: "file-text"
+  color: "blue"
+
+inputs:
+  version:
+    description: "Livedocs version to use (e.g., v0.1.0). Defaults to latest release."
+    required: false
+    default: "latest"
+  path:
+    description: "Repository path to check for documentation drift."
+    required: false
+    default: "."
+  format:
+    description: "Output format: text or json."
+    required: false
+    default: "json"
+  fail-threshold:
+    description: "Maximum allowed drift score (total stale + stale packages). Set to -1 to never fail."
+    required: false
+    default: "0"
+  github-token:
+    description: "GitHub token for downloading release assets. Defaults to the workflow token."
+    required: false
+    default: ${{ github.token }}
+
+outputs:
+  drift-score:
+    description: "Total drift score (stale references + stale packages)"
+    value: ${{ steps.check.outputs.drift-score }}
+  total-stale:
+    description: "Number of stale symbol references"
+    value: ${{ steps.check.outputs.total-stale }}
+  total-stale-packages:
+    description: "Number of stale package paths"
+    value: ${{ steps.check.outputs.total-stale-packages }}
+  total-undocumented:
+    description: "Number of undocumented exports (informational)"
+    value: ${{ steps.check.outputs.total-undocumented }}
+  has-drift:
+    description: "Whether structural drift was detected (true/false)"
+    value: ${{ steps.check.outputs.has-drift }}
+
+runs:
+  using: "composite"
+  steps:
+    - name: Determine version
+      id: version
+      shell: bash
+      env:
+        INPUT_VERSION: ${{ inputs.version }}
+        GH_TOKEN: ${{ inputs.github-token }}
+      run: |
+        if [ "$INPUT_VERSION" = "latest" ]; then
+          VERSION=$(gh api repos/live-docs/live_docs/releases/latest --jq '.tag_name' 2>/dev/null || echo "")
+          if [ -z "$VERSION" ]; then
+            echo "::error::Failed to determine latest livedocs release version"
+            exit 1
+          fi
+        else
+          VERSION="$INPUT_VERSION"
+        fi
+        echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+        # Strip leading v for archive name matching
+        echo "version-bare=${VERSION#v}" >> "$GITHUB_OUTPUT"
+
+    - name: Cache livedocs binary
+      uses: actions/cache@v4
+      with:
+        path: /usr/local/bin/livedocs
+        key: livedocs-${{ runner.os }}-${{ runner.arch }}-${{ steps.version.outputs.version }}
+
+    - name: Download livedocs binary
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.github-token }}
+        VERSION: ${{ steps.version.outputs.version }}
+        VERSION_BARE: ${{ steps.version.outputs.version-bare }}
+      run: |
+        if [ -x /usr/local/bin/livedocs ]; then
+          echo "livedocs binary found in cache"
+          exit 0
+        fi
+
+        OS="$(uname -s | tr '[:upper:]' '[:lower:]')"
+        ARCH="$(uname -m)"
+        case "$ARCH" in
+          x86_64)  ARCH="amd64" ;;
+          aarch64) ARCH="arm64" ;;
+        esac
+
+        case "$OS" in
+          linux)  EXT="tar.gz" ;;
+          darwin) EXT="zip" ;;
+          *)
+            echo "::error::Unsupported OS: $OS"
+            exit 1
+            ;;
+        esac
+
+        ARCHIVE="livedocs_${VERSION_BARE}_${OS}_${ARCH}.${EXT}"
+        echo "Downloading $ARCHIVE from release $VERSION"
+
+        gh release download "$VERSION" \
+          --repo live-docs/live_docs \
+          --pattern "$ARCHIVE" \
+          --dir /tmp
+
+        if [ "$EXT" = "tar.gz" ]; then
+          tar -xzf "/tmp/$ARCHIVE" -C /tmp livedocs
+        else
+          unzip -o "/tmp/$ARCHIVE" livedocs -d /tmp
+        fi
+
+        chmod +x /tmp/livedocs
+        sudo mv /tmp/livedocs /usr/local/bin/livedocs
+        rm -f "/tmp/$ARCHIVE"
+
+    - name: Cache claims database
+      uses: actions/cache@v4
+      with:
+        path: .livedocs/claims.db
+        key: livedocs-claims-${{ hashFiles('**/*.md') }}
+        restore-keys: |
+          livedocs-claims-
+
+    - name: Run livedocs check
+      id: check
+      shell: bash
+      env:
+        INPUT_PATH: ${{ inputs.path }}
+        INPUT_FORMAT: ${{ inputs.format }}
+        INPUT_THRESHOLD: ${{ inputs.fail-threshold }}
+      run: |
+        set +e
+        OUTPUT=$(livedocs check --format json "$INPUT_PATH" 2>&1)
+        set -e
+
+        # Parse JSON output for drift metrics
+        if echo "$OUTPUT" | jq -e '.total_stale' > /dev/null 2>&1; then
+          TOTAL_STALE=$(echo "$OUTPUT" | jq -r '.total_stale')
+          TOTAL_STALE_PKG=$(echo "$OUTPUT" | jq -r '.total_stale_packages')
+          TOTAL_UNDOC=$(echo "$OUTPUT" | jq -r '.total_undocumented')
+          HAS_DRIFT=$(echo "$OUTPUT" | jq -r '.has_drift')
+          DRIFT_SCORE=$((TOTAL_STALE + TOTAL_STALE_PKG))
+        else
+          echo "::warning::Could not parse livedocs JSON output"
+          echo "$OUTPUT"
+          TOTAL_STALE=0
+          TOTAL_STALE_PKG=0
+          TOTAL_UNDOC=0
+          HAS_DRIFT="false"
+          DRIFT_SCORE=0
+        fi
+
+        echo "drift-score=$DRIFT_SCORE" >> "$GITHUB_OUTPUT"
+        echo "total-stale=$TOTAL_STALE" >> "$GITHUB_OUTPUT"
+        echo "total-stale-packages=$TOTAL_STALE_PKG" >> "$GITHUB_OUTPUT"
+        echo "total-undocumented=$TOTAL_UNDOC" >> "$GITHUB_OUTPUT"
+        echo "has-drift=$HAS_DRIFT" >> "$GITHUB_OUTPUT"
+
+        # Display human-readable output if text format requested
+        if [ "$INPUT_FORMAT" = "text" ]; then
+          livedocs check --format text "$INPUT_PATH" 2>&1 || true
+        else
+          echo "$OUTPUT"
+        fi
+
+        # Upload JSON result as artifact metadata
+        mkdir -p "$RUNNER_TEMP/livedocs"
+        echo "$OUTPUT" > "$RUNNER_TEMP/livedocs/drift-report.json"
+
+        # Threshold check
+        if [ "$INPUT_THRESHOLD" != "-1" ] && [ "$DRIFT_SCORE" -gt "$INPUT_THRESHOLD" ]; then
+          echo "::error::Drift score ($DRIFT_SCORE) exceeds threshold ($INPUT_THRESHOLD)"
+          exit 1
+        fi
+
+    - name: Upload drift report
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: livedocs-drift-report
+        path: ${{ runner.temp }}/livedocs/drift-report.json
+        retention-days: 30
+        if-no-files-found: ignore

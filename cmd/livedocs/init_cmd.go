@@ -1,0 +1,73 @@
+package main
+
+import (
+	"fmt"
+	"os"
+	"path/filepath"
+
+	"github.com/spf13/cobra"
+
+	"github.com/live-docs/live_docs/initcmd"
+)
+
+var initForce bool
+
+var initCmd = &cobra.Command{
+	Use:   "init [path]",
+	Short: "Initialize livedocs in a repository",
+	Long:  "Scaffold a .livedocs.yaml configuration file and run the first extraction pass.",
+	Args:  cobra.MaximumNArgs(1),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		path := "."
+		if len(args) > 0 {
+			path = args[0]
+		}
+
+		absPath, err := filepath.Abs(path)
+		if err != nil {
+			return fmt.Errorf("resolve path: %w", err)
+		}
+
+		info, err := os.Stat(absPath)
+		if err != nil {
+			return fmt.Errorf("stat %s: %w", absPath, err)
+		}
+		if !info.IsDir() {
+			return fmt.Errorf("%s is not a directory", absPath)
+		}
+
+		result, err := initcmd.Run(cmd.Context(), initcmd.Options{
+			RepoRoot: absPath,
+			Writer:   cmd.OutOrStdout(),
+			Force:    initForce,
+		})
+		if err != nil {
+			return err
+		}
+
+		out := cmd.OutOrStdout()
+		if result.ConfigCreated {
+			fmt.Fprintln(out, "Created .livedocs.yaml")
+		} else {
+			fmt.Fprintln(out, "Using existing .livedocs.yaml")
+		}
+		if result.DirCreated {
+			fmt.Fprintln(out, "Created .livedocs/ directory")
+		}
+
+		fmt.Fprintf(out, "\nSummary:\n")
+		fmt.Fprintf(out, "  Languages:  %v\n", result.Languages)
+		fmt.Fprintf(out, "  Files:      %d scanned, %d extracted, %d skipped\n",
+			result.FilesScanned, result.FilesExtracted, result.FilesSkipped)
+		fmt.Fprintf(out, "  Claims:     %d stored\n", result.ClaimsStored)
+		if len(result.Errors) > 0 {
+			fmt.Fprintf(out, "  Errors:     %d (non-fatal)\n", len(result.Errors))
+		}
+
+		return nil
+	},
+}
+
+func init() {
+	initCmd.Flags().BoolVar(&initForce, "force", false, "overwrite existing .livedocs.yaml")
+}

@@ -1,0 +1,35 @@
+name: Documentation Drift Check
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  livedocs-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Check documentation drift
+        id: drift
+        uses: livedocs/check-action@v1
+        with:
+          # version: "v0.1.0"    # Pin to a specific version (default: latest)
+          # path: "."             # Repository path to scan (default: .)
+          # format: "json"        # Output format: text or json (default: json)
+          fail-threshold: "0"     # Fail if any drift detected (default: 0, -1 to never fail)
+
+      - name: Print drift summary
+        if: always()
+        run: |
+          echo "Drift score: ${{ steps.drift.outputs.drift-score }}"
+          echo "Stale references: ${{ steps.drift.outputs.total-stale }}"
+          echo "Stale packages: ${{ steps.drift.outputs.total-stale-packages }}"
+          echo "Undocumented exports: ${{ steps.drift.outputs.total-undocumented }}"
+          echo "Has drift: ${{ steps.drift.outputs.has-drift }}"

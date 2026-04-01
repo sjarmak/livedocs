@@ -50,17 +50,20 @@ func TestHelpContainsSubcommands(t *testing.T) {
 	}
 }
 
-func TestStubCommands(t *testing.T) {
-	for _, name := range []string{"init"} {
-		buf := new(bytes.Buffer)
-		rootCmd.SetOut(buf)
-		rootCmd.SetArgs([]string{name})
-		if err := rootCmd.Execute(); err != nil {
-			t.Fatalf("%s command failed: %v", name, err)
-		}
-		if !strings.Contains(buf.String(), "not yet implemented") {
-			t.Errorf("%s: expected stub message, got: %q", name, buf.String())
-		}
+func TestInitCommand(t *testing.T) {
+	dir := t.TempDir()
+	buf := new(bytes.Buffer)
+	rootCmd.SetOut(buf)
+	rootCmd.SetArgs([]string{"init", dir})
+	if err := rootCmd.Execute(); err != nil {
+		t.Fatalf("init command failed: %v", err)
+	}
+	out := buf.String()
+	if !strings.Contains(out, "Created .livedocs.yaml") {
+		t.Errorf("init output missing config creation message: %q", out)
+	}
+	if !strings.Contains(out, "Summary") {
+		t.Errorf("init output missing summary: %q", out)
 	}
 }
 
