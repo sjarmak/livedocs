@@ -1,0 +1,13 @@
+name = "livedocs-badge"
+main = "worker.js"
+compatibility_date = "2024-12-01"
+
+# KV namespace — create with:
+#   wrangler kv namespace create BADGE_KV
+# Then paste the binding ID below.
+[[kv_namespaces]]
+binding = "BADGE_KV"
+id = "YOUR_KV_NAMESPACE_ID"
+
+# Set the API token as a secret:
+#   wrangler secret put BADGE_API_TOKEN

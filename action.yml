@@ -27,6 +27,14 @@ inputs:
     description: "GitHub token for downloading release assets. Defaults to the workflow token."
     required: false
     default: ${{ github.token }}
+  badge-api-url:
+    description: "Badge endpoint URL (e.g., https://livedocs-badge.example.workers.dev). If set, drift results are POSTed to update the badge."
+    required: false
+    default: ""
+  badge-api-token:
+    description: "Bearer token for authenticating with the badge API."
+    required: false
+    default: ""
 
 outputs:
   drift-score:
@@ -188,3 +196,26 @@ runs:
         path: ${{ runner.temp }}/livedocs/drift-report.json
         retention-days: 30
         if-no-files-found: ignore
+
+    - name: Update badge
+      if: inputs.badge-api-url != ''
+      shell: bash
+      env:
+        BADGE_API_URL: ${{ inputs.badge-api-url }}
+        BADGE_API_TOKEN: ${{ inputs.badge-api-token }}
+        OWNER: ${{ github.repository_owner }}
+        REPO: ${{ github.event.repository.name }}
+        TOTAL_STALE: ${{ steps.check.outputs.total-stale }}
+        DRIFT_SCORE: ${{ steps.check.outputs.drift-score }}
+      run: |
+        PAYLOAD=$(jq -n \
+          --argjson total_stale "${TOTAL_STALE:-0}" \
+          --argjson drift_score "${DRIFT_SCORE:-0}" \
+          --arg timestamp "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+          '{"total_stale": $total_stale, "drift_score": $drift_score, "timestamp": $timestamp}')
+        curl -sf -X POST \
+          "${BADGE_API_URL}/badge/${OWNER}/${REPO}" \
+          -H "Authorization: Bearer ${BADGE_API_TOKEN}" \
+          -H "Content-Type: application/json" \
+          -d "$PAYLOAD" \
+          || echo "::warning::Failed to update badge (non-fatal)"

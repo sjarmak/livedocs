@@ -7,7 +7,7 @@ import (
 )
 
 func TestSubcommandsRegistered(t *testing.T) {
-	want := []string{"check", "init", "mcp", "version"}
+	want := []string{"check", "init", "mcp", "verify", "version"}
 	registered := make(map[string]bool)
 	for _, cmd := range rootCmd.Commands() {
 		registered[cmd.Name()] = true
@@ -43,7 +43,7 @@ func TestHelpContainsSubcommands(t *testing.T) {
 		t.Fatalf("help failed: %v", err)
 	}
 	out := buf.String()
-	for _, sub := range []string{"check", "init", "mcp", "version"} {
+	for _, sub := range []string{"check", "init", "mcp", "verify", "version"} {
 		if !strings.Contains(out, sub) {
 			t.Errorf("help output missing subcommand %q", sub)
 		}

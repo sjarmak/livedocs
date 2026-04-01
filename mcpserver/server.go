@@ -25,12 +25,15 @@ import (
 type Config struct {
 	// DBPath is the path to the claims SQLite database.
 	DBPath string
+	// Telemetry enables opt-in anonymous telemetry collection.
+	Telemetry bool
 }
 
 // Server wraps the MCP server and its dependencies.
 type Server struct {
 	mcpServer *server.MCPServer
 	claimsDB  *db.ClaimsDB
+	telemetry *Collector
 }
 
 // New creates a new MCP server with the given configuration.
@@ -40,7 +43,11 @@ func New(cfg Config) (*Server, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open claims db: %w", err)
 	}
-	return NewWithDB(claimsDB), nil
+	s := NewWithDB(claimsDB)
+	s.telemetry = NewCollector(CollectorConfig{
+		Enabled: cfg.Telemetry,
+	})
+	return s, nil
 }
 
 // NewWithDB creates a new MCP server using an existing ClaimsDB.
@@ -58,11 +65,22 @@ func (s *Server) buildMCPServer() *server.MCPServer {
 		server.WithToolCapabilities(false),
 		server.WithRecovery(),
 	)
-	srv.AddTool(queryClaimsTool(), s.handleQueryClaims)
-	srv.AddTool(checkDriftTool(), s.handleCheckDrift)
-	srv.AddTool(verifySectionTool(), s.handleVerifySection)
-	srv.AddTool(checkAIContextTool(), handleCheckAIContext)
+	srv.AddTool(queryClaimsTool(), s.withTelemetry("query_claims", s.handleQueryClaims))
+	srv.AddTool(checkDriftTool(), s.withTelemetry("check_drift", s.handleCheckDrift))
+	srv.AddTool(verifySectionTool(), s.withTelemetry("verify_section", s.handleVerifySection))
+	srv.AddTool(checkAIContextTool(), s.withTelemetry("check_ai_context", handleCheckAIContext))
 	return srv
+}
+
+// withTelemetry wraps a tool handler to record telemetry when enabled.
+func (s *Server) withTelemetry(name string, handler server.ToolHandlerFunc) server.ToolHandlerFunc {
+	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		if s.telemetry != nil {
+			repoPath := req.GetString("path", req.GetString("file_path", ""))
+			s.telemetry.Record(name, repoPath)
+		}
+		return handler(ctx, req)
+	}
 }
 
 // MCPServer returns the underlying MCP server for use with transports.
@@ -70,8 +88,11 @@ func (s *Server) MCPServer() *server.MCPServer {
 	return s.mcpServer
 }
 
-// Close releases server resources.
+// Close releases server resources, flushing any pending telemetry.
 func (s *Server) Close() error {
+	if s.telemetry != nil {
+		_ = s.telemetry.Flush()
+	}
 	if s.claimsDB != nil {
 		return s.claimsDB.Close()
 	}
@@ -87,44 +108,62 @@ func (s *Server) Serve() error {
 
 func queryClaimsTool() mcp.Tool {
 	return mcp.NewTool("query_claims",
-		mcp.WithDescription("Search documentation claims by symbol name and optional predicate. Returns claims from the livedocs claims database."),
+		mcp.WithDescription(`Search documentation claims by symbol name and optional predicate.
+
+Returns structured claims from the livedocs claims database, grouped by symbol.
+Each claim includes its predicate (relationship type), source location, confidence score, and tier.
+
+Example response:
+{"symbols":[{"symbol":{"id":1,"repo":"myrepo","import_path":"pkg/server","name":"NewServer","kind":"function","language":"go"},"claims":[{"id":1,"predicate":"defines","object_text":"creates a new server instance","source_file":"server.go","source_line":42,"confidence":1.0,"tier":"structural"}]}],"total_claims":1}`),
 		mcp.WithString("symbol",
 			mcp.Required(),
-			mcp.Description("Symbol name to search for. Supports SQL LIKE wildcards (% for any chars)."),
+			mcp.Description("Symbol name to search for. Use exact names like 'NewServer' or SQL LIKE wildcards: 'New%' matches NewServer, NewClient, etc. Use '%Handler%' to find all handler symbols."),
 		),
 		mcp.WithString("predicate",
-			mcp.Description("Optional predicate filter (e.g. 'defines', 'imports', 'has_doc', 'purpose'). If omitted, returns all claims for matching symbols."),
+			mcp.Description("Filter by claim predicate. Common predicates: 'defines' (structural definition), 'has_doc' (documentation comment), 'imports' (import relationship), 'purpose' (semantic purpose). Omit to return all claims for matching symbols."),
 		),
 	)
 }
 
 func checkDriftTool() mcp.Tool {
 	return mcp.NewTool("check_drift",
-		mcp.WithDescription("Detect documentation drift for a file by comparing README symbol references against code exports."),
+		mcp.WithDescription(`Detect documentation drift by comparing symbol references in a README against actual code exports.
+
+Finds symbols mentioned in documentation that no longer exist in code (stale references)
+and exported symbols in code that are not mentioned in documentation (undocumented).
+
+Example response:
+{"file_path":"pkg/server/README.md","has_drift":true,"stale_count":1,"undocumented_count":2,"stale_package_count":0,"findings":[{"kind":"stale_symbol","symbol":"OldHandler","detail":"referenced in README but not found in code"}]}`),
 		mcp.WithString("file_path",
 			mcp.Required(),
-			mcp.Description("Path to a README/markdown file to check for drift."),
+			mcp.Description("Absolute or relative path to a README or markdown file to check for drift. Example: 'pkg/server/README.md'."),
 		),
 		mcp.WithString("code_dir",
-			mcp.Description("Optional code directory to compare against. Defaults to the file's directory."),
+			mcp.Description("Code directory to compare against. Defaults to the directory containing file_path. Use when docs and code are in different directories."),
 		),
 	)
 }
 
 func verifySectionTool() mcp.Tool {
 	return mcp.NewTool("verify_section",
-		mcp.WithDescription("Check if claims anchored to a specific file and line range are still valid."),
+		mcp.WithDescription(`Verify whether documentation claims anchored to a specific file and line range are still valid.
+
+Returns each claim's status: verified (still accurate), stale (code changed), or invalid (anchor lost).
+Use this after editing code to check if nearby documentation needs updating.
+
+Example response:
+{"file_path":"server.go","start_line":40,"end_line":50,"total_anchors":2,"verified":1,"stale":1,"invalid":0,"claims":[{"claim_id":1,"predicate":"defines","object_text":"creates a new server","source_line":42,"status":"verified"}]}`),
 		mcp.WithString("file_path",
 			mcp.Required(),
-			mcp.Description("Source file path whose claims to verify."),
+			mcp.Description("Source file path whose claims to verify. Must match the path used during claim extraction (e.g. 'server.go' or 'pkg/server/server.go')."),
 		),
 		mcp.WithNumber("start_line",
 			mcp.Required(),
-			mcp.Description("Start line of the range to check."),
+			mcp.Description("First line number of the range to check (1-based, inclusive)."),
 		),
 		mcp.WithNumber("end_line",
 			mcp.Required(),
-			mcp.Description("End line of the range to check."),
+			mcp.Description("Last line number of the range to check (1-based, inclusive). Must be >= start_line."),
 		),
 	)
 }
@@ -174,7 +213,7 @@ func (s *Server) handleQueryClaims(_ context.Context, req mcp.CallToolRequest) (
 	}
 
 	if len(symbols) == 0 {
-		return mcp.NewToolResultText(fmt.Sprintf("No symbols found matching %q", symbol)), nil
+		return mcp.NewToolResultText(fmt.Sprintf("No symbols found matching %q. Try a broader wildcard pattern like '%%%s%%' or check that claims have been extracted for this repository.", symbol, symbol)), nil
 	}
 
 	result := queryClaimsResult{}
@@ -219,7 +258,7 @@ func (s *Server) handleQueryClaims(_ context.Context, req mcp.CallToolRequest) (
 	if result.Total == 0 {
 		msg := fmt.Sprintf("Found %d symbol(s) matching %q but no claims", len(symbols), symbol)
 		if predicate != "" {
-			msg += fmt.Sprintf(" with predicate %q", predicate)
+			msg += fmt.Sprintf(" with predicate %q. Available predicates: defines, has_doc, imports, purpose", predicate)
 		}
 		return mcp.NewToolResultText(msg), nil
 	}
@@ -317,10 +356,10 @@ func (s *Server) handleVerifySection(_ context.Context, req mcp.CallToolRequest)
 	}
 
 	if startLine < 0 || endLine < 0 {
-		return mcp.NewToolResultError("start_line and end_line must be non-negative"), nil
+		return mcp.NewToolResultError("start_line and end_line must be non-negative (1-based line numbers)"), nil
 	}
 	if startLine > endLine && endLine != 0 {
-		return mcp.NewToolResultError("start_line must be <= end_line"), nil
+		return mcp.NewToolResultError(fmt.Sprintf("start_line (%d) must be <= end_line (%d)", startLine, endLine)), nil
 	}
 
 	claims, err := s.claimsDB.GetClaimsByFileAndLineRange(filePath, startLine, endLine)
@@ -329,7 +368,7 @@ func (s *Server) handleVerifySection(_ context.Context, req mcp.CallToolRequest)
 	}
 
 	if len(claims) == 0 {
-		return mcp.NewToolResultText(fmt.Sprintf("No claims found for %s lines %d-%d", filePath, startLine, endLine)), nil
+		return mcp.NewToolResultText(fmt.Sprintf("No claims found for %s lines %d-%d. Ensure claims have been extracted for this file and that the path matches exactly.", filePath, startLine, endLine)), nil
 	}
 
 	// Build anchor index from the claims and check which overlap with the range.
@@ -385,10 +424,16 @@ func (s *Server) handleVerifySection(_ context.Context, req mcp.CallToolRequest)
 
 func checkAIContextTool() mcp.Tool {
 	return mcp.NewTool("check_ai_context",
-		mcp.WithDescription("Verify AI context files (CLAUDE.md, AGENTS.md, .cursorrules, etc.) for stale file paths, broken package references, and outdated claims."),
+		mcp.WithDescription(`Verify AI context files (CLAUDE.md, AGENTS.md, .cursorrules, .cursor/rules, etc.) for stale references.
+
+Scans for file paths that no longer exist, broken package references, and outdated claims
+in AI assistant instruction files. Helps keep AI context accurate as code evolves.
+
+Example response:
+{"path":"/repo","files":["CLAUDE.md"],"total_claims":5,"valid_count":4,"stale_count":1,"has_drift":true,"findings":[{"kind":"file_path","value":"src/old.go","source_file":"CLAUDE.md","line":12,"status":"stale","detail":"file does not exist"}]}`),
 		mcp.WithString("path",
 			mcp.Required(),
-			mcp.Description("Repository root path to scan for AI context files."),
+			mcp.Description("Repository root path to scan. AI context files are discovered automatically (CLAUDE.md, AGENTS.md, .cursorrules, .cursor/rules/, etc.)."),
 		),
 	)
 }

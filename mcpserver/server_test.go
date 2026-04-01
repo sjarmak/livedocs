@@ -5,12 +5,15 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/mark3labs/mcp-go/mcp"
 
 	"github.com/live-docs/live_docs/db"
 )
+
+func hasSubstr(s, substr string) bool { return strings.Contains(s, substr) }
 
 // setupTestDB creates a temporary SQLite database with schema and test data.
 func setupTestDB(t *testing.T) *db.ClaimsDB {
@@ -109,6 +112,69 @@ func makeRequest(args map[string]any) mcp.CallToolRequest {
 		Params: mcp.CallToolParams{
 			Arguments: args,
 		},
+	}
+}
+
+// --- Tool schema quality tests ---
+
+func TestToolSchemas_HaveDescriptions(t *testing.T) {
+	tools := []struct {
+		name string
+		tool mcp.Tool
+	}{
+		{"query_claims", queryClaimsTool()},
+		{"check_drift", checkDriftTool()},
+		{"verify_section", verifySectionTool()},
+		{"check_ai_context", checkAIContextTool()},
+	}
+
+	for _, tt := range tools {
+		t.Run(tt.name, func(t *testing.T) {
+			if tt.tool.Description == "" {
+				t.Errorf("tool %s has no description", tt.name)
+			}
+			if len(tt.tool.Description) < 50 {
+				t.Errorf("tool %s description too short (%d chars), expected detailed description with examples", tt.name, len(tt.tool.Description))
+			}
+		})
+	}
+}
+
+func TestToolSchemas_ParameterDescriptions(t *testing.T) {
+	tools := []struct {
+		name   string
+		tool   mcp.Tool
+		params []string
+	}{
+		{"query_claims", queryClaimsTool(), []string{"symbol", "predicate"}},
+		{"check_drift", checkDriftTool(), []string{"file_path", "code_dir"}},
+		{"verify_section", verifySectionTool(), []string{"file_path", "start_line", "end_line"}},
+		{"check_ai_context", checkAIContextTool(), []string{"path"}},
+	}
+
+	for _, tt := range tools {
+		t.Run(tt.name, func(t *testing.T) {
+			props := tt.tool.InputSchema.Properties
+			if props == nil {
+				t.Fatalf("tool %s: InputSchema.Properties is nil", tt.name)
+			}
+			for _, param := range tt.params {
+				prop, ok := props[param]
+				if !ok {
+					t.Errorf("tool %s: missing parameter %q in schema", tt.name, param)
+					continue
+				}
+				propMap, ok := prop.(map[string]interface{})
+				if !ok {
+					t.Errorf("tool %s: parameter %q is not a map", tt.name, param)
+					continue
+				}
+				desc, ok := propMap["description"]
+				if !ok || desc == "" {
+					t.Errorf("tool %s: parameter %q has no description", tt.name, param)
+				}
+			}
+		})
 	}
 }
 
@@ -245,7 +311,7 @@ func TestQueryClaims_NoResults(t *testing.T) {
 	}
 
 	text := result.Content[0].(mcp.TextContent).Text
-	if text != `No symbols found matching "NonExistent"` {
+	if !hasSubstr(text, `No symbols found matching "NonExistent"`) {
 		t.Errorf("unexpected text: %s", text)
 	}
 }
@@ -385,7 +451,7 @@ func TestVerifySection_NoClaims(t *testing.T) {
 	}
 
 	text := result.Content[0].(mcp.TextContent).Text
-	if text != "No claims found for nonexistent.go lines 1-10" {
+	if !hasSubstr(text, "No claims found for nonexistent.go lines 1-10") {
 		t.Errorf("unexpected text: %s", text)
 	}
 }

@@ -15,5 +15,6 @@ func init() {
 	rootCmd.AddCommand(initCmd)
 	rootCmd.AddCommand(mcpCmd)
 	rootCmd.AddCommand(prbotCmd)
+	rootCmd.AddCommand(verifyCmd)
 	rootCmd.AddCommand(versionCmd)
 }
