@@ -13,6 +13,7 @@ func init() {
 	rootCmd.AddCommand(checkCmd)
 	rootCmd.AddCommand(diffCmd)
 	rootCmd.AddCommand(exportCmd)
+	rootCmd.AddCommand(extractCmd)
 	rootCmd.AddCommand(initCmd)
 	rootCmd.AddCommand(mcpCmd)
 	rootCmd.AddCommand(prbotCmd)
