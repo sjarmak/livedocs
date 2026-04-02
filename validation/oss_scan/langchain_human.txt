@@ -1,0 +1,16 @@
+AI Context Verification Report
+==============================
+
+[FAIL] AGENTS.md — 89% accurate (16/18 claims)
+       line 32: file_path `langchain-ai/langchain-google`
+               path not found: "langchain-ai/langchain-google" (checked relative to /tmp/oss_scan/langchain)
+       line 32: file_path `langchain-ai/langchain-aws`
+               path not found: "langchain-ai/langchain-aws" (checked relative to /tmp/oss_scan/langchain)
+[FAIL] CLAUDE.md — 89% accurate (16/18 claims)
+       line 32: file_path `langchain-ai/langchain-google`
+               path not found: "langchain-ai/langchain-google" (checked relative to /tmp/oss_scan/langchain)
+       line 32: file_path `langchain-ai/langchain-aws`
+               path not found: "langchain-ai/langchain-aws" (checked relative to /tmp/oss_scan/langchain)
+
+livedocs verify: 89% accurate (32/36 claims valid across 2 file(s)) — fail
+Error: verification failed: 4 stale reference(s) found

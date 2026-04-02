@@ -1,0 +1,6 @@
+AI Context Verification Report
+==============================
+
+[PASS] CLAUDE.md — 100% accurate (0/0 claims)
+
+livedocs verify: 1 file(s), 0 claims — nothing to check

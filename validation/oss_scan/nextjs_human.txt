@@ -1,0 +1,84 @@
+AI Context Verification Report
+==============================
+
+[FAIL] AGENTS.md — 61% accurate (30/49 claims)
+       line 30: file_path `src/cli/next-dev.ts`
+               path not found: "src/cli/next-dev.ts" (checked relative to /tmp/oss_scan/next.js)
+       line 30: file_path `src/server/dev/next-dev-server.ts`
+               path not found: "src/server/dev/next-dev-server.ts" (checked relative to /tmp/oss_scan/next.js)
+       line 31: file_path `src/cli/next-start.ts`
+               path not found: "src/cli/next-start.ts" (checked relative to /tmp/oss_scan/next.js)
+       line 31: file_path `src/server/next-server.ts`
+               path not found: "src/server/next-server.ts" (checked relative to /tmp/oss_scan/next.js)
+       line 32: file_path `src/cli/next-build.ts`
+               path not found: "src/cli/next-build.ts" (checked relative to /tmp/oss_scan/next.js)
+       line 32: file_path `src/build/index.ts`
+               path not found: "src/build/index.ts" (checked relative to /tmp/oss_scan/next.js)
+       line 34: file_path `packages/next/dist/`
+               path not found: "packages/next/dist/" (checked relative to /tmp/oss_scan/next.js)
+       line 41: file_path `next/font`
+               path not found: "next/font" (checked relative to /tmp/oss_scan/next.js)
+       line 46: file_path `packages/*`
+               path not found: "packages/*" (checked relative to /tmp/oss_scan/next.js)
+       line 46: file_path `crates/*`
+               path not found: "crates/*" (checked relative to /tmp/oss_scan/next.js)
+       line 50: file_path `turbopack/README.md`
+               path not found: "turbopack/README.md" (checked relative to /tmp/oss_scan/next.js)
+       line 51: file_path `turbopack/crates/README.md`
+               path not found: "turbopack/crates/README.md" (checked relative to /tmp/oss_scan/next.js)
+       line 241: file_path `scripts/pr-status/`
+               path not found: "scripts/pr-status/" (checked relative to /tmp/oss_scan/next.js)
+       line 373: file_path `packages/next/**`
+               path not found: "packages/next/**" (checked relative to /tmp/oss_scan/next.js)
+       line 394: file_path `export/worker.ts`
+               path not found: "export/worker.ts" (checked relative to /tmp/oss_scan/next.js)
+       line 396: file_path `if/else`
+               path not found: "if/else" (checked relative to /tmp/oss_scan/next.js)
+       line 398: file_path `react-server-dom-webpack/*`
+               path not found: "react-server-dom-webpack/*" (checked relative to /tmp/oss_scan/next.js)
+       line 406: file_path `react-dom/server.edge`
+               path not found: "react-dom/server.edge" (checked relative to /tmp/oss_scan/next.js)
+       line 425: file_path `packages/next-swc/native/*.node`
+               path not found: "packages/next-swc/native/*.node" (checked relative to /tmp/oss_scan/next.js)
+[FAIL] CLAUDE.md — 61% accurate (30/49 claims)
+       line 30: file_path `src/cli/next-dev.ts`
+               path not found: "src/cli/next-dev.ts" (checked relative to /tmp/oss_scan/next.js)
+       line 30: file_path `src/server/dev/next-dev-server.ts`
+               path not found: "src/server/dev/next-dev-server.ts" (checked relative to /tmp/oss_scan/next.js)
+       line 31: file_path `src/cli/next-start.ts`
+               path not found: "src/cli/next-start.ts" (checked relative to /tmp/oss_scan/next.js)
+       line 31: file_path `src/server/next-server.ts`
+               path not found: "src/server/next-server.ts" (checked relative to /tmp/oss_scan/next.js)
+       line 32: file_path `src/cli/next-build.ts`
+               path not found: "src/cli/next-build.ts" (checked relative to /tmp/oss_scan/next.js)
+       line 32: file_path `src/build/index.ts`
+               path not found: "src/build/index.ts" (checked relative to /tmp/oss_scan/next.js)
+       line 34: file_path `packages/next/dist/`
+               path not found: "packages/next/dist/" (checked relative to /tmp/oss_scan/next.js)
+       line 41: file_path `next/font`
+               path not found: "next/font" (checked relative to /tmp/oss_scan/next.js)
+       line 46: file_path `packages/*`
+               path not found: "packages/*" (checked relative to /tmp/oss_scan/next.js)
+       line 46: file_path `crates/*`
+               path not found: "crates/*" (checked relative to /tmp/oss_scan/next.js)
+       line 50: file_path `turbopack/README.md`
+               path not found: "turbopack/README.md" (checked relative to /tmp/oss_scan/next.js)
+       line 51: file_path `turbopack/crates/README.md`
+               path not found: "turbopack/crates/README.md" (checked relative to /tmp/oss_scan/next.js)
+       line 241: file_path `scripts/pr-status/`
+               path not found: "scripts/pr-status/" (checked relative to /tmp/oss_scan/next.js)
+       line 373: file_path `packages/next/**`
+               path not found: "packages/next/**" (checked relative to /tmp/oss_scan/next.js)
+       line 394: file_path `export/worker.ts`
+               path not found: "export/worker.ts" (checked relative to /tmp/oss_scan/next.js)
+       line 396: file_path `if/else`
+               path not found: "if/else" (checked relative to /tmp/oss_scan/next.js)
+       line 398: file_path `react-server-dom-webpack/*`
+               path not found: "react-server-dom-webpack/*" (checked relative to /tmp/oss_scan/next.js)
+       line 406: file_path `react-dom/server.edge`
+               path not found: "react-dom/server.edge" (checked relative to /tmp/oss_scan/next.js)
+       line 425: file_path `packages/next-swc/native/*.node`
+               path not found: "packages/next-swc/native/*.node" (checked relative to /tmp/oss_scan/next.js)
+
+livedocs verify: 61% accurate (60/98 claims valid across 2 file(s)) — fail
+Error: verification failed: 38 stale reference(s) found

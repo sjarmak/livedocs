@@ -1,0 +1,77 @@
+{
+  "root": "/tmp/oss_scan/next.js",
+  "files": [
+    {
+      "path": "AGENTS.md",
+      "claims": 43,
+      "valid": 39,
+      "stale": 4,
+      "accuracy_percent": 90.69767441860465,
+      "stale_refs": [
+        {
+          "line": 34,
+          "kind": "file_path",
+          "value": "packages/next/dist/",
+          "detail": "path not found: \"packages/next/dist/\" (checked relative to /tmp/oss_scan/next.js)"
+        },
+        {
+          "line": 51,
+          "kind": "file_path",
+          "value": "turbopack/crates/README.md",
+          "detail": "path not found: \"turbopack/crates/README.md\" (checked relative to /tmp/oss_scan/next.js)"
+        },
+        {
+          "line": 241,
+          "kind": "file_path",
+          "value": "scripts/pr-status/",
+          "detail": "path not found: \"scripts/pr-status/\" (checked relative to /tmp/oss_scan/next.js)"
+        },
+        {
+          "line": 406,
+          "kind": "file_path",
+          "value": "react-dom/server.edge",
+          "detail": "path not found: \"react-dom/server.edge\" (checked relative to /tmp/oss_scan/next.js)"
+        }
+      ]
+    },
+    {
+      "path": "CLAUDE.md",
+      "claims": 43,
+      "valid": 39,
+      "stale": 4,
+      "accuracy_percent": 90.69767441860465,
+      "stale_refs": [
+        {
+          "line": 34,
+          "kind": "file_path",
+          "value": "packages/next/dist/",
+          "detail": "path not found: \"packages/next/dist/\" (checked relative to /tmp/oss_scan/next.js)"
+        },
+        {
+          "line": 51,
+          "kind": "file_path",
+          "value": "turbopack/crates/README.md",
+          "detail": "path not found: \"turbopack/crates/README.md\" (checked relative to /tmp/oss_scan/next.js)"
+        },
+        {
+          "line": 241,
+          "kind": "file_path",
+          "value": "scripts/pr-status/",
+          "detail": "path not found: \"scripts/pr-status/\" (checked relative to /tmp/oss_scan/next.js)"
+        },
+        {
+          "line": 406,
+          "kind": "file_path",
+          "value": "react-dom/server.edge",
+          "detail": "path not found: \"react-dom/server.edge\" (checked relative to /tmp/oss_scan/next.js)"
+        }
+      ]
+    }
+  ],
+  "total_claims": 86,
+  "valid_count": 78,
+  "stale_count": 8,
+  "accuracy_percent": 90.69767441860465,
+  "verdict": "fail"
+}
+Error: verification failed: 8 stale reference(s) found

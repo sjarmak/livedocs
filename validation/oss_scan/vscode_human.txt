@@ -1,0 +1,18 @@
+AI Context Verification Report
+==============================
+
+[FAIL] .github/copilot-instructions.md — 93% accurate (14/15 claims)
+       line 95: file_path `vs/nls`
+               path not found: "vs/nls" (checked relative to /tmp/oss_scan/vscode)
+[PASS] AGENTS.md — 100% accurate (0/0 claims)
+[FAIL] src/vs/platform/agentHost/common/state/AGENTS.md — 0% accurate (0/2 claims)
+       line 7: file_path `versions/v1.ts`
+               path not found: "versions/v1.ts" (checked relative to /tmp/oss_scan/vscode)
+       line 7: file_path `versions/versionRegistry.ts`
+               path not found: "versions/versionRegistry.ts" (checked relative to /tmp/oss_scan/vscode)
+[FAIL] src/vs/workbench/contrib/imageCarousel/AGENTS.md — 67% accurate (2/3 claims)
+       line 39: file_path `vs/base/browser/dom`
+               path not found: "vs/base/browser/dom" (checked relative to /tmp/oss_scan/vscode)
+
+livedocs verify: 80% accurate (16/20 claims valid across 4 file(s)) — fail
+Error: verification failed: 4 stale reference(s) found

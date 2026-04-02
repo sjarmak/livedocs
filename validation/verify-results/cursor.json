@@ -1,0 +1,9 @@
+{
+  "root": "/tmp/livedocs-verify-targets/cursor",
+  "files": [],
+  "total_claims": 0,
+  "valid_count": 0,
+  "stale_count": 0,
+  "accuracy_percent": 0,
+  "verdict": "no files found"
+}

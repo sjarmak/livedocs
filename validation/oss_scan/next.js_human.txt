@@ -1,0 +1,24 @@
+AI Context Verification Report
+==============================
+
+[FAIL] AGENTS.md — 91% accurate (39/43 claims)
+       line 34: file_path `packages/next/dist/`
+               path not found: "packages/next/dist/" (checked relative to /tmp/oss_scan/next.js)
+       line 51: file_path `turbopack/crates/README.md`
+               path not found: "turbopack/crates/README.md" (checked relative to /tmp/oss_scan/next.js)
+       line 241: file_path `scripts/pr-status/`
+               path not found: "scripts/pr-status/" (checked relative to /tmp/oss_scan/next.js)
+       line 406: file_path `react-dom/server.edge`
+               path not found: "react-dom/server.edge" (checked relative to /tmp/oss_scan/next.js)
+[FAIL] CLAUDE.md — 91% accurate (39/43 claims)
+       line 34: file_path `packages/next/dist/`
+               path not found: "packages/next/dist/" (checked relative to /tmp/oss_scan/next.js)
+       line 51: file_path `turbopack/crates/README.md`
+               path not found: "turbopack/crates/README.md" (checked relative to /tmp/oss_scan/next.js)
+       line 241: file_path `scripts/pr-status/`
+               path not found: "scripts/pr-status/" (checked relative to /tmp/oss_scan/next.js)
+       line 406: file_path `react-dom/server.edge`
+               path not found: "react-dom/server.edge" (checked relative to /tmp/oss_scan/next.js)
+
+livedocs verify: 91% accurate (78/86 claims valid across 2 file(s)) — fail
+Error: verification failed: 8 stale reference(s) found

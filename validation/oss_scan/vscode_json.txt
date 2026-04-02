@@ -1,0 +1,69 @@
+{
+  "root": "/tmp/oss_scan/vscode",
+  "files": [
+    {
+      "path": ".github/copilot-instructions.md",
+      "claims": 15,
+      "valid": 14,
+      "stale": 1,
+      "accuracy_percent": 93.33333333333333,
+      "stale_refs": [
+        {
+          "line": 95,
+          "kind": "file_path",
+          "value": "vs/nls",
+          "detail": "path not found: \"vs/nls\" (checked relative to /tmp/oss_scan/vscode)"
+        }
+      ]
+    },
+    {
+      "path": "AGENTS.md",
+      "claims": 0,
+      "valid": 0,
+      "stale": 0,
+      "accuracy_percent": 100
+    },
+    {
+      "path": "src/vs/platform/agentHost/common/state/AGENTS.md",
+      "claims": 2,
+      "valid": 0,
+      "stale": 2,
+      "accuracy_percent": 0,
+      "stale_refs": [
+        {
+          "line": 7,
+          "kind": "file_path",
+          "value": "versions/v1.ts",
+          "detail": "path not found: \"versions/v1.ts\" (checked relative to /tmp/oss_scan/vscode)"
+        },
+        {
+          "line": 7,
+          "kind": "file_path",
+          "value": "versions/versionRegistry.ts",
+          "detail": "path not found: \"versions/versionRegistry.ts\" (checked relative to /tmp/oss_scan/vscode)"
+        }
+      ]
+    },
+    {
+      "path": "src/vs/workbench/contrib/imageCarousel/AGENTS.md",
+      "claims": 3,
+      "valid": 2,
+      "stale": 1,
+      "accuracy_percent": 66.66666666666666,
+      "stale_refs": [
+        {
+          "line": 39,
+          "kind": "file_path",
+          "value": "vs/base/browser/dom",
+          "detail": "path not found: \"vs/base/browser/dom\" (checked relative to /tmp/oss_scan/vscode)"
+        }
+      ]
+    }
+  ],
+  "total_claims": 20,
+  "valid_count": 16,
+  "stale_count": 4,
+  "accuracy_percent": 80,
+  "verdict": "fail"
+}
+Error: verification failed: 4 stale reference(s) found

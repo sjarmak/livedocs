@@ -1,0 +1,38 @@
+{
+  "root": "/tmp/livedocs-verify-targets/koog",
+  "files": [
+    {
+      "path": "AGENTS.md",
+      "claims": 2,
+      "valid": 2,
+      "stale": 0,
+      "accuracy_percent": 100
+    },
+    {
+      "path": "CLAUDE.md",
+      "claims": 2,
+      "valid": 2,
+      "stale": 0,
+      "accuracy_percent": 100
+    },
+    {
+      "path": "a2a/CLAUDE.md",
+      "claims": 2,
+      "valid": 2,
+      "stale": 0,
+      "accuracy_percent": 100
+    },
+    {
+      "path": "examples/simple-examples/CLAUDE.md",
+      "claims": 1,
+      "valid": 1,
+      "stale": 0,
+      "accuracy_percent": 100
+    }
+  ],
+  "total_claims": 7,
+  "valid_count": 7,
+  "stale_count": 0,
+  "accuracy_percent": 100,
+  "verdict": "pass"
+}

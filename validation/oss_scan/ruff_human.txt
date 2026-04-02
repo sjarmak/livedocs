@@ -1,0 +1,7 @@
+AI Context Verification Report
+==============================
+
+[PASS] AGENTS.md — 100% accurate (1/1 claims)
+[PASS] CLAUDE.md — 100% accurate (0/0 claims)
+
+livedocs verify: 100% accurate (1/1 claims valid across 2 file(s)) — pass

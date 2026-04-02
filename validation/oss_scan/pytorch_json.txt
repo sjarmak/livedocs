@@ -1,0 +1,61 @@
+{
+  "root": "/tmp/oss_scan/pytorch",
+  "files": [
+    {
+      "path": ".github/copilot-instructions.md",
+      "claims": 8,
+      "valid": 7,
+      "stale": 1,
+      "accuracy_percent": 87.5,
+      "stale_refs": [
+        {
+          "line": 25,
+          "kind": "file_path",
+          "value": "build/aten/src/ATen/",
+          "detail": "path not found: \"build/aten/src/ATen/\" (checked relative to /tmp/oss_scan/pytorch)"
+        }
+      ]
+    },
+    {
+      "path": "AGENTS.md",
+      "claims": 1,
+      "valid": 1,
+      "stale": 0,
+      "accuracy_percent": 100
+    },
+    {
+      "path": "CLAUDE.md",
+      "claims": 0,
+      "valid": 0,
+      "stale": 0,
+      "accuracy_percent": 100
+    },
+    {
+      "path": "torch/_dynamo/CLAUDE.md",
+      "claims": 5,
+      "valid": 3,
+      "stale": 2,
+      "accuracy_percent": 60,
+      "stale_refs": [
+        {
+          "line": 77,
+          "kind": "file_path",
+          "value": "ValueMutationNew/Existing",
+          "detail": "path not found: \"ValueMutationNew/Existing\" (checked relative to /tmp/oss_scan/pytorch)"
+        },
+        {
+          "line": 78,
+          "kind": "file_path",
+          "value": "AttributeMutationNew/Existing",
+          "detail": "path not found: \"AttributeMutationNew/Existing\" (checked relative to /tmp/oss_scan/pytorch)"
+        }
+      ]
+    }
+  ],
+  "total_claims": 14,
+  "valid_count": 11,
+  "stale_count": 3,
+  "accuracy_percent": 78.57142857142857,
+  "verdict": "fail"
+}
+Error: verification failed: 3 stale reference(s) found

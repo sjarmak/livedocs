@@ -1,0 +1,24 @@
+AI Context Verification Report
+==============================
+
+[PASS] AGENTS.md — 100% accurate (0/0 claims)
+[PASS] CLAUDE.md — 100% accurate (0/0 claims)
+[PASS] analysis/AGENTS.md — 100% accurate (6/6 claims)
+[PASS] analysis/CLAUDE.md — 100% accurate (0/0 claims)
+[PASS] analysis/test-data-manager/AGENTS.md — 100% accurate (0/0 claims)
+[PASS] analysis/test-data-manager/CLAUDE.md — 100% accurate (0/0 claims)
+[PASS] compiler/AGENTS.md — 100% accurate (7/7 claims)
+[PASS] compiler/CLAUDE.md — 100% accurate (0/0 claims)
+[PASS] compiler/fir/analysis-tests/AGENTS.md — 100% accurate (2/2 claims)
+[FAIL] compiler/psi/AGENTS.md — 75% accurate (3/4 claims)
+       line 126: file_path `compiler/testData/psi/`
+               path not found: "compiler/testData/psi/" (checked relative to /tmp/livedocs-verify-targets/kotlin)
+[PASS] compiler/psi/CLAUDE.md — 100% accurate (0/0 claims)
+[PASS] libraries/tools/kotlin-gradle-plugin-api/AGENTS.md — 100% accurate (0/0 claims)
+[PASS] libraries/tools/kotlin-gradle-plugin-api/CLAUDE.md — 100% accurate (0/0 claims)
+[PASS] libraries/tools/kotlin-gradle-plugin-integration-tests/AGENTS.md — 100% accurate (6/6 claims)
+[PASS] libraries/tools/kotlin-gradle-plugin-integration-tests/CLAUDE.md — 100% accurate (0/0 claims)
+[PASS] libraries/tools/kotlin-gradle-plugin/AGENTS.md — 100% accurate (1/1 claims)
+[PASS] libraries/tools/kotlin-gradle-plugin/CLAUDE.md — 100% accurate (0/0 claims)
+
+livedocs verify: 96% accurate (25/26 claims valid across 17 file(s)) — fail

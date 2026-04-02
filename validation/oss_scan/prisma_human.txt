@@ -1,0 +1,36 @@
+AI Context Verification Report
+==============================
+
+[FAIL] AGENTS.md — 89% accurate (56/63 claims)
+       line 15: file_path `packages/client/src/__tests__/benchmarks/query-performance/compilation.bench.ts`
+               path not found: "packages/client/src/__tests__/benchmarks/query-performance/compilation.bench.ts" (checked relative to /tmp/oss_scan/prisma)
+       line 29: file_path `_utils/idForProvider`
+               path not found: "_utils/idForProvider" (checked relative to /tmp/oss_scan/prisma)
+       line 69: file_path `packages/cli/build/studio.js`
+               path not found: "packages/cli/build/studio.js" (checked relative to /tmp/oss_scan/prisma)
+       line 69: file_path `packages/cli/build/studio.css`
+               path not found: "packages/cli/build/studio.css" (checked relative to /tmp/oss_scan/prisma)
+       line 79: file_path `packages/client/runtime/client.js`
+               path not found: "packages/client/runtime/client.js" (checked relative to /tmp/oss_scan/prisma)
+       line 144: file_path `/home/user/work/prisma`
+               path not found: "/home/user/work/prisma" (checked relative to /tmp/oss_scan/prisma)
+       line 144: file_path `/home/user/work/prisma-engines`
+               path not found: "/home/user/work/prisma-engines" (checked relative to /tmp/oss_scan/prisma)
+[FAIL] CLAUDE.md — 89% accurate (56/63 claims)
+       line 15: file_path `packages/client/src/__tests__/benchmarks/query-performance/compilation.bench.ts`
+               path not found: "packages/client/src/__tests__/benchmarks/query-performance/compilation.bench.ts" (checked relative to /tmp/oss_scan/prisma)
+       line 29: file_path `_utils/idForProvider`
+               path not found: "_utils/idForProvider" (checked relative to /tmp/oss_scan/prisma)
+       line 69: file_path `packages/cli/build/studio.js`
+               path not found: "packages/cli/build/studio.js" (checked relative to /tmp/oss_scan/prisma)
+       line 69: file_path `packages/cli/build/studio.css`
+               path not found: "packages/cli/build/studio.css" (checked relative to /tmp/oss_scan/prisma)
+       line 79: file_path `packages/client/runtime/client.js`
+               path not found: "packages/client/runtime/client.js" (checked relative to /tmp/oss_scan/prisma)
+       line 144: file_path `/home/user/work/prisma`
+               path not found: "/home/user/work/prisma" (checked relative to /tmp/oss_scan/prisma)
+       line 144: file_path `/home/user/work/prisma-engines`
+               path not found: "/home/user/work/prisma-engines" (checked relative to /tmp/oss_scan/prisma)
+
+livedocs verify: 89% accurate (112/126 claims valid across 2 file(s)) — fail
+Error: verification failed: 14 stale reference(s) found

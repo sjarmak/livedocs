@@ -1,0 +1,16 @@
+AI Context Verification Report
+==============================
+
+[FAIL] .github/copilot-instructions.md — 88% accurate (7/8 claims)
+       line 25: file_path `build/aten/src/ATen/`
+               path not found: "build/aten/src/ATen/" (checked relative to /tmp/oss_scan/pytorch)
+[PASS] AGENTS.md — 100% accurate (1/1 claims)
+[PASS] CLAUDE.md — 100% accurate (0/0 claims)
+[FAIL] torch/_dynamo/CLAUDE.md — 60% accurate (3/5 claims)
+       line 77: file_path `ValueMutationNew/Existing`
+               path not found: "ValueMutationNew/Existing" (checked relative to /tmp/oss_scan/pytorch)
+       line 78: file_path `AttributeMutationNew/Existing`
+               path not found: "AttributeMutationNew/Existing" (checked relative to /tmp/oss_scan/pytorch)
+
+livedocs verify: 79% accurate (11/14 claims valid across 4 file(s)) — fail
+Error: verification failed: 3 stale reference(s) found

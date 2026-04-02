@@ -1,0 +1,47 @@
+{
+  "root": "/tmp/oss_scan/deno",
+  "files": [
+    {
+      "path": ".github/copilot-instructions.md",
+      "claims": 18,
+      "valid": 16,
+      "stale": 2,
+      "accuracy_percent": 88.88888888888889,
+      "stale_refs": [
+        {
+          "line": 127,
+          "kind": "file_path",
+          "value": "cli/tests/",
+          "detail": "path not found: \"cli/tests/\" (checked relative to /tmp/oss_scan/deno)"
+        },
+        {
+          "line": 161,
+          "kind": "file_path",
+          "value": ".github/workflows/pr.yml",
+          "detail": "path not found: \".github/workflows/pr.yml\" (checked relative to /tmp/oss_scan/deno)"
+        }
+      ]
+    },
+    {
+      "path": "CLAUDE.md",
+      "claims": 20,
+      "valid": 19,
+      "stale": 1,
+      "accuracy_percent": 95,
+      "stale_refs": [
+        {
+          "line": 161,
+          "kind": "file_path",
+          "value": "cli/tests/",
+          "detail": "path not found: \"cli/tests/\" (checked relative to /tmp/oss_scan/deno)"
+        }
+      ]
+    }
+  ],
+  "total_claims": 38,
+  "valid_count": 35,
+  "stale_count": 3,
+  "accuracy_percent": 92.10526315789474,
+  "verdict": "fail"
+}
+Error: verification failed: 3 stale reference(s) found

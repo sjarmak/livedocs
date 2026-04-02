@@ -1,0 +1,14 @@
+AI Context Verification Report
+==============================
+
+[FAIL] .github/copilot-instructions.md — 89% accurate (16/18 claims)
+       line 127: file_path `cli/tests/`
+               path not found: "cli/tests/" (checked relative to /tmp/oss_scan/deno)
+       line 161: file_path `.github/workflows/pr.yml`
+               path not found: ".github/workflows/pr.yml" (checked relative to /tmp/oss_scan/deno)
+[FAIL] CLAUDE.md — 95% accurate (19/20 claims)
+       line 161: file_path `cli/tests/`
+               path not found: "cli/tests/" (checked relative to /tmp/oss_scan/deno)
+
+livedocs verify: 92% accurate (35/38 claims valid across 2 file(s)) — fail
+Error: verification failed: 3 stale reference(s) found

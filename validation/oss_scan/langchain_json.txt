@@ -1,0 +1,53 @@
+{
+  "root": "/tmp/oss_scan/langchain",
+  "files": [
+    {
+      "path": "AGENTS.md",
+      "claims": 18,
+      "valid": 16,
+      "stale": 2,
+      "accuracy_percent": 88.88888888888889,
+      "stale_refs": [
+        {
+          "line": 32,
+          "kind": "file_path",
+          "value": "langchain-ai/langchain-google",
+          "detail": "path not found: \"langchain-ai/langchain-google\" (checked relative to /tmp/oss_scan/langchain)"
+        },
+        {
+          "line": 32,
+          "kind": "file_path",
+          "value": "langchain-ai/langchain-aws",
+          "detail": "path not found: \"langchain-ai/langchain-aws\" (checked relative to /tmp/oss_scan/langchain)"
+        }
+      ]
+    },
+    {
+      "path": "CLAUDE.md",
+      "claims": 18,
+      "valid": 16,
+      "stale": 2,
+      "accuracy_percent": 88.88888888888889,
+      "stale_refs": [
+        {
+          "line": 32,
+          "kind": "file_path",
+          "value": "langchain-ai/langchain-google",
+          "detail": "path not found: \"langchain-ai/langchain-google\" (checked relative to /tmp/oss_scan/langchain)"
+        },
+        {
+          "line": 32,
+          "kind": "file_path",
+          "value": "langchain-ai/langchain-aws",
+          "detail": "path not found: \"langchain-ai/langchain-aws\" (checked relative to /tmp/oss_scan/langchain)"
+        }
+      ]
+    }
+  ],
+  "total_claims": 36,
+  "valid_count": 32,
+  "stale_count": 4,
+  "accuracy_percent": 88.88888888888889,
+  "verdict": "fail"
+}
+Error: verification failed: 4 stale reference(s) found

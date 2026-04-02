@@ -1,0 +1,137 @@
+{
+  "root": "/tmp/livedocs-verify-targets/kotlin",
+  "files": [
+    {
+      "path": "AGENTS.md",
+      "claims": 0,
+      "valid": 0,
+      "stale": 0,
+      "accuracy_percent": 100
+    },
+    {
+      "path": "CLAUDE.md",
+      "claims": 0,
+      "valid": 0,
+      "stale": 0,
+      "accuracy_percent": 100
+    },
+    {
+      "path": "analysis/AGENTS.md",
+      "claims": 6,
+      "valid": 6,
+      "stale": 0,
+      "accuracy_percent": 100
+    },
+    {
+      "path": "analysis/CLAUDE.md",
+      "claims": 0,
+      "valid": 0,
+      "stale": 0,
+      "accuracy_percent": 100
+    },
+    {
+      "path": "analysis/test-data-manager/AGENTS.md",
+      "claims": 0,
+      "valid": 0,
+      "stale": 0,
+      "accuracy_percent": 100
+    },
+    {
+      "path": "analysis/test-data-manager/CLAUDE.md",
+      "claims": 0,
+      "valid": 0,
+      "stale": 0,
+      "accuracy_percent": 100
+    },
+    {
+      "path": "compiler/AGENTS.md",
+      "claims": 7,
+      "valid": 7,
+      "stale": 0,
+      "accuracy_percent": 100
+    },
+    {
+      "path": "compiler/CLAUDE.md",
+      "claims": 0,
+      "valid": 0,
+      "stale": 0,
+      "accuracy_percent": 100
+    },
+    {
+      "path": "compiler/fir/analysis-tests/AGENTS.md",
+      "claims": 2,
+      "valid": 2,
+      "stale": 0,
+      "accuracy_percent": 100
+    },
+    {
+      "path": "compiler/psi/AGENTS.md",
+      "claims": 4,
+      "valid": 3,
+      "stale": 1,
+      "accuracy_percent": 75,
+      "stale_refs": [
+        {
+          "line": 126,
+          "kind": "file_path",
+          "value": "compiler/testData/psi/",
+          "detail": "path not found: \"compiler/testData/psi/\" (checked relative to /tmp/livedocs-verify-targets/kotlin)"
+        }
+      ]
+    },
+    {
+      "path": "compiler/psi/CLAUDE.md",
+      "claims": 0,
+      "valid": 0,
+      "stale": 0,
+      "accuracy_percent": 100
+    },
+    {
+      "path": "libraries/tools/kotlin-gradle-plugin-api/AGENTS.md",
+      "claims": 0,
+      "valid": 0,
+      "stale": 0,
+      "accuracy_percent": 100
+    },
+    {
+      "path": "libraries/tools/kotlin-gradle-plugin-api/CLAUDE.md",
+      "claims": 0,
+      "valid": 0,
+      "stale": 0,
+      "accuracy_percent": 100
+    },
+    {
+      "path": "libraries/tools/kotlin-gradle-plugin-integration-tests/AGENTS.md",
+      "claims": 6,
+      "valid": 6,
+      "stale": 0,
+      "accuracy_percent": 100
+    },
+    {
+      "path": "libraries/tools/kotlin-gradle-plugin-integration-tests/CLAUDE.md",
+      "claims": 0,
+      "valid": 0,
+      "stale": 0,
+      "accuracy_percent": 100
+    },
+    {
+      "path": "libraries/tools/kotlin-gradle-plugin/AGENTS.md",
+      "claims": 1,
+      "valid": 1,
+      "stale": 0,
+      "accuracy_percent": 100
+    },
+    {
+      "path": "libraries/tools/kotlin-gradle-plugin/CLAUDE.md",
+      "claims": 0,
+      "valid": 0,
+      "stale": 0,
+      "accuracy_percent": 100
+    }
+  ],
+  "total_claims": 26,
+  "valid_count": 25,
+  "stale_count": 1,
+  "accuracy_percent": 96.15384615384616,
+  "verdict": "fail"
+}

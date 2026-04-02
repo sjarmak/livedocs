@@ -1,0 +1,17 @@
+{
+  "root": "/tmp/livedocs-verify-targets/Exposed",
+  "files": [
+    {
+      "path": "CLAUDE.md",
+      "claims": 11,
+      "valid": 11,
+      "stale": 0,
+      "accuracy_percent": 100
+    }
+  ],
+  "total_claims": 11,
+  "valid_count": 11,
+  "stale_count": 0,
+  "accuracy_percent": 100,
+  "verdict": "pass"
+}

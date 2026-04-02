@@ -1,0 +1,113 @@
+{
+  "root": "/tmp/oss_scan/prisma",
+  "files": [
+    {
+      "path": "AGENTS.md",
+      "claims": 63,
+      "valid": 56,
+      "stale": 7,
+      "accuracy_percent": 88.88888888888889,
+      "stale_refs": [
+        {
+          "line": 15,
+          "kind": "file_path",
+          "value": "packages/client/src/__tests__/benchmarks/query-performance/compilation.bench.ts",
+          "detail": "path not found: \"packages/client/src/__tests__/benchmarks/query-performance/compilation.bench.ts\" (checked relative to /tmp/oss_scan/prisma)"
+        },
+        {
+          "line": 29,
+          "kind": "file_path",
+          "value": "_utils/idForProvider",
+          "detail": "path not found: \"_utils/idForProvider\" (checked relative to /tmp/oss_scan/prisma)"
+        },
+        {
+          "line": 69,
+          "kind": "file_path",
+          "value": "packages/cli/build/studio.js",
+          "detail": "path not found: \"packages/cli/build/studio.js\" (checked relative to /tmp/oss_scan/prisma)"
+        },
+        {
+          "line": 69,
+          "kind": "file_path",
+          "value": "packages/cli/build/studio.css",
+          "detail": "path not found: \"packages/cli/build/studio.css\" (checked relative to /tmp/oss_scan/prisma)"
+        },
+        {
+          "line": 79,
+          "kind": "file_path",
+          "value": "packages/client/runtime/client.js",
+          "detail": "path not found: \"packages/client/runtime/client.js\" (checked relative to /tmp/oss_scan/prisma)"
+        },
+        {
+          "line": 144,
+          "kind": "file_path",
+          "value": "/home/user/work/prisma",
+          "detail": "path not found: \"/home/user/work/prisma\" (checked relative to /tmp/oss_scan/prisma)"
+        },
+        {
+          "line": 144,
+          "kind": "file_path",
+          "value": "/home/user/work/prisma-engines",
+          "detail": "path not found: \"/home/user/work/prisma-engines\" (checked relative to /tmp/oss_scan/prisma)"
+        }
+      ]
+    },
+    {
+      "path": "CLAUDE.md",
+      "claims": 63,
+      "valid": 56,
+      "stale": 7,
+      "accuracy_percent": 88.88888888888889,
+      "stale_refs": [
+        {
+          "line": 15,
+          "kind": "file_path",
+          "value": "packages/client/src/__tests__/benchmarks/query-performance/compilation.bench.ts",
+          "detail": "path not found: \"packages/client/src/__tests__/benchmarks/query-performance/compilation.bench.ts\" (checked relative to /tmp/oss_scan/prisma)"
+        },
+        {
+          "line": 29,
+          "kind": "file_path",
+          "value": "_utils/idForProvider",
+          "detail": "path not found: \"_utils/idForProvider\" (checked relative to /tmp/oss_scan/prisma)"
+        },
+        {
+          "line": 69,
+          "kind": "file_path",
+          "value": "packages/cli/build/studio.js",
+          "detail": "path not found: \"packages/cli/build/studio.js\" (checked relative to /tmp/oss_scan/prisma)"
+        },
+        {
+          "line": 69,
+          "kind": "file_path",
+          "value": "packages/cli/build/studio.css",
+          "detail": "path not found: \"packages/cli/build/studio.css\" (checked relative to /tmp/oss_scan/prisma)"
+        },
+        {
+          "line": 79,
+          "kind": "file_path",
+          "value": "packages/client/runtime/client.js",
+          "detail": "path not found: \"packages/client/runtime/client.js\" (checked relative to /tmp/oss_scan/prisma)"
+        },
+        {
+          "line": 144,
+          "kind": "file_path",
+          "value": "/home/user/work/prisma",
+          "detail": "path not found: \"/home/user/work/prisma\" (checked relative to /tmp/oss_scan/prisma)"
+        },
+        {
+          "line": 144,
+          "kind": "file_path",
+          "value": "/home/user/work/prisma-engines",
+          "detail": "path not found: \"/home/user/work/prisma-engines\" (checked relative to /tmp/oss_scan/prisma)"
+        }
+      ]
+    }
+  ],
+  "total_claims": 126,
+  "valid_count": 112,
+  "stale_count": 14,
+  "accuracy_percent": 88.88888888888889,
+  "verdict": "fail"
+}
+Error: verification failed: 14 stale reference(s) found

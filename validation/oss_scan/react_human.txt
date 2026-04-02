@@ -1,0 +1,7 @@
+AI Context Verification Report
+==============================
+
+[PASS] CLAUDE.md — 100% accurate (0/0 claims)
+[PASS] compiler/CLAUDE.md — 100% accurate (12/12 claims)
+
+livedocs verify: 100% accurate (12/12 claims valid across 2 file(s)) — pass

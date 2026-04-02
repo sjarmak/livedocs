@@ -1,0 +1,24 @@
+{
+  "root": "/tmp/oss_scan/ruff",
+  "files": [
+    {
+      "path": "AGENTS.md",
+      "claims": 1,
+      "valid": 1,
+      "stale": 0,
+      "accuracy_percent": 100
+    },
+    {
+      "path": "CLAUDE.md",
+      "claims": 0,
+      "valid": 0,
+      "stale": 0,
+      "accuracy_percent": 100
+    }
+  ],
+  "total_claims": 1,
+  "valid_count": 1,
+  "stale_count": 0,
+  "accuracy_percent": 100,
+  "verdict": "pass"
+}

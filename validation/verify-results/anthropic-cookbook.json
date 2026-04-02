@@ -1,0 +1,31 @@
+{
+  "root": "/tmp/livedocs-verify-targets/anthropic-cookbook",
+  "files": [
+    {
+      "path": "CLAUDE.md",
+      "claims": 0,
+      "valid": 0,
+      "stale": 0,
+      "accuracy_percent": 100
+    },
+    {
+      "path": "claude_agent_sdk/chief_of_staff_agent/CLAUDE.md",
+      "claims": 0,
+      "valid": 0,
+      "stale": 0,
+      "accuracy_percent": 100
+    },
+    {
+      "path": "skills/CLAUDE.md",
+      "claims": 0,
+      "valid": 0,
+      "stale": 0,
+      "accuracy_percent": 100
+    }
+  ],
+  "total_claims": 0,
+  "valid_count": 0,
+  "stale_count": 0,
+  "accuracy_percent": 100,
+  "verdict": "pass"
+}
