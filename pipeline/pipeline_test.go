@@ -506,6 +506,63 @@ func TestRun_RenamedFile(t *testing.T) {
 	}
 }
 
+func TestGeneratedFilesSkipped(t *testing.T) {
+	// Generated files should be skipped by the pipeline — zero claims produced.
+	repoDir, sha1 := setupTestRepo(t, map[string]string{
+		"main.go": "package main",
+	})
+
+	// Add generated files and a normal file.
+	generatedFiles := map[string]string{
+		"types_generated.go":       "package gen",
+		"zz_generated.deepcopy.go": "package gen",
+		"api.pb.go":                "package gen",
+		"real.go":                  "package real",
+	}
+	for name, content := range generatedFiles {
+		p := filepath.Join(repoDir, name)
+		if err := os.WriteFile(p, []byte(content), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	gitRun(t, repoDir, "git", "add", ".")
+	gitRun(t, repoDir, "git", "commit", "-m", "add generated and real files")
+	sha2 := getHEAD(t, repoDir)
+
+	cacheStore, claimsDB := openTestDBs(t)
+	stub := &stubExtractor{name: "test-ext", version: "0.1.0"}
+	reg := extractor.NewRegistry()
+	reg.Register(extractor.LanguageConfig{
+		Language:      "go",
+		Extensions:    []string{".go"},
+		FastExtractor: stub,
+	})
+
+	p := New(Config{
+		Repo:     "test/repo",
+		RepoDir:  repoDir,
+		Cache:    cacheStore,
+		ClaimsDB: claimsDB,
+		Registry: reg,
+	})
+
+	result, err := p.Run(context.Background(), sha1, sha2)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	// 3 generated files should be skipped, 1 real file extracted.
+	if result.FilesSkipped != 3 {
+		t.Errorf("FilesSkipped: got %d, want 3 (generated files)", result.FilesSkipped)
+	}
+	if result.FilesExtracted != 1 {
+		t.Errorf("FilesExtracted: got %d, want 1 (real.go only)", result.FilesExtracted)
+	}
+	if result.ClaimsStored < 1 {
+		t.Errorf("ClaimsStored: got %d, want >= 1", result.ClaimsStored)
+	}
+}
+
 func TestRun_FileReadError(t *testing.T) {
 	// Create repo where a file exists in git but is missing from disk
 	// at pipeline run time (simulating race condition).

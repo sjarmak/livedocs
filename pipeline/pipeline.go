@@ -97,6 +97,12 @@ func (p *Pipeline) Run(ctx context.Context, fromCommit, toCommit string) (Result
 		default:
 		}
 
+		// Skip generated files before any I/O or extraction.
+		if extractor.IsGenerated(relPath) {
+			result.FilesSkipped++
+			continue
+		}
+
 		extracted, claims, err := p.processFile(ctx, relPath)
 		if err != nil {
 			// Check if it's a "no extractor" error — that's a skip, not an error.

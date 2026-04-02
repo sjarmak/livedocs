@@ -7,6 +7,46 @@ import (
 	"sync"
 )
 
+// generatedSuffixes lists filename suffixes that indicate generated code.
+// Files matching any of these patterns are excluded from extraction.
+var generatedSuffixes = []string{
+	"_generated.go",
+	"pb.go",
+}
+
+// generatedPrefixes lists filename prefixes that indicate generated code.
+var generatedPrefixes = []string{
+	"zz_generated",
+}
+
+// generatedInfixes lists substrings that, when present anywhere in the
+// filename (base name), indicate generated code.
+var generatedInfixes = []string{
+	"_zz_generated",
+}
+
+// IsGenerated reports whether the given file path matches a generated-code
+// pattern and should be excluded from extraction.
+func IsGenerated(path string) bool {
+	base := filepath.Base(path)
+	for _, suffix := range generatedSuffixes {
+		if strings.HasSuffix(base, suffix) {
+			return true
+		}
+	}
+	for _, prefix := range generatedPrefixes {
+		if strings.HasPrefix(base, prefix) {
+			return true
+		}
+	}
+	for _, infix := range generatedInfixes {
+		if strings.Contains(base, infix) {
+			return true
+		}
+	}
+	return false
+}
+
 // LanguageConfig describes how to extract claims for a given language.
 type LanguageConfig struct {
 	// Language is the canonical language name (e.g. "go", "typescript").
@@ -89,6 +129,10 @@ func (r *Registry) Languages() []string {
 // and returns the resulting claims. Returns LanguageNotRegisteredError if
 // no extractor is registered for the file's extension.
 func (r *Registry) ExtractFile(ctx context.Context, path string) ([]Claim, error) {
+	if IsGenerated(path) {
+		return nil, nil
+	}
+
 	ext := strings.ToLower(filepath.Ext(path))
 	cfg := r.LookupByExtension(ext)
 	if cfg == nil {
