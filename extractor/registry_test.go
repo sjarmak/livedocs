@@ -226,6 +226,62 @@ func TestRegistry_ExtractFile_NoExtractors(t *testing.T) {
 	}
 }
 
+func TestGeneratedExclusion(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		path      string
+		generated bool
+	}{
+		{"normal go file", "pkg/main.go", false},
+		{"generated suffix", "pkg/types_generated.go", true},
+		{"zz_generated infix", "pkg/zz_generated.deepcopy.go", true},
+		{"zz_generated with prefix", "pkg/foo_zz_generated_bar.go", true},
+		{"protobuf generated", "api/types.pb.go", true},
+		{"not pb suffix", "api/types.pb.txt", false},
+		{"normal test file", "pkg/main_test.go", false},
+		{"deep path generated", "/home/user/repo/pkg/deep/types_generated.go", true},
+		{"deep path normal", "/home/user/repo/pkg/deep/types.go", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := IsGenerated(tt.path)
+			if got != tt.generated {
+				t.Errorf("IsGenerated(%q) = %v, want %v", tt.path, got, tt.generated)
+			}
+		})
+	}
+}
+
+func TestGeneratedExclusion_ExtractFileReturnsNil(t *testing.T) {
+	t.Parallel()
+	r := NewRegistry()
+	r.Register(LanguageConfig{
+		Language:      "go",
+		Extensions:    []string{".go"},
+		FastExtractor: &mockExtractor{name: "ts-go", version: "0.1", claims: []Claim{{SubjectName: "ShouldNotAppear"}}},
+	})
+
+	generatedFiles := []string{
+		"/src/types_generated.go",
+		"/src/zz_generated.deepcopy.go",
+		"/src/api.pb.go",
+	}
+
+	for _, path := range generatedFiles {
+		claims, err := r.ExtractFile(context.Background(), path)
+		if err != nil {
+			t.Errorf("ExtractFile(%q): unexpected error: %v", path, err)
+		}
+		if len(claims) != 0 {
+			t.Errorf("ExtractFile(%q): got %d claims, want 0", path, len(claims))
+		}
+	}
+}
+
 func TestRegistry_ExtractFile_ExtractorError(t *testing.T) {
 	t.Parallel()
 	r := NewRegistry()
