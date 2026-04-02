@@ -261,12 +261,13 @@ func TestRenderMarkdown_KubeletConfig(t *testing.T) {
 		{"interface section", "## Exported Interfaces (1)"},
 		{"interface table header", "| Interface | Methods | Key Implementations |"},
 		{"SourcesReady interface", "| `SourcesReady` |"},
-		{"satisfaction section", "## Interface Satisfaction"},
+		{"implements section", "## Implements"},
 		{"SourcesReadyFn implements", "`SourcesReadyFn` implements `SourcesReady`"},
-		{"dependency section", "## Dependency Graph"},
+		{"cross-package section", "## Cross-Package References"},
 		{"forward dep", "`k8s.io/api/core/v1`"},
 		{"forward dep cache", "`k8s.io/client-go/tools/cache`"},
-		{"reverse dep section", "**Reverse dependencies:** 3 packages"},
+		{"used by section", "## Used By"},
+		{"used by count", "3 packages depend on this package"},
 		{"reverse dep kubelet", "`k8s.io/kubernetes/pkg/kubelet`"},
 		{"function cat section", "## Exported Functions by Category"},
 		{"constructor category", "**constructor (5):**"},
@@ -297,11 +298,14 @@ func TestRenderMarkdown_EmptyPackage(t *testing.T) {
 	if strings.Contains(md, "## Exported Interfaces") {
 		t.Error("should not render empty interfaces section")
 	}
-	if strings.Contains(md, "## Interface Satisfaction") {
-		t.Error("should not render empty satisfaction section")
+	if strings.Contains(md, "## Implements") {
+		t.Error("should not render empty implements section")
 	}
-	if strings.Contains(md, "## Dependency Graph") {
-		t.Error("should not render empty dependency section")
+	if strings.Contains(md, "## Used By") {
+		t.Error("should not render empty used by section")
+	}
+	if strings.Contains(md, "## Cross-Package References") {
+		t.Error("should not render empty cross-package references section")
 	}
 }
 
@@ -403,7 +407,7 @@ func TestRenderMarkdown_InterfaceHeavyPackage(t *testing.T) {
 		t.Error("missing ExpirationCache as Store implementation")
 	}
 
-	// Verify interface satisfaction section
+	// Verify implements section
 	if !strings.Contains(md, "`DeltaFIFO` implements") {
 		t.Error("missing DeltaFIFO satisfaction")
 	}

@@ -14,8 +14,9 @@ func RenderMarkdown(pd *PackageData) string {
 
 	renderHeader(&b, pd)
 	renderInterfaces(&b, pd)
-	renderInterfaceSatisfaction(&b, pd)
-	renderDependencyGraph(&b, pd)
+	renderImplements(&b, pd)
+	renderUsedBy(&b, pd)
+	renderCrossPackageReferences(&b, pd)
 	renderFunctionCategories(&b, pd)
 	renderTypeCategories(&b, pd)
 	renderTestCoverage(&b, pd)
@@ -57,12 +58,12 @@ func renderInterfaces(b *strings.Builder, pd *PackageData) {
 	b.WriteString("\n")
 }
 
-func renderInterfaceSatisfaction(b *strings.Builder, pd *PackageData) {
+func renderImplements(b *strings.Builder, pd *PackageData) {
 	if len(pd.InterfaceSatisfactions) == 0 {
 		return
 	}
 
-	b.WriteString("## Interface Satisfaction\n\n")
+	b.WriteString("## Implements\n\n")
 	for _, sat := range pd.InterfaceSatisfactions {
 		fmt.Fprintf(b, "- `%s` implements %s\n", sat.ConcreteType, formatInterfaceList(sat.Interfaces))
 	}
@@ -80,40 +81,44 @@ func formatInterfaceList(ifaces []string) string {
 	return strings.Join(quoted[:len(quoted)-1], ", ") + ", " + quoted[len(quoted)-1]
 }
 
-func renderDependencyGraph(b *strings.Builder, pd *PackageData) {
-	if len(pd.ForwardDeps) == 0 && len(pd.ReverseDeps) == 0 {
+func renderUsedBy(b *strings.Builder, pd *PackageData) {
+	if len(pd.ReverseDeps) == 0 && pd.ReverseDepCount == 0 {
 		return
 	}
 
-	b.WriteString("## Dependency Graph\n\n")
+	b.WriteString("## Used By\n\n")
 
-	if len(pd.ForwardDeps) > 0 {
-		b.WriteString("**Direct dependencies:**\n\n")
-		for _, dep := range pd.ForwardDeps {
-			if dep.Annotation != "" {
-				fmt.Fprintf(b, "- `%s` — %s\n", dep.ImportPath, dep.Annotation)
-			} else {
-				fmt.Fprintf(b, "- `%s`\n", dep.ImportPath)
-			}
+	count := pd.ReverseDepCount
+	if count == 0 {
+		count = len(pd.ReverseDeps)
+	}
+	fmt.Fprintf(b, "%d packages depend on this package:\n\n", count)
+	for _, dep := range pd.ReverseDeps {
+		if dep.File != "" {
+			fmt.Fprintf(b, "- `%s` (%s)\n", dep.ImportPath, dep.File)
+		} else {
+			fmt.Fprintf(b, "- `%s`\n", dep.ImportPath)
 		}
-		b.WriteString("\n")
+	}
+	b.WriteString("\n")
+}
+
+func renderCrossPackageReferences(b *strings.Builder, pd *PackageData) {
+	if len(pd.ForwardDeps) == 0 {
+		return
 	}
 
-	if len(pd.ReverseDeps) > 0 || pd.ReverseDepCount > 0 {
-		count := pd.ReverseDepCount
-		if count == 0 {
-			count = len(pd.ReverseDeps)
+	b.WriteString("## Cross-Package References\n\n")
+
+	b.WriteString("**Direct dependencies:**\n\n")
+	for _, dep := range pd.ForwardDeps {
+		if dep.Annotation != "" {
+			fmt.Fprintf(b, "- `%s` — %s\n", dep.ImportPath, dep.Annotation)
+		} else {
+			fmt.Fprintf(b, "- `%s`\n", dep.ImportPath)
 		}
-		fmt.Fprintf(b, "**Reverse dependencies:** %d packages\n\n", count)
-		for _, dep := range pd.ReverseDeps {
-			if dep.File != "" {
-				fmt.Fprintf(b, "- `%s` (%s)\n", dep.ImportPath, dep.File)
-			} else {
-				fmt.Fprintf(b, "- `%s`\n", dep.ImportPath)
-			}
-		}
-		b.WriteString("\n")
 	}
+	b.WriteString("\n")
 }
 
 func renderFunctionCategories(b *strings.Builder, pd *PackageData) {
