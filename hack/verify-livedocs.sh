@@ -10,6 +10,8 @@
 #
 # Arguments:
 #   repo-path   Path to the repository to verify (default: current directory)
+#
+# Dependencies: jq
 
 set -euo pipefail
 
@@ -17,6 +19,12 @@ REPO_PATH="${1:-.}"
 
 # Resolve to absolute path.
 REPO_PATH="$(cd "${REPO_PATH}" && pwd)"
+
+# Require jq for JSON parsing.
+if ! command -v jq &>/dev/null; then
+    echo "FAIL: jq is required but not found on PATH" >&2
+    exit 1
+fi
 
 # Locate the livedocs binary. Check common locations in order:
 #   1. On PATH
@@ -37,27 +45,46 @@ else
 fi
 
 EXIT_CODE=0
+ISSUE_COUNT=0
 
 # --- Run livedocs check (documentation drift) ---
-if ! CHECK_OUTPUT=$("${LIVEDOCS}" check --format=text "${REPO_PATH}" 2>&1); then
-    # Extract one-line-per-issue from text output.
-    # Lines that describe individual stale references start with whitespace or specific markers.
+# Use JSON output and parse each finding into one line per issue.
+CHECK_OUTPUT=$("${LIVEDOCS}" check --format=json "${REPO_PATH}" 2>/dev/null) || true
+
+if echo "${CHECK_OUTPUT}" | jq -e '.has_drift == true' &>/dev/null; then
+    # Iterate over each report's findings and emit one line per issue.
+    # drift.Finding fields: Kind, Symbol, SourceFile, Detail (no JSON tags, so capitalized).
     while IFS= read -r line; do
-        # Skip blank lines and header lines; emit substantive issue lines.
-        [[ -z "${line}" ]] && continue
-        echo "check: ${line}"
-    done <<< "${CHECK_OUTPUT}"
+        if [[ -n "${line}" ]]; then
+            echo "${line}"
+            ((ISSUE_COUNT++)) || true
+        fi
+    done < <(echo "${CHECK_OUTPUT}" | jq -r '
+        .reports // [] | .[] |
+        .ReadmePath as $file |
+        .Findings // [] | .[] |
+        select(.Kind != null) |
+        "DRIFT: \($file): \(.Kind): \(.Symbol)"
+    ')
     EXIT_CODE=1
 fi
 
 # --- Run livedocs verify (AI context file accuracy) ---
-if ! VERIFY_OUTPUT=$("${LIVEDOCS}" verify --format=human "${REPO_PATH}" 2>&1); then
+# Use JSON output and parse each stale ref into one line per issue.
+VERIFY_OUTPUT=$("${LIVEDOCS}" verify --format=json "${REPO_PATH}" 2>/dev/null) || true
+
+if echo "${VERIFY_OUTPUT}" | jq -e '.verdict == "fail"' &>/dev/null; then
     while IFS= read -r line; do
-        [[ -z "${line}" ]] && continue
-        # Skip decorative header lines.
-        [[ "${line}" == "="* ]] && continue
-        echo "verify: ${line}"
-    done <<< "${VERIFY_OUTPUT}"
+        if [[ -n "${line}" ]]; then
+            echo "${line}"
+            ((ISSUE_COUNT++)) || true
+        fi
+    done < <(echo "${VERIFY_OUTPUT}" | jq -r '
+        .files // [] | .[] |
+        .path as $file |
+        .stale_refs // [] | .[] |
+        "STALE: \($file): line \(.line): \(.kind): \(.value)"
+    ')
     EXIT_CODE=1
 fi
 
