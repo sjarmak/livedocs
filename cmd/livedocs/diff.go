@@ -21,6 +21,7 @@ import (
 )
 
 var diffFormat string
+var diffRepo string
 
 var diffCmd = &cobra.Command{
 	Use:   "diff <from-commit> <to-commit> [repo-path]",
@@ -53,6 +54,7 @@ This is the core "code changed → docs affected" flow.`,
 
 func init() {
 	diffCmd.Flags().StringVar(&diffFormat, "format", "text", "output format: text or json")
+	diffCmd.Flags().StringVar(&diffRepo, "repo", "", "repository name (defaults to directory basename)")
 }
 
 // DiffReport is the output of the diff command.
@@ -98,7 +100,10 @@ func runDiff(cmd *cobra.Command, repoDir, fromCommit, toCommit string) error {
 	}
 
 	// 2. Set up the pipeline infrastructure.
-	repoName := filepath.Base(repoDir)
+	repoName := diffRepo
+	if repoName == "" {
+		repoName = filepath.Base(repoDir)
+	}
 
 	// Use in-memory SQLite for claims and cache (ephemeral per run).
 	claimsDB, err := db.OpenClaimsDB(":memory:")
