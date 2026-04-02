@@ -176,6 +176,9 @@ var goImportRe = regexp.MustCompile("`([a-zA-Z][a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}/[a-
 // commandRe matches command invocations in backticks (go test, npm run, etc.).
 var commandRe = regexp.MustCompile("`((?:go|npm|make|cargo|pip|yarn|pnpm|python|bash|sh)\\s+[^`]+)`")
 
+// mdLinkRe matches markdown links: [display text](url)
+var mdLinkRe = regexp.MustCompile(`\[([^\]]+)\]\(([^)]+)\)`)
+
 // ExtractClaims parses an AI context file and returns verifiable claims.
 func ExtractClaims(filePath string) ([]Claim, error) {
 	content, err := os.ReadFile(filePath)
@@ -209,8 +212,13 @@ func ExtractClaimsFromContent(content string, filePath string) []Claim {
 			continue
 		}
 
+		// Neutralize markdown link display text to prevent extracting it as
+		// a file path. Replace [display text](url) with just the url portion,
+		// so the regex only sees the link target.
+		processedLine := mdLinkRe.ReplaceAllString(line, "$2")
+
 		// Extract file paths in backticks.
-		for _, match := range filePathRe.FindAllStringSubmatch(line, -1) {
+		for _, match := range filePathRe.FindAllStringSubmatch(processedLine, -1) {
 			path := match[1]
 			if isVerifiablePath(path) {
 				key := FilePathClaim.key(path)
@@ -227,7 +235,7 @@ func ExtractClaimsFromContent(content string, filePath string) []Claim {
 		}
 
 		// Extract bare paths with extensions (more conservative).
-		for _, match := range barePathRe.FindAllStringSubmatch(line, -1) {
+		for _, match := range barePathRe.FindAllStringSubmatch(processedLine, -1) {
 			path := match[1]
 			if isVerifiablePath(path) && hasCodeExtension(path) {
 				key := FilePathClaim.key(path)
@@ -271,6 +279,23 @@ func (k ClaimKind) key(value string) string {
 	return string(k) + ":" + value
 }
 
+// branchPrefixes lists common git branch naming prefixes that should not be
+// treated as file paths.
+var branchPrefixes = []string{
+	"feature/", "fix/", "bugfix/", "hotfix/", "release/",
+	"chore/", "docs/", "refactor/", "perf/", "ci/",
+}
+
+// proseSlashPairs lists short slash-separated token pairs that are code/prose
+// concepts rather than file paths.
+var proseSlashPairs = map[string]bool{
+	"if/else": true, "true/false": true, "input/output": true,
+	"read/write": true, "get/set": true, "push/pull": true,
+	"client/server": true, "src/dst": true, "dx/dy": true,
+	"req/res": true, "stdin/stdout": true, "yes/no": true,
+	"on/off": true, "open/close": true, "start/stop": true,
+}
+
 // isVerifiablePath returns true if a path looks like something we can check
 // against the filesystem (not a URL, glob-only pattern, or env var).
 func isVerifiablePath(path string) bool {
@@ -282,8 +307,12 @@ func isVerifiablePath(path string) bool {
 	if strings.HasPrefix(path, "$") {
 		return false
 	}
-	// Skip patterns that are purely glob/wildcard.
-	if strings.HasPrefix(path, "*") {
+	// Skip patterns containing glob/wildcard characters anywhere.
+	if strings.Contains(path, "*") {
+		return false
+	}
+	// Skip paths containing ellipsis (documentation shorthand).
+	if strings.Contains(path, "...") {
 		return false
 	}
 	// Must have at least one slash (otherwise it's just a filename, not a path).
@@ -292,6 +321,17 @@ func isVerifiablePath(path string) bool {
 	}
 	// Skip very short paths that are likely false positives.
 	if len(path) < 3 {
+		return false
+	}
+	// Skip common git branch name prefixes.
+	lower := strings.ToLower(path)
+	for _, prefix := range branchPrefixes {
+		if strings.HasPrefix(lower, prefix) {
+			return false
+		}
+	}
+	// Skip known prose/code slash pairs.
+	if proseSlashPairs[lower] {
 		return false
 	}
 	return true
@@ -370,6 +410,43 @@ func verifyFilePath(root string, claim Claim) Finding {
 				Status: Valid,
 				Detail: fmt.Sprintf("directory exists: %s", candidate),
 			}
+		}
+	}
+
+	// Last resort: search for the path suffix anywhere in the tree.
+	// This handles abbreviated paths like "shared/Assert.kt" that exist
+	// deep in the directory hierarchy.
+	suffix := filepath.Clean(strings.TrimSuffix(path, "/"))
+	suffixWithSep := string(filepath.Separator) + suffix
+	found := false
+	_ = filepath.Walk(root, func(p string, info os.FileInfo, err error) error {
+		if err != nil {
+			if info != nil && info.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if info.IsDir() {
+			name := info.Name()
+			if name == ".git" || name == "vendor" || name == "node_modules" || name == "_output" {
+				return filepath.SkipDir
+			}
+		}
+		rel, relErr := filepath.Rel(root, p)
+		if relErr != nil {
+			return nil
+		}
+		if strings.HasSuffix(string(filepath.Separator)+rel, suffixWithSep) || rel == suffix {
+			found = true
+			return filepath.SkipAll
+		}
+		return nil
+	})
+	if found {
+		return Finding{
+			Claim:  claim,
+			Status: Valid,
+			Detail: fmt.Sprintf("path found via subdirectory search: %s", suffix),
 		}
 	}
 

@@ -4,3 +4,14 @@
 *.db
 .beads-credential-key
 badge/node_modules/
+
+# Build artifacts
+/livedocs
+/extract
+/dist/
+
+# Brainstorm working data
+.brainstorm/
+
+# Claude local state
+.claude/

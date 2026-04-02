@@ -407,18 +407,85 @@ func TestIsVerifiablePath(t *testing.T) {
 		path string
 		want bool
 	}{
+		// Valid paths.
 		{"cmd/main.go", true},
+		{"drift/drift.go", true},
+		{"src/components/App.tsx", true},
+		{"packages/next/dist/", true},
+
+		// Existing filters.
 		{"https://example.com/path", false},
 		{"$HOME/dir", false},
 		{"*.go", false},
 		{"ab", false},
 		{"no_slash", false},
+
+		// Glob/wildcard patterns (fix: skip * anywhere in path).
+		{"packages/*", false},
+		{"src/gradle*/", false},
+		{"packages/**/*.ts", false},
+		{"react-server-dom-webpack/*", false},
+
+		// Ellipsis patterns (fix: skip ... in path).
+		{"tests/.../fakes/", false},
+		{"src/test/kotlin/.../gradle/", false},
+
+		// Branch name examples (fix: skip common branch prefixes).
+		{"feature/agent-memory", false},
+		{"fix/tool-registry-bug", false},
+		{"bugfix/login-error", false},
+		{"hotfix/security-patch", false},
+		{"release/v2.0", false},
+
+		// Prose/code concepts (fix: skip short slash-separated code tokens).
+		{"if/else", false},
+		{"dx/dy", false},
+		{"true/false", false},
+		{"input/output", false},
 	}
 	for _, tt := range tests {
 		got := isVerifiablePath(tt.path)
 		if got != tt.want {
 			t.Errorf("isVerifiablePath(%q) = %v, want %v", tt.path, got, tt.want)
 		}
+	}
+}
+
+func TestExtractClaimsFromContent_MarkdownLinks(t *testing.T) {
+	content := "See [util/buildProject.kt](https://github.com/JetBrains/kotlin/blob/master/util/buildProject.kt) for details.\n" +
+		"Also [config guide](docs/config.md) references.\n"
+
+	claims := ExtractClaimsFromContent(content, "CLAUDE.md")
+
+	// Should NOT extract "util/buildProject.kt" from display text.
+	// Should extract "docs/config.md" from the link target (it looks like a local path).
+	for _, c := range claims {
+		if c.Kind == FilePathClaim && c.Value == "util/buildProject.kt" {
+			t.Error("should not extract markdown link display text as file path claim")
+		}
+	}
+}
+
+func TestVerify_SubdirectoryPathSearch(t *testing.T) {
+	root := t.TempDir()
+	// Create a deeply nested file.
+	deep := filepath.Join(root, "pkg", "internal", "shared")
+	must(t, os.MkdirAll(deep, 0o755))
+	writeFile(t, filepath.Join(deep, "Assert.kt"), "class Assert\n")
+
+	// Claim references abbreviated path "shared/Assert.kt".
+	claims := []Claim{
+		{Kind: FilePathClaim, Value: "shared/Assert.kt", SourceFile: filepath.Join(root, "CLAUDE.md"), Line: 3},
+	}
+
+	findings := Verify(root, claims)
+	if len(findings) != 1 || findings[0].Status != Valid {
+		detail := ""
+		if len(findings) > 0 {
+			detail = findings[0].Detail
+		}
+		t.Errorf("expected valid for abbreviated path 'shared/Assert.kt', got %s: %s",
+			findings[0].Status, detail)
 	}
 }
 
