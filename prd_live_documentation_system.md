@@ -1,6 +1,6 @@
 # PRD: Live Documentation System
 
-> **Status:** Post-implementation (v4). Updated 2026-04-02 after Phase 1-2 completion. Phases 0-2 fully implemented and tested. Phase 3-4 acceptance criteria updated to reflect actual CLI commands and available test corpus. See `premortem_live_docs_architecture.md` for failure narratives. Previous: convergence debate (`convergence_report.md`).
+> **Status:** Post-implementation (v5). Updated 2026-04-03 after Phase 3-4 completion. All phases (0-4) fully implemented and tested. Full 79-repo corpus extraction validated. See `premortem_live_docs_architecture.md` for failure narratives. Previous: convergence debate (`convergence_report.md`).
 
 ## Problem Statement
 
@@ -177,12 +177,13 @@ The system uses **claims-backed generation with verification gates**:
   - `go test -tags integration ./integration/... -run TestCacheHit` passes (second run <2s)
   - `go test -tags integration ./integration/... -run TestDiffClientGo` passes (<30s)
 
-**Phase 3: Tier 2 semantic claims + full corpus**
+**Phase 3: Tier 2 semantic claims + full corpus** — DONE
 
 - Wire `--tier2` flag to `livedocs extract` command using existing `semantic/` package
 - Batch extraction across all 79 kubernetes repos
 - End-to-end drift detection against existing READMEs
-- Security filter for sensitive content in claims
+- Security filter for sensitive content in claims (password/secret/token/credential/api_key)
+- Drift severity levels (HIGH/MEDIUM/LOW) on `verify-claims --check-existing`
 - Verification:
   - `go test ./semantic/... ./drift/... ./anchor/...` all pass
   - `livedocs extract --tier2 --repo client-go ~/kubernetes/client-go/tools/cache` produces claims with `claim_tier='semantic'` and `confidence` score in the DB
@@ -196,12 +197,13 @@ The system uses **claims-backed generation with verification gates**:
   - `livedocs verify-claims ~/kubernetes/client-go` exits 0 when structural claims match source
   - Claims containing patterns matching `password|secret|token|credential|api_key` in object_text are flagged: `sqlite3 <db> "SELECT COUNT(*) FROM claims WHERE object_text LIKE '%password%' OR object_text LIKE '%secret%' OR object_text LIKE '%api_key%'"` returns 0 (filtered during extraction)
 
-**Phase 4: Continuous maintenance + polyglot**
+**Phase 4: Continuous maintenance + polyglot** — DONE
 
-- Diff-triggered pipeline on every commit (CI integration)
+- Diff-triggered pipeline on every commit (CI integration via `hack/verify-livedocs.sh`)
 - Staleness canary (halt if >2% stale)
-- Python and Shell extraction validation on real repos
-- End-to-end incremental pipeline test
+- Python and Shell extraction validation on real repos (137 Python claims, 4262 Shell claims from k8s hack/)
+- End-to-end incremental pipeline test (extract → modify → diff → re-extract → verify)
+- Manifest workflow (`check --update-manifest` + `check --manifest` <2s)
 - Verification:
   - `livedocs verify-claims --canary --db <db>` samples 50 claims, exits non-zero if >2% stale
   - Python extraction: `livedocs extract --repo kubernetes ~/kubernetes/kubernetes` extracts claims from `.py` files (hack/ scripts). `sqlite3 <db> "SELECT COUNT(*) FROM claims WHERE source_file LIKE '%.py'"` returns >0
