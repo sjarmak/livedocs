@@ -379,6 +379,27 @@ func TestMarkDeleted_NonexistentIsNoOp(t *testing.T) {
 	}
 }
 
+// --- Busy timeout ---
+
+func TestBusyTimeoutSet(t *testing.T) {
+	dir := t.TempDir()
+	path := dir + "/timeout_test.db"
+	s, err := cache.NewSQLiteStore(path, 1<<30)
+	if err != nil {
+		t.Fatalf("NewSQLiteStore: %v", err)
+	}
+	defer s.Close()
+
+	var timeout int
+	err = s.DB().QueryRow("PRAGMA busy_timeout").Scan(&timeout)
+	if err != nil {
+		t.Fatalf("query busy_timeout: %v", err)
+	}
+	if timeout != 5000 {
+		t.Errorf("expected busy_timeout=5000, got %d", timeout)
+	}
+}
+
 // --- File-backed store ---
 
 func TestNewSQLiteStore_FileBacked(t *testing.T) {

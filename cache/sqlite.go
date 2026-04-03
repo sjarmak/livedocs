@@ -26,6 +26,11 @@ func NewSQLiteStore(dsn string, capBytes int64) (*SQLiteStore, error) {
 		db.Close()
 		return nil, fmt.Errorf("cache: set WAL mode: %w", err)
 	}
+	// Set busy timeout so concurrent writers retry instead of failing immediately.
+	if _, err := db.Exec("PRAGMA busy_timeout = 5000"); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("cache: set busy_timeout: %w", err)
+	}
 	s := &SQLiteStore{db: db, capBytes: capBytes}
 	if err := s.createTable(); err != nil {
 		db.Close()
@@ -253,6 +258,11 @@ func (s *SQLiteStore) TotalSize() (int64, error) {
 		return 0, nil
 	}
 	return total.Int64, nil
+}
+
+// DB returns the underlying *sql.DB for direct queries (e.g. PRAGMA checks).
+func (s *SQLiteStore) DB() *sql.DB {
+	return s.db
 }
 
 // Close closes the underlying database connection.

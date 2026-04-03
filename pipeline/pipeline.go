@@ -173,78 +173,87 @@ func (p *Pipeline) processFile(ctx context.Context, relPath string) (bool, int, 
 		return false, 0, fmt.Errorf("extract %s: %w", relPath, err)
 	}
 
-	// Delete old claims for this file before inserting new ones (idempotent re-import).
-	if err := p.claimsDB.DeleteClaimsByExtractorAndFile(ex.Name(), relPath); err != nil {
-		return false, 0, fmt.Errorf("delete old claims for %s: %w", relPath, err)
-	}
-
-	// Store claims.
+	// Wrap delete-old + store-new + update-cache + update-source-files in a
+	// single transaction so a crash mid-extraction leaves the DB consistent.
 	stored := 0
-	for _, claim := range claims {
-		// Fill in repo if the extractor left it empty.
-		if claim.SubjectRepo == "" {
-			claim.SubjectRepo = p.repo
-		}
-		if claim.SubjectImportPath == "" {
-			claim.SubjectImportPath = relPath
+	txErr := p.claimsDB.RunInTransaction(func() error {
+		// Delete old claims for this file before inserting new ones (idempotent re-import).
+		if err := p.claimsDB.DeleteClaimsByExtractorAndFile(ex.Name(), relPath); err != nil {
+			return fmt.Errorf("delete old claims for %s: %w", relPath, err)
 		}
 
-		symID, err := p.claimsDB.UpsertSymbol(db.Symbol{
-			Repo:        claim.SubjectRepo,
-			ImportPath:  claim.SubjectImportPath,
-			SymbolName:  claim.SubjectName,
-			Language:    claim.Language,
-			Kind:        string(claim.Kind),
-			Visibility:  string(claim.Visibility),
-			DisplayName: claim.SubjectName,
-			SCIPSymbol:  claim.SCIPSymbol,
+		// Store claims.
+		for _, claim := range claims {
+			// Fill in repo if the extractor left it empty.
+			if claim.SubjectRepo == "" {
+				claim.SubjectRepo = p.repo
+			}
+			if claim.SubjectImportPath == "" {
+				claim.SubjectImportPath = relPath
+			}
+
+			symID, err := p.claimsDB.UpsertSymbol(db.Symbol{
+				Repo:        claim.SubjectRepo,
+				ImportPath:  claim.SubjectImportPath,
+				SymbolName:  claim.SubjectName,
+				Language:    claim.Language,
+				Kind:        string(claim.Kind),
+				Visibility:  string(claim.Visibility),
+				DisplayName: claim.SubjectName,
+				SCIPSymbol:  claim.SCIPSymbol,
+			})
+			if err != nil {
+				return fmt.Errorf("upsert symbol for %s: %w", relPath, err)
+			}
+
+			_, err = p.claimsDB.InsertClaim(db.Claim{
+				SubjectID:        symID,
+				Predicate:        string(claim.Predicate),
+				ObjectText:       claim.ObjectText,
+				SourceFile:       claim.SourceFile,
+				SourceLine:       claim.SourceLine,
+				Confidence:       claim.Confidence,
+				ClaimTier:        string(claim.ClaimTier),
+				Extractor:        claim.Extractor,
+				ExtractorVersion: claim.ExtractorVersion,
+				LastVerified:     db.Now(),
+			})
+			if err != nil {
+				return fmt.Errorf("insert claim for %s: %w", relPath, err)
+			}
+			stored++
+		}
+
+		// Update cache.
+		if err := p.cache.Put(cache.Entry{
+			Repo:             p.repo,
+			RelativePath:     relPath,
+			ContentHash:      contentHash,
+			ExtractorVersion: extractorVersion,
+			GrammarVersion:   grammarVersion,
+			LastIndexed:      time.Now(),
+			SizeBytes:        int64(len(content)),
+		}); err != nil {
+			return fmt.Errorf("cache put for %s: %w", relPath, err)
+		}
+
+		// Update source_files in claims DB.
+		_, err := p.claimsDB.UpsertSourceFile(db.SourceFile{
+			Repo:             p.repo,
+			RelativePath:     relPath,
+			ContentHash:      contentHash,
+			ExtractorVersion: extractorVersion,
+			GrammarVersion:   grammarVersion,
+			LastIndexed:      db.Now(),
 		})
 		if err != nil {
-			return false, stored, fmt.Errorf("upsert symbol for %s: %w", relPath, err)
+			return fmt.Errorf("upsert source file for %s: %w", relPath, err)
 		}
 
-		_, err = p.claimsDB.InsertClaim(db.Claim{
-			SubjectID:        symID,
-			Predicate:        string(claim.Predicate),
-			ObjectText:       claim.ObjectText,
-			SourceFile:       claim.SourceFile,
-			SourceLine:       claim.SourceLine,
-			Confidence:       claim.Confidence,
-			ClaimTier:        string(claim.ClaimTier),
-			Extractor:        claim.Extractor,
-			ExtractorVersion: claim.ExtractorVersion,
-			LastVerified:     db.Now(),
-		})
-		if err != nil {
-			return false, stored, fmt.Errorf("insert claim for %s: %w", relPath, err)
-		}
-		stored++
-	}
-
-	// Update cache.
-	if err := p.cache.Put(cache.Entry{
-		Repo:             p.repo,
-		RelativePath:     relPath,
-		ContentHash:      contentHash,
-		ExtractorVersion: extractorVersion,
-		GrammarVersion:   grammarVersion,
-		LastIndexed:      time.Now(),
-		SizeBytes:        int64(len(content)),
-	}); err != nil {
-		return true, stored, fmt.Errorf("cache put for %s: %w", relPath, err)
-	}
-
-	// Update source_files in claims DB.
-	_, err = p.claimsDB.UpsertSourceFile(db.SourceFile{
-		Repo:             p.repo,
-		RelativePath:     relPath,
-		ContentHash:      contentHash,
-		ExtractorVersion: extractorVersion,
-		GrammarVersion:   grammarVersion,
-		LastIndexed:      db.Now(),
+		return nil
 	})
-	if err != nil {
-		return true, stored, fmt.Errorf("upsert source file for %s: %w", relPath, err)
+	if txErr != nil {
+		return false, 0, txErr
 	}
 
 	return true, stored, nil
