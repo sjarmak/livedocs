@@ -6,16 +6,68 @@
 #   - One-line-per-issue output, parseable by CI
 #
 # Usage:
-#   hack/verify-livedocs.sh [repo-path]
+#   hack/verify-livedocs.sh <repo-path> [flags]
 #
 # Arguments:
-#   repo-path   Path to the repository to verify (default: current directory)
+#   repo-path   Path to the repository to verify (required)
+#
+# Flags:
+#   --tier2            Also run tier-2 semantic extraction before verification
+#   --severity=LEVEL   Minimum severity to report: LOW, MEDIUM, HIGH (default: LOW)
 #
 # Dependencies: jq
 
 set -euo pipefail
 
-REPO_PATH="${1:-.}"
+# --- Parse arguments ---
+REPO_PATH=""
+TIER2=false
+MIN_SEVERITY="LOW"
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --tier2)
+            TIER2=true
+            shift
+            ;;
+        --severity=*)
+            MIN_SEVERITY="${1#*=}"
+            shift
+            ;;
+        --severity)
+            MIN_SEVERITY="$2"
+            shift 2
+            ;;
+        -*)
+            echo "FAIL: unknown flag: $1" >&2
+            exit 2
+            ;;
+        *)
+            if [[ -z "${REPO_PATH}" ]]; then
+                REPO_PATH="$1"
+            else
+                echo "FAIL: unexpected argument: $1" >&2
+                exit 2
+            fi
+            shift
+            ;;
+    esac
+done
+
+if [[ -z "${REPO_PATH}" ]]; then
+    echo "FAIL: repo-path argument is required" >&2
+    echo "Usage: hack/verify-livedocs.sh <repo-path> [--tier2] [--severity=LEVEL]" >&2
+    exit 2
+fi
+
+# Validate severity level.
+case "${MIN_SEVERITY}" in
+    LOW|MEDIUM|HIGH) ;;
+    *)
+        echo "FAIL: invalid severity level: ${MIN_SEVERITY} (must be LOW, MEDIUM, or HIGH)" >&2
+        exit 2
+        ;;
+esac
 
 # Resolve to absolute path.
 REPO_PATH="$(cd "${REPO_PATH}" && pwd)"
@@ -44,16 +96,46 @@ else
     exit 1
 fi
 
+# --- Severity filter helper ---
+# Returns 0 (true) if the given severity meets or exceeds the minimum threshold.
+severity_rank() {
+    case "$1" in
+        HIGH)   echo 3 ;;
+        MEDIUM) echo 2 ;;
+        LOW)    echo 1 ;;
+        *)      echo 0 ;;
+    esac
+}
+
+meets_severity() {
+    local issue_sev="$1"
+    local min_rank
+    local issue_rank
+    min_rank=$(severity_rank "${MIN_SEVERITY}")
+    issue_rank=$(severity_rank "${issue_sev}")
+    [[ "${issue_rank}" -ge "${min_rank}" ]]
+}
+
 EXIT_CODE=0
 ISSUE_COUNT=0
+TOTAL_CHECKS=0
+
+# --- Optional: Run tier-2 extraction before verification ---
+if [[ "${TIER2}" == "true" ]]; then
+    echo "Running tier-2 semantic extraction on ${REPO_PATH}..."
+    if ! "${LIVEDOCS}" extract --tier2 "${REPO_PATH}" 2>&1; then
+        echo "FAIL: tier-2 extraction failed" >&2
+        exit 1
+    fi
+fi
 
 # --- Run livedocs check (documentation drift) ---
 # Use JSON output and parse each finding into one line per issue.
 CHECK_OUTPUT=$("${LIVEDOCS}" check --format=json "${REPO_PATH}" 2>/dev/null) || true
+((TOTAL_CHECKS++)) || true
 
 if echo "${CHECK_OUTPUT}" | jq -e '.has_drift == true' &>/dev/null; then
     # Iterate over each report's findings and emit one line per issue.
-    # drift.Finding fields: Kind, Symbol, SourceFile, Detail (no JSON tags, so capitalized).
     while IFS= read -r line; do
         if [[ -n "${line}" ]]; then
             echo "${line}"
@@ -64,32 +146,52 @@ if echo "${CHECK_OUTPUT}" | jq -e '.has_drift == true' &>/dev/null; then
         .ReadmePath as $file |
         .Findings // [] | .[] |
         select(.Kind != null) |
-        "DRIFT: \($file): \(.Kind): \(.Symbol)"
+        "DRIFT [HIGH]: \($file): \(.Kind): \(.Symbol)"
     ')
     EXIT_CODE=1
 fi
 
-# --- Run livedocs verify (AI context file accuracy) ---
-# Use JSON output and parse each stale ref into one line per issue.
-VERIFY_OUTPUT=$("${LIVEDOCS}" verify --format=json "${REPO_PATH}" 2>/dev/null) || true
+# --- Run livedocs verify-claims --check-existing (claims-based verification) ---
+# Only run if a claims DB exists for the repo.
+REPO_NAME="$(basename "${REPO_PATH}")"
+CLAIMS_DB=""
+if [[ -f "${REPO_NAME}.claims.db" ]]; then
+    CLAIMS_DB="${REPO_NAME}.claims.db"
+elif [[ -f "${REPO_PATH}/${REPO_NAME}.claims.db" ]]; then
+    CLAIMS_DB="${REPO_PATH}/${REPO_NAME}.claims.db"
+fi
 
-if echo "${VERIFY_OUTPUT}" | jq -e '.verdict == "fail"' &>/dev/null; then
+if [[ -n "${CLAIMS_DB}" ]]; then
+    ((TOTAL_CHECKS++)) || true
+    VERIFY_OUTPUT=$("${LIVEDOCS}" verify-claims --check-existing --db "${CLAIMS_DB}" "${REPO_PATH}" 2>&1) || true
+
+    # Parse one-line-per-issue output from verify-claims and apply severity filter.
     while IFS= read -r line; do
-        if [[ -n "${line}" ]]; then
+        if [[ -z "${line}" ]]; then
+            continue
+        fi
+        # Extract severity from lines like "DRIFT [HIGH]: ..."
+        if [[ "${line}" =~ ^DRIFT\ \[([A-Z]+)\]: ]]; then
+            sev="${BASH_REMATCH[1]}"
+            if meets_severity "${sev}"; then
+                echo "${line}"
+                ((ISSUE_COUNT++)) || true
+                EXIT_CODE=1
+            fi
+        elif [[ "${line}" =~ ^(STALE|FAIL): ]]; then
             echo "${line}"
             ((ISSUE_COUNT++)) || true
+            EXIT_CODE=1
         fi
-    done < <(echo "${VERIFY_OUTPUT}" | jq -r '
-        .files // [] | .[] |
-        .path as $file |
-        .stale_refs // [] | .[] |
-        "STALE: \($file): line \(.line): \(.kind): \(.value)"
-    ')
-    EXIT_CODE=1
+    done <<< "${VERIFY_OUTPUT}"
 fi
 
+# --- Summary ---
+echo ""
 if [[ "${EXIT_CODE}" -eq 0 ]]; then
-    echo "livedocs: all checks passed for ${REPO_PATH}"
+    echo "livedocs: all checks passed for ${REPO_PATH} (${TOTAL_CHECKS} check(s), 0 issues)"
+else
+    echo "livedocs: ${ISSUE_COUNT} issue(s) found for ${REPO_PATH} (severity >= ${MIN_SEVERITY})"
 fi
 
 exit "${EXIT_CODE}"
