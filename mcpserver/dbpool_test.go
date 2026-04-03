@@ -1,0 +1,255 @@
+package mcpserver
+
+import (
+	"os"
+	"path/filepath"
+	"sort"
+	"testing"
+)
+
+// createTestDBDir creates a temp directory with empty .claims.db files for the given repo names.
+func createTestDBDir(t *testing.T, repos []string) string {
+	t.Helper()
+	dir := t.TempDir()
+	for _, name := range repos {
+		path := filepath.Join(dir, name+claimsDBSuffix)
+		if err := os.WriteFile(path, nil, 0o644); err != nil {
+			t.Fatalf("create test db file %s: %v", path, err)
+		}
+	}
+	return dir
+}
+
+func TestDBPool_Manifest(t *testing.T) {
+	repos := []string{"api", "kubernetes", "website"}
+	dir := createTestDBDir(t, repos)
+
+	pool := NewDBPool(dir, DefaultMaxOpenDBs)
+	defer pool.Close()
+
+	got, err := pool.Manifest()
+	if err != nil {
+		t.Fatalf("Manifest() error: %v", err)
+	}
+
+	sort.Strings(got)
+	sort.Strings(repos)
+
+	if len(got) != len(repos) {
+		t.Fatalf("Manifest() returned %d repos, want %d", len(got), len(repos))
+	}
+	for i, name := range repos {
+		if got[i] != name {
+			t.Errorf("Manifest()[%d] = %q, want %q", i, got[i], name)
+		}
+	}
+}
+
+func TestDBPool_ManifestEmptyDir(t *testing.T) {
+	dir := t.TempDir()
+	pool := NewDBPool(dir, DefaultMaxOpenDBs)
+	defer pool.Close()
+
+	got, err := pool.Manifest()
+	if err != nil {
+		t.Fatalf("Manifest() error: %v", err)
+	}
+	if len(got) != 0 {
+		t.Errorf("Manifest() returned %d repos for empty dir, want 0", len(got))
+	}
+}
+
+func TestDBPool_ManifestDoesNotOpenDBs(t *testing.T) {
+	repos := []string{"alpha", "beta"}
+	dir := createTestDBDir(t, repos)
+
+	pool := NewDBPool(dir, DefaultMaxOpenDBs)
+	defer pool.Close()
+
+	_, err := pool.Manifest()
+	if err != nil {
+		t.Fatalf("Manifest() error: %v", err)
+	}
+
+	if pool.Len() != 0 {
+		t.Errorf("Manifest() opened %d connections, want 0", pool.Len())
+	}
+}
+
+func TestDBPool_OpenLazy(t *testing.T) {
+	dir := t.TempDir()
+	pool := NewDBPool(dir, DefaultMaxOpenDBs)
+	defer pool.Close()
+
+	// Open creates the DB file lazily via modernc.org/sqlite.
+	cdb, err := pool.Open("testproject")
+	if err != nil {
+		t.Fatalf("Open() error: %v", err)
+	}
+	if cdb == nil {
+		t.Fatal("Open() returned nil ClaimsDB")
+	}
+	if pool.Len() != 1 {
+		t.Errorf("pool.Len() = %d after Open, want 1", pool.Len())
+	}
+}
+
+func TestDBPool_OpenCached(t *testing.T) {
+	dir := t.TempDir()
+	pool := NewDBPool(dir, DefaultMaxOpenDBs)
+	defer pool.Close()
+
+	cdb1, err := pool.Open("myrepo")
+	if err != nil {
+		t.Fatalf("first Open() error: %v", err)
+	}
+
+	cdb2, err := pool.Open("myrepo")
+	if err != nil {
+		t.Fatalf("second Open() error: %v", err)
+	}
+
+	if cdb1 != cdb2 {
+		t.Error("Open() returned different instances for the same repo, expected cached")
+	}
+
+	if pool.Len() != 1 {
+		t.Errorf("pool.Len() = %d, want 1 (should not duplicate)", pool.Len())
+	}
+}
+
+func TestDBPool_LRUEviction(t *testing.T) {
+	dir := t.TempDir()
+	pool := NewDBPool(dir, 2) // max 2
+
+	// Open 2 repos — fills capacity.
+	_, err := pool.Open("repo-a")
+	if err != nil {
+		t.Fatalf("Open(repo-a): %v", err)
+	}
+	_, err = pool.Open("repo-b")
+	if err != nil {
+		t.Fatalf("Open(repo-b): %v", err)
+	}
+
+	if pool.Len() != 2 {
+		t.Fatalf("pool.Len() = %d, want 2", pool.Len())
+	}
+
+	// Open a third — should evict repo-a (LRU).
+	_, err = pool.Open("repo-c")
+	if err != nil {
+		t.Fatalf("Open(repo-c): %v", err)
+	}
+
+	if pool.Len() != 2 {
+		t.Errorf("pool.Len() = %d after eviction, want 2", pool.Len())
+	}
+
+	// repo-a should no longer be cached; opening it again should create a new connection.
+	pool.mu.Lock()
+	_, aExists := pool.conns["repo-a"]
+	_, bExists := pool.conns["repo-b"]
+	_, cExists := pool.conns["repo-c"]
+	pool.mu.Unlock()
+
+	if aExists {
+		t.Error("repo-a should have been evicted")
+	}
+	if !bExists {
+		t.Error("repo-b should still be cached")
+	}
+	if !cExists {
+		t.Error("repo-c should be cached")
+	}
+
+	pool.Close()
+}
+
+func TestDBPool_LRUPromotionPreventsEviction(t *testing.T) {
+	dir := t.TempDir()
+	pool := NewDBPool(dir, 2)
+	defer pool.Close()
+
+	// Open A, then B.
+	_, err := pool.Open("repo-a")
+	if err != nil {
+		t.Fatalf("Open(repo-a): %v", err)
+	}
+	_, err = pool.Open("repo-b")
+	if err != nil {
+		t.Fatalf("Open(repo-b): %v", err)
+	}
+
+	// Access A again to promote it — B is now LRU.
+	_, err = pool.Open("repo-a")
+	if err != nil {
+		t.Fatalf("Open(repo-a) again: %v", err)
+	}
+
+	// Open C — should evict B (not A, since A was promoted).
+	_, err = pool.Open("repo-c")
+	if err != nil {
+		t.Fatalf("Open(repo-c): %v", err)
+	}
+
+	pool.mu.Lock()
+	_, aExists := pool.conns["repo-a"]
+	_, bExists := pool.conns["repo-b"]
+	pool.mu.Unlock()
+
+	if !aExists {
+		t.Error("repo-a should NOT have been evicted (was promoted)")
+	}
+	if bExists {
+		t.Error("repo-b should have been evicted (was LRU)")
+	}
+}
+
+func TestDBPool_SetMaxOpenConns(t *testing.T) {
+	dir := t.TempDir()
+	pool := NewDBPool(dir, DefaultMaxOpenDBs)
+	defer pool.Close()
+
+	// Open a DB and verify it works (SetMaxOpenConns is called internally).
+	cdb, err := pool.Open("conntest")
+	if err != nil {
+		t.Fatalf("Open() error: %v", err)
+	}
+
+	// Verify the DB is functional by creating schema (exercises the connection).
+	if err := cdb.CreateSchema(); err != nil {
+		t.Fatalf("CreateSchema() error: %v", err)
+	}
+}
+
+func TestDBPool_Close(t *testing.T) {
+	dir := t.TempDir()
+	pool := NewDBPool(dir, DefaultMaxOpenDBs)
+
+	_, err := pool.Open("close-a")
+	if err != nil {
+		t.Fatalf("Open(close-a): %v", err)
+	}
+	_, err = pool.Open("close-b")
+	if err != nil {
+		t.Fatalf("Open(close-b): %v", err)
+	}
+
+	if err := pool.Close(); err != nil {
+		t.Fatalf("Close() error: %v", err)
+	}
+
+	if pool.Len() != 0 {
+		t.Errorf("pool.Len() = %d after Close, want 0", pool.Len())
+	}
+}
+
+func TestDBPool_DefaultMaxOpen(t *testing.T) {
+	pool := NewDBPool(t.TempDir(), 0) // 0 should default to 20
+	defer pool.Close()
+
+	if pool.maxOpen != DefaultMaxOpenDBs {
+		t.Errorf("maxOpen = %d, want %d (default)", pool.maxOpen, DefaultMaxOpenDBs)
+	}
+}
