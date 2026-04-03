@@ -82,6 +82,11 @@ func (c *ClaimsDB) Close() error {
 	return c.db.Close()
 }
 
+// SetMaxOpenConns sets the maximum number of open connections to the database.
+func (c *ClaimsDB) SetMaxOpenConns(n int) {
+	c.db.SetMaxOpenConns(n)
+}
+
 // CreateSchema creates all required tables and indexes.
 func (c *ClaimsDB) CreateSchema() error {
 	schema := `
@@ -637,6 +642,80 @@ func (c *ClaimsDB) DeleteSensitiveClaims() (int64, error) {
 		return 0, err
 	}
 	return result.RowsAffected()
+}
+
+// CountSymbols returns the total number of rows in the symbols table.
+func (c *ClaimsDB) CountSymbols() (int, error) {
+	var count int
+	err := c.db.QueryRow("SELECT COUNT(*) FROM symbols").Scan(&count)
+	if err != nil {
+		return 0, fmt.Errorf("count symbols: %w", err)
+	}
+	return count, nil
+}
+
+// CountClaims returns the total number of rows in the claims table.
+func (c *ClaimsDB) CountClaims() (int, error) {
+	var count int
+	err := c.db.QueryRow("SELECT COUNT(*) FROM claims").Scan(&count)
+	if err != nil {
+		return 0, fmt.Errorf("count claims: %w", err)
+	}
+	return count, nil
+}
+
+// ListDistinctImportPathsWithPrefix returns distinct import paths matching the
+// given prefix, ordered alphabetically and capped at limit. It also returns the
+// total count of matching distinct paths (ignoring the limit). When prefix is
+// empty, all distinct import paths are returned.
+func (c *ClaimsDB) ListDistinctImportPathsWithPrefix(prefix string, limit int) (paths []string, totalCount int, err error) {
+	// Build the count query.
+	var countQuery, listQuery string
+	var args []interface{}
+	if prefix == "" {
+		countQuery = "SELECT COUNT(DISTINCT import_path) FROM symbols"
+		listQuery = "SELECT DISTINCT import_path FROM symbols ORDER BY import_path LIMIT ?"
+		args = []interface{}{limit}
+	} else {
+		likePattern := prefix + "%"
+		countQuery = "SELECT COUNT(DISTINCT import_path) FROM symbols WHERE import_path LIKE ?"
+		listQuery = "SELECT DISTINCT import_path FROM symbols WHERE import_path LIKE ? ORDER BY import_path LIMIT ?"
+		// Count first.
+		if err := c.db.QueryRow(countQuery, likePattern).Scan(&totalCount); err != nil {
+			return nil, 0, fmt.Errorf("count distinct import paths with prefix: %w", err)
+		}
+		rows, err := c.db.Query(listQuery, likePattern, limit)
+		if err != nil {
+			return nil, 0, fmt.Errorf("list distinct import paths with prefix: %w", err)
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var p string
+			if err := rows.Scan(&p); err != nil {
+				return nil, 0, fmt.Errorf("scan import path: %w", err)
+			}
+			paths = append(paths, p)
+		}
+		return paths, totalCount, rows.Err()
+	}
+
+	// No-prefix path.
+	if err := c.db.QueryRow(countQuery).Scan(&totalCount); err != nil {
+		return nil, 0, fmt.Errorf("count distinct import paths: %w", err)
+	}
+	rows, err := c.db.Query(listQuery, args...)
+	if err != nil {
+		return nil, 0, fmt.Errorf("list distinct import paths: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var p string
+		if err := rows.Scan(&p); err != nil {
+			return nil, 0, fmt.Errorf("scan import path: %w", err)
+		}
+		paths = append(paths, p)
+	}
+	return paths, totalCount, rows.Err()
 }
 
 // Now returns the current time in RFC3339 format.

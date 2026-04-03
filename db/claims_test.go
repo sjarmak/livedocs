@@ -522,6 +522,148 @@ func TestIsCacheHit(t *testing.T) {
 	}
 }
 
+func TestCountSymbols(t *testing.T) {
+	db := tempDB(t)
+
+	// Empty DB should return 0.
+	count, err := db.CountSymbols()
+	if err != nil {
+		t.Fatalf("count symbols: %v", err)
+	}
+	if count != 0 {
+		t.Errorf("expected 0 symbols, got %d", count)
+	}
+
+	// Insert some symbols.
+	db.UpsertSymbol(Symbol{
+		Repo: "r", ImportPath: "p1", SymbolName: "A",
+		Language: "go", Kind: "func", Visibility: "public",
+	})
+	db.UpsertSymbol(Symbol{
+		Repo: "r", ImportPath: "p1", SymbolName: "B",
+		Language: "go", Kind: "type", Visibility: "public",
+	})
+	db.UpsertSymbol(Symbol{
+		Repo: "r", ImportPath: "p2", SymbolName: "C",
+		Language: "go", Kind: "func", Visibility: "public",
+	})
+
+	count, err = db.CountSymbols()
+	if err != nil {
+		t.Fatalf("count symbols: %v", err)
+	}
+	if count != 3 {
+		t.Errorf("expected 3 symbols, got %d", count)
+	}
+}
+
+func TestCountClaims(t *testing.T) {
+	db := tempDB(t)
+
+	// Empty DB should return 0.
+	count, err := db.CountClaims()
+	if err != nil {
+		t.Fatalf("count claims: %v", err)
+	}
+	if count != 0 {
+		t.Errorf("expected 0 claims, got %d", count)
+	}
+
+	// Insert a symbol and some claims.
+	symID, _ := db.UpsertSymbol(Symbol{
+		Repo: "r", ImportPath: "p", SymbolName: "F",
+		Language: "go", Kind: "func", Visibility: "public",
+	})
+	db.InsertClaim(Claim{
+		SubjectID: symID, Predicate: "defines", SourceFile: "a.go",
+		Confidence: 1.0, ClaimTier: "structural",
+		Extractor: "test", ExtractorVersion: "1.0", LastVerified: Now(),
+	})
+	db.InsertClaim(Claim{
+		SubjectID: symID, Predicate: "has_doc", SourceFile: "a.go",
+		Confidence: 0.9, ClaimTier: "structural",
+		Extractor: "test", ExtractorVersion: "1.0", LastVerified: Now(),
+	})
+
+	count, err = db.CountClaims()
+	if err != nil {
+		t.Fatalf("count claims: %v", err)
+	}
+	if count != 2 {
+		t.Errorf("expected 2 claims, got %d", count)
+	}
+}
+
+func TestListDistinctImportPathsWithPrefix(t *testing.T) {
+	db := tempDB(t)
+
+	// Insert symbols with various import paths.
+	for _, ip := range []string{
+		"k8s.io/api/core/v1",
+		"k8s.io/api/apps/v1",
+		"k8s.io/api/batch/v1",
+		"k8s.io/client-go/kubernetes",
+		"github.com/other/pkg",
+	} {
+		db.UpsertSymbol(Symbol{
+			Repo: "r", ImportPath: ip, SymbolName: "Sym",
+			Language: "go", Kind: "type", Visibility: "public",
+		})
+	}
+
+	// Test with prefix "k8s.io/api/" — should match 3 paths.
+	paths, total, err := db.ListDistinctImportPathsWithPrefix("k8s.io/api/", 100)
+	if err != nil {
+		t.Fatalf("list with prefix: %v", err)
+	}
+	if total != 3 {
+		t.Errorf("expected totalCount=3, got %d", total)
+	}
+	if len(paths) != 3 {
+		t.Fatalf("expected 3 paths, got %d", len(paths))
+	}
+	// Should be sorted alphabetically.
+	if paths[0] != "k8s.io/api/apps/v1" {
+		t.Errorf("expected first path k8s.io/api/apps/v1, got %s", paths[0])
+	}
+
+	// Test with limit smaller than total.
+	paths, total, err = db.ListDistinctImportPathsWithPrefix("k8s.io/api/", 2)
+	if err != nil {
+		t.Fatalf("list with prefix limit 2: %v", err)
+	}
+	if total != 3 {
+		t.Errorf("expected totalCount=3, got %d", total)
+	}
+	if len(paths) != 2 {
+		t.Errorf("expected 2 paths (limited), got %d", len(paths))
+	}
+
+	// Test with empty prefix — should return all 5.
+	paths, total, err = db.ListDistinctImportPathsWithPrefix("", 100)
+	if err != nil {
+		t.Fatalf("list with empty prefix: %v", err)
+	}
+	if total != 5 {
+		t.Errorf("expected totalCount=5, got %d", total)
+	}
+	if len(paths) != 5 {
+		t.Errorf("expected 5 paths, got %d", len(paths))
+	}
+
+	// Test with non-matching prefix.
+	paths, total, err = db.ListDistinctImportPathsWithPrefix("nonexistent/", 100)
+	if err != nil {
+		t.Fatalf("list with non-matching prefix: %v", err)
+	}
+	if total != 0 {
+		t.Errorf("expected totalCount=0, got %d", total)
+	}
+	if len(paths) != 0 {
+		t.Errorf("expected 0 paths, got %d", len(paths))
+	}
+}
+
 func TestDBFileCreation(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "test_repo.db")
