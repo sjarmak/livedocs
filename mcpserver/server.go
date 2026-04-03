@@ -121,12 +121,19 @@ func (s *Server) buildRegistry() ToolRegistry {
 	return reg
 }
 
-// registerMultiRepoTools registers the three multi-repo tools via the adapter layer.
+// registerMultiRepoTools registers the multi-repo tools via the adapter layer.
+// Builds a routing index for cross-repo symbol search.
 func (s *Server) registerMultiRepoTools(pool *DBPool) {
+	// Build routing index for search_symbols fan-out optimization.
+	index := NewRoutingIndex()
+	// Best-effort: if Build fails, search falls back to all repos.
+	_ = index.Build(pool)
+
 	defs := []ToolDef{
 		ListReposToolDef(pool),
 		ListPackagesToolDef(pool),
 		DescribePackageToolDef(pool),
+		SearchSymbolsToolDef(pool, index),
 	}
 	for _, def := range defs {
 		s.registry.Register(def)
