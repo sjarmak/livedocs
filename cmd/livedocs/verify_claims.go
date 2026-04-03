@@ -6,6 +6,7 @@ import (
 	"math/rand"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -197,7 +198,8 @@ func verifyOneClaim(cws claimWithSymbol, repoDir string) string {
 
 	info, err := os.Stat(sourceFile)
 	if err != nil {
-		return formatDrift(cl.SourceFile, cl.SourceLine, cl.Predicate, sym.SymbolName, "source file not found")
+		// Source file deleted — HIGH severity.
+		return formatDriftWithSeverity(SeverityHigh, cl.SourceFile, cl.SourceLine, cl.Predicate, sym.SymbolName, "source file not found")
 	}
 
 	// For "defines" predicate: check that the file exists and has content around the claimed line.
@@ -205,11 +207,12 @@ func verifyOneClaim(cws claimWithSymbol, repoDir string) string {
 		if cl.SourceLine > 0 {
 			content, err := os.ReadFile(sourceFile)
 			if err != nil {
-				return formatDrift(cl.SourceFile, cl.SourceLine, cl.Predicate, sym.SymbolName, "cannot read source file")
+				return formatDriftWithSeverity(SeverityHigh, cl.SourceFile, cl.SourceLine, cl.Predicate, sym.SymbolName, "cannot read source file")
 			}
 			lines := strings.Split(string(content), "\n")
 			if cl.SourceLine > len(lines) {
-				return formatDrift(cl.SourceFile, cl.SourceLine, cl.Predicate, sym.SymbolName,
+				// Line count mismatch suggests symbol moved — MEDIUM severity.
+				return formatDriftWithSeverity(SeverityMedium, cl.SourceFile, cl.SourceLine, cl.Predicate, sym.SymbolName,
 					fmt.Sprintf("source file has only %d lines, claim references line %d", len(lines), cl.SourceLine))
 			}
 		}
@@ -219,14 +222,15 @@ func verifyOneClaim(cws claimWithSymbol, repoDir string) string {
 	// Full signature re-parsing is expensive; check file modification time as proxy.
 	if cl.Predicate == "has_signature" {
 		if info.Size() == 0 {
-			return formatDrift(cl.SourceFile, cl.SourceLine, cl.Predicate, sym.SymbolName, "source file is empty")
+			return formatDriftWithSeverity(SeverityHigh, cl.SourceFile, cl.SourceLine, cl.Predicate, sym.SymbolName, "source file is empty")
 		}
 	}
 
 	// Staleness check: if last_verified is older than source file modification time.
 	lastVerified, err := time.Parse(time.RFC3339, cl.LastVerified)
 	if err == nil && info.ModTime().After(lastVerified) {
-		return formatDrift(cl.SourceFile, cl.SourceLine, cl.Predicate, sym.SymbolName,
+		// Source modified after verification — LOW severity (informational).
+		return formatDriftWithSeverity(SeverityLow, cl.SourceFile, cl.SourceLine, cl.Predicate, sym.SymbolName,
 			fmt.Sprintf("source modified %s after last verification %s",
 				info.ModTime().Format(time.RFC3339), cl.LastVerified))
 	}
@@ -234,9 +238,26 @@ func verifyOneClaim(cws claimWithSymbol, repoDir string) string {
 	return ""
 }
 
-// formatDrift produces a single CI-parseable drift line.
+// DriftSeverity classifies the severity of a drift finding.
+type DriftSeverity string
+
+const (
+	// SeverityHigh indicates a symbol was deleted or its source file no longer exists.
+	SeverityHigh DriftSeverity = "HIGH"
+	// SeverityMedium indicates a symbol was renamed or moved to a different import path.
+	SeverityMedium DriftSeverity = "MEDIUM"
+	// SeverityLow indicates a minor informational mismatch (e.g., staleness).
+	SeverityLow DriftSeverity = "LOW"
+)
+
+// formatDriftWithSeverity produces a single CI-parseable drift line with severity.
+func formatDriftWithSeverity(severity DriftSeverity, file string, line int, predicate, subject, detail string) string {
+	return fmt.Sprintf("DRIFT [%s]: %s:%d: %s %s — %s", severity, file, line, predicate, subject, detail)
+}
+
+// formatDrift produces a single CI-parseable drift line (defaults to LOW severity for backward compat).
 func formatDrift(file string, line int, predicate, subject, detail string) string {
-	return fmt.Sprintf("DRIFT: %s:%d: %s %s — %s", file, line, predicate, subject, detail)
+	return formatDriftWithSeverity(SeverityLow, file, line, predicate, subject, detail)
 }
 
 // runStaleness reports per-claim staleness information.
@@ -381,8 +402,8 @@ func runCheckExisting(cdb *db.ClaimsDB, repoDir string, out io.Writer) error {
 			}
 
 			if len(matches) == 0 {
-				// Symbol in README not found in claims DB at all.
-				fmt.Fprintf(out, "DRIFT: %s:0: readme_ref %s — symbol referenced in README but not found in claims DB\n",
+				// Symbol in README not found in claims DB at all — HIGH severity.
+				fmt.Fprintf(out, "DRIFT [HIGH]: %s:0: readme_ref %s — symbol referenced in README but not found in claims DB\n",
 					relReadme, sym)
 				driftCount++
 				continue
@@ -401,9 +422,35 @@ func runCheckExisting(cdb *db.ClaimsDB, repoDir string, out io.Writer) error {
 							sourceFile = filepath.Join(repoDir, sourceFile)
 						}
 						if _, err := os.Stat(sourceFile); err != nil {
-							fmt.Fprintf(out, "DRIFT: %s:0: readme_ref %s — README references symbol but source file %s no longer exists\n",
+							// Source file deleted but referenced in README — HIGH severity.
+							fmt.Fprintf(out, "DRIFT [HIGH]: %s:0: readme_ref %s — README references symbol but source file %s no longer exists\n",
 								relReadme, sym, cl.SourceFile)
 							driftCount++
+						}
+					}
+				}
+
+				// Check if symbol exists but in a different import path than expected.
+				// If the README references it and the DB has it under a different path,
+				// that's a MEDIUM severity (possibly renamed/moved).
+				if match.ImportPath != "" {
+					allByName, err := cdb.SearchSymbolsByName(sym)
+					if err == nil && len(allByName) > 1 {
+						// Multiple import paths for the same symbol name suggests a move.
+						pathSet := make(map[string]bool)
+						for _, s := range allByName {
+							pathSet[s.ImportPath] = true
+						}
+						if len(pathSet) > 1 {
+							paths := make([]string, 0, len(pathSet))
+							for p := range pathSet {
+								paths = append(paths, p)
+							}
+							sort.Strings(paths)
+							fmt.Fprintf(out, "DRIFT [MEDIUM]: %s:0: readme_ref %s — symbol found in multiple import paths: %s\n",
+								relReadme, sym, strings.Join(paths, ", "))
+							driftCount++
+							break // Only report once per symbol.
 						}
 					}
 				}
