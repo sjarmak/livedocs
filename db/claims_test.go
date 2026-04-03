@@ -1,6 +1,7 @@
 package db
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -664,6 +665,70 @@ func TestListDistinctImportPathsWithPrefix(t *testing.T) {
 	}
 }
 
+func TestSetAndGetExtractionMeta(t *testing.T) {
+	db := tempDB(t)
+
+	// Before setting, should return zero-value.
+	meta, err := db.GetExtractionMeta()
+	if err != nil {
+		t.Fatalf("get extraction meta (empty): %v", err)
+	}
+	if meta.CommitSHA != "" || meta.ExtractedAt != "" {
+		t.Errorf("expected empty meta before set, got %+v", meta)
+	}
+
+	// Set metadata.
+	ts := Now()
+	err = db.SetExtractionMeta(ExtractionMeta{
+		CommitSHA:   "abc123def456",
+		ExtractedAt: ts,
+	})
+	if err != nil {
+		t.Fatalf("set extraction meta: %v", err)
+	}
+
+	// Read it back.
+	meta, err = db.GetExtractionMeta()
+	if err != nil {
+		t.Fatalf("get extraction meta: %v", err)
+	}
+	if meta.CommitSHA != "abc123def456" {
+		t.Errorf("expected commit_sha=abc123def456, got %s", meta.CommitSHA)
+	}
+	if meta.ExtractedAt != ts {
+		t.Errorf("expected extracted_at=%s, got %s", ts, meta.ExtractedAt)
+	}
+
+	// Update (upsert) should overwrite.
+	ts2 := Now()
+	err = db.SetExtractionMeta(ExtractionMeta{
+		CommitSHA:   "newcommit789",
+		ExtractedAt: ts2,
+	})
+	if err != nil {
+		t.Fatalf("set extraction meta (update): %v", err)
+	}
+	meta, err = db.GetExtractionMeta()
+	if err != nil {
+		t.Fatalf("get extraction meta (updated): %v", err)
+	}
+	if meta.CommitSHA != "newcommit789" {
+		t.Errorf("expected updated commit_sha=newcommit789, got %s", meta.CommitSHA)
+	}
+}
+
+func TestGetExtractionMeta_NoTable(t *testing.T) {
+	// Open a DB without calling SetExtractionMeta — table doesn't exist.
+	db := tempDB(t)
+	meta, err := db.GetExtractionMeta()
+	if err != nil {
+		t.Fatalf("get extraction meta (no table): %v", err)
+	}
+	if meta.CommitSHA != "" || meta.ExtractedAt != "" {
+		t.Errorf("expected empty meta when table missing, got %+v", meta)
+	}
+}
+
 func TestDBFileCreation(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "test_repo.db")
@@ -678,5 +743,62 @@ func TestDBFileCreation(t *testing.T) {
 	// Verify file exists on disk.
 	if _, err := os.Stat(path); os.IsNotExist(err) {
 		t.Error("expected database file to exist on disk")
+	}
+}
+
+func TestBusyTimeoutSet(t *testing.T) {
+	cdb := tempDB(t)
+	var timeout int
+	err := cdb.DB().QueryRow("PRAGMA busy_timeout").Scan(&timeout)
+	if err != nil {
+		t.Fatalf("query busy_timeout: %v", err)
+	}
+	if timeout != 5000 {
+		t.Errorf("expected busy_timeout=5000, got %d", timeout)
+	}
+}
+
+func TestRunInTransaction_Commit(t *testing.T) {
+	cdb := tempDB(t)
+	err := cdb.RunInTransaction(func() error {
+		_, err := cdb.UpsertSymbol(Symbol{
+			Repo: "r", ImportPath: "p", SymbolName: "TxSym",
+			Language: "go", Kind: "func", Visibility: "public",
+		})
+		return err
+	})
+	if err != nil {
+		t.Fatalf("transaction commit: %v", err)
+	}
+	// Symbol should be visible after commit.
+	sym, err := cdb.GetSymbolByCompositeKey("r", "p", "TxSym")
+	if err != nil {
+		t.Fatalf("get symbol after commit: %v", err)
+	}
+	if sym.SymbolName != "TxSym" {
+		t.Errorf("expected TxSym, got %s", sym.SymbolName)
+	}
+}
+
+func TestRunInTransaction_Rollback(t *testing.T) {
+	cdb := tempDB(t)
+	// Insert a symbol inside a transaction that returns an error.
+	err := cdb.RunInTransaction(func() error {
+		_, err := cdb.UpsertSymbol(Symbol{
+			Repo: "r", ImportPath: "p", SymbolName: "RollbackSym",
+			Language: "go", Kind: "func", Visibility: "public",
+		})
+		if err != nil {
+			return err
+		}
+		return fmt.Errorf("intentional error to trigger rollback")
+	})
+	if err == nil {
+		t.Fatal("expected error from transaction")
+	}
+	// Symbol should NOT be visible after rollback.
+	_, err = cdb.GetSymbolByCompositeKey("r", "p", "RollbackSym")
+	if err == nil {
+		t.Error("expected error (no rows) after rollback, but symbol was found")
 	}
 }

@@ -24,10 +24,11 @@ const stalenessThreshold = 7 * 24 * time.Hour
 
 // repoInfo is the JSON structure for each repo in list_repos output.
 type repoInfo struct {
-	Repo        string `json:"repo"`
-	Symbols     int    `json:"symbols"`
-	Claims      int    `json:"claims"`
-	ExtractedAt string `json:"extracted_at,omitempty"`
+	Repo            string `json:"repo"`
+	Symbols         int    `json:"symbols"`
+	Claims          int    `json:"claims"`
+	ExtractedAt     string `json:"extracted_at,omitempty"`
+	ExtractedCommit string `json:"extracted_commit,omitempty"`
 }
 
 // listReposResponse wraps the list_repos JSON output.
@@ -65,17 +66,25 @@ func ListReposHandler(pool *DBPool) ToolHandler {
 			}
 
 			ts, _ := cdb.GetLatestLastIndexed()
+			meta, _ := cdb.GetExtractionMeta()
 
 			// Skip empty repos (no extracted symbols).
 			if symbols == 0 {
 				continue
 			}
 
+			// Prefer extraction_meta timestamp over source_files fallback.
+			extractedAt := ts
+			if meta.ExtractedAt != "" {
+				extractedAt = meta.ExtractedAt
+			}
+
 			info := repoInfo{
-				Repo:        repoName,
-				Symbols:     symbols,
-				Claims:      claims,
-				ExtractedAt: ts,
+				Repo:            repoName,
+				Symbols:         symbols,
+				Claims:          claims,
+				ExtractedAt:     extractedAt,
+				ExtractedCommit: meta.CommitSHA,
 			}
 			resp.Repos = append(resp.Repos, info)
 
@@ -119,10 +128,11 @@ Includes extracted_at timestamp and warns if data is older than 7 days.`,
 
 // listPackagesResponse is the JSON output for list_packages.
 type listPackagesResponse struct {
-	ImportPaths  []string `json:"import_paths"`
-	TotalCount   int      `json:"total_count"`
-	ExtractedAt  string   `json:"extracted_at,omitempty"`
-	StaleWarning string   `json:"stale_warning,omitempty"`
+	ImportPaths     []string `json:"import_paths"`
+	TotalCount      int      `json:"total_count"`
+	ExtractedAt     string   `json:"extracted_at,omitempty"`
+	ExtractedCommit string   `json:"extracted_commit,omitempty"`
+	StaleWarning    string   `json:"stale_warning,omitempty"`
 }
 
 // ListPackagesHandler returns a ToolHandler that lists packages for a repo.
@@ -145,11 +155,18 @@ func ListPackagesHandler(pool *DBPool) ToolHandler {
 		}
 
 		ts, _ := cdb.GetLatestLastIndexed()
+		meta, _ := cdb.GetExtractionMeta()
+
+		extractedAt := ts
+		if meta.ExtractedAt != "" {
+			extractedAt = meta.ExtractedAt
+		}
 
 		resp := listPackagesResponse{
-			ImportPaths: paths,
-			TotalCount:  totalCount,
-			ExtractedAt: ts,
+			ImportPaths:     paths,
+			TotalCount:      totalCount,
+			ExtractedAt:     extractedAt,
+			ExtractedCommit: meta.CommitSHA,
 		}
 		if resp.ImportPaths == nil {
 			resp.ImportPaths = []string{}
@@ -219,12 +236,24 @@ func DescribePackageHandler(pool *DBPool) ToolHandler {
 			md += "\n" + semanticMD
 		}
 
-		// Staleness check.
+		// Staleness check and freshness metadata.
 		ts, _ := cdb.GetLatestLastIndexed()
-		if ts != "" && isStale(ts) {
-			md = fmt.Sprintf("> **Warning:** Data extracted at %s is older than 7 days. Re-run extraction for fresh results.\n\n%s", ts, md)
-		} else if ts != "" {
-			md = fmt.Sprintf("> Data extracted at %s\n\n%s", ts, md)
+		meta, _ := cdb.GetExtractionMeta()
+
+		extractedAt := ts
+		if meta.ExtractedAt != "" {
+			extractedAt = meta.ExtractedAt
+		}
+
+		commitInfo := ""
+		if meta.CommitSHA != "" {
+			commitInfo = fmt.Sprintf(" (commit: %s)", meta.CommitSHA)
+		}
+
+		if extractedAt != "" && isStale(extractedAt) {
+			md = fmt.Sprintf("> **Warning:** Data extracted at %s%s is older than 7 days. Re-run extraction for fresh results.\n\n%s", extractedAt, commitInfo, md)
+		} else if extractedAt != "" {
+			md = fmt.Sprintf("> Data extracted at %s%s\n\n%s", extractedAt, commitInfo, md)
 		}
 
 		return NewTextResult(md), nil

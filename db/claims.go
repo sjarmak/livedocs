@@ -58,9 +58,18 @@ type XRef struct {
 	SymbolID  int64
 }
 
+// dbExecutor abstracts *sql.DB and *sql.Tx so ClaimsDB methods work inside
+// or outside a transaction.
+type dbExecutor interface {
+	Exec(query string, args ...interface{}) (sql.Result, error)
+	Query(query string, args ...interface{}) (*sql.Rows, error)
+	QueryRow(query string, args ...interface{}) *sql.Row
+}
+
 // ClaimsDB wraps a per-repo SQLite database.
 type ClaimsDB struct {
-	db *sql.DB
+	db   *sql.DB
+	exec dbExecutor // defaults to db; swapped to tx inside RunInTransaction
 }
 
 // OpenClaimsDB opens or creates a per-repo claims database at the given path.
@@ -74,7 +83,12 @@ func OpenClaimsDB(path string) (*ClaimsDB, error) {
 		db.Close()
 		return nil, fmt.Errorf("set WAL mode: %w", err)
 	}
-	return &ClaimsDB{db: db}, nil
+	// Set busy timeout so concurrent writers retry instead of failing immediately.
+	if _, err := db.Exec("PRAGMA busy_timeout = 5000"); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("set busy_timeout: %w", err)
+	}
+	return &ClaimsDB{db: db, exec: db}, nil
 }
 
 // DB returns the underlying *sql.DB for direct queries.
@@ -85,6 +99,26 @@ func (c *ClaimsDB) DB() *sql.DB {
 // Close closes the database connection.
 func (c *ClaimsDB) Close() error {
 	return c.db.Close()
+}
+
+// RunInTransaction executes fn inside a SQL transaction. All ClaimsDB methods
+// called within fn will use the transaction. If fn returns an error, the
+// transaction is rolled back; otherwise it is committed.
+func (c *ClaimsDB) RunInTransaction(fn func() error) error {
+	tx, err := c.db.Begin()
+	if err != nil {
+		return fmt.Errorf("begin transaction: %w", err)
+	}
+
+	prev := c.exec
+	c.exec = tx
+	defer func() { c.exec = prev }()
+
+	if err := fn(); err != nil {
+		tx.Rollback()
+		return err
+	}
+	return tx.Commit()
 }
 
 // SetMaxOpenConns sets the maximum number of open connections to the database.
@@ -147,14 +181,14 @@ CREATE TABLE IF NOT EXISTS source_files (
 );
 CREATE INDEX IF NOT EXISTS idx_source_files_deleted ON source_files(repo, deleted) WHERE deleted = 1;
 `
-	_, err := c.db.Exec(schema)
+	_, err := c.exec.Exec(schema)
 	return err
 }
 
 // UpsertSymbol inserts or updates a symbol, returning its ID.
 // On conflict (repo, import_path, symbol_name), updates mutable fields.
 func (c *ClaimsDB) UpsertSymbol(s Symbol) (int64, error) {
-	_, err := c.db.Exec(`
+	_, err := c.exec.Exec(`
 		INSERT INTO symbols (repo, import_path, symbol_name, language, kind, visibility, display_name, scip_symbol)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(repo, import_path, symbol_name) DO UPDATE SET
@@ -172,7 +206,7 @@ func (c *ClaimsDB) UpsertSymbol(s Symbol) (int64, error) {
 	// connection-scoped across all tables and is not updated on the
 	// conflict/update path.
 	var id int64
-	err = c.db.QueryRow(
+	err = c.exec.QueryRow(
 		"SELECT id FROM symbols WHERE repo = ? AND import_path = ? AND symbol_name = ?",
 		s.Repo, s.ImportPath, s.SymbolName,
 	).Scan(&id)
@@ -188,7 +222,7 @@ func (c *ClaimsDB) InsertClaim(cl Claim) (int64, error) {
 	if cl.ObjectID != 0 {
 		objectID = cl.ObjectID
 	}
-	result, err := c.db.Exec(`
+	result, err := c.exec.Exec(`
 		INSERT INTO claims (subject_id, predicate, object_text, object_id, source_file, source_line,
 		                     confidence, claim_tier, extractor, extractor_version, last_verified)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -206,7 +240,7 @@ func (c *ClaimsDB) UpsertSourceFile(sf SourceFile) (int64, error) {
 	if sf.Deleted {
 		deleted = 1
 	}
-	_, err := c.db.Exec(`
+	_, err := c.exec.Exec(`
 		INSERT INTO source_files (repo, relative_path, content_hash, extractor_version, grammar_version, last_indexed, deleted)
 		VALUES (?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(repo, relative_path) DO UPDATE SET
@@ -221,7 +255,7 @@ func (c *ClaimsDB) UpsertSourceFile(sf SourceFile) (int64, error) {
 		return 0, fmt.Errorf("upsert source file: %w", err)
 	}
 	var id int64
-	err = c.db.QueryRow(
+	err = c.exec.QueryRow(
 		"SELECT id FROM source_files WHERE repo = ? AND relative_path = ?",
 		sf.Repo, sf.RelativePath,
 	).Scan(&id)
@@ -235,7 +269,7 @@ func (c *ClaimsDB) UpsertSourceFile(sf SourceFile) (int64, error) {
 func (c *ClaimsDB) GetSymbolByCompositeKey(repo, importPath, symbolName string) (*Symbol, error) {
 	s := &Symbol{}
 	var displayName, scipSymbol sql.NullString
-	err := c.db.QueryRow(`
+	err := c.exec.QueryRow(`
 		SELECT id, repo, import_path, symbol_name, language, kind, visibility, display_name, scip_symbol
 		FROM symbols WHERE repo = ? AND import_path = ? AND symbol_name = ?
 	`, repo, importPath, symbolName).Scan(
@@ -252,7 +286,7 @@ func (c *ClaimsDB) GetSymbolByCompositeKey(repo, importPath, symbolName string) 
 
 // GetClaimsBySubject returns all claims for a given symbol ID.
 func (c *ClaimsDB) GetClaimsBySubject(subjectID int64) ([]Claim, error) {
-	rows, err := c.db.Query(`
+	rows, err := c.exec.Query(`
 		SELECT id, subject_id, predicate, object_text, object_id, source_file, source_line,
 		       confidence, claim_tier, extractor, extractor_version, last_verified
 		FROM claims WHERE subject_id = ?
@@ -285,7 +319,7 @@ func (c *ClaimsDB) GetClaimsBySubject(subjectID int64) ([]Claim, error) {
 // DeleteClaimsByExtractorAndFile removes all claims produced by a specific
 // extractor for a given source file. Used for re-import idempotency.
 func (c *ClaimsDB) DeleteClaimsByExtractorAndFile(extractor, sourceFile string) error {
-	_, err := c.db.Exec(
+	_, err := c.exec.Exec(
 		"DELETE FROM claims WHERE extractor = ? AND source_file = ?",
 		extractor, sourceFile,
 	)
@@ -298,7 +332,7 @@ func (c *ClaimsDB) GetSourceFile(repo, relativePath string) (*SourceFile, error)
 	sf := &SourceFile{}
 	var grammarVersion sql.NullString
 	var deleted int
-	err := c.db.QueryRow(`
+	err := c.exec.QueryRow(`
 		SELECT id, repo, relative_path, content_hash, extractor_version, grammar_version, last_indexed, deleted
 		FROM source_files WHERE repo = ? AND relative_path = ?
 	`, repo, relativePath).Scan(
@@ -315,7 +349,7 @@ func (c *ClaimsDB) GetSourceFile(repo, relativePath string) (*SourceFile, error)
 
 // ListSymbolsByImportPath returns all symbols for a given import path.
 func (c *ClaimsDB) ListSymbolsByImportPath(importPath string) ([]Symbol, error) {
-	rows, err := c.db.Query(`
+	rows, err := c.exec.Query(`
 		SELECT id, repo, import_path, symbol_name, language, kind, visibility, display_name, scip_symbol
 		FROM symbols WHERE import_path = ?
 		ORDER BY symbol_name
@@ -345,7 +379,7 @@ func (c *ClaimsDB) ListSymbolsByImportPath(importPath string) ([]Symbol, error) 
 
 // MarkFileDeleted sets the deleted tombstone flag on a source file.
 func (c *ClaimsDB) MarkFileDeleted(repo, relativePath string) error {
-	result, err := c.db.Exec(
+	result, err := c.exec.Exec(
 		"UPDATE source_files SET deleted = 1 WHERE repo = ? AND relative_path = ?",
 		repo, relativePath,
 	)
@@ -364,7 +398,7 @@ func (c *ClaimsDB) MarkFileDeleted(repo, relativePath string) error {
 
 // GetClaimsByFile returns all claims for a given source file path.
 func (c *ClaimsDB) GetClaimsByFile(sourceFile string) ([]Claim, error) {
-	rows, err := c.db.Query(`
+	rows, err := c.exec.Query(`
 		SELECT id, subject_id, predicate, object_text, object_id, source_file, source_line,
 		       confidence, claim_tier, extractor, extractor_version, last_verified
 		FROM claims WHERE source_file = ?
@@ -396,7 +430,7 @@ func (c *ClaimsDB) GetClaimsByFile(sourceFile string) ([]Claim, error) {
 
 // GetClaimsByPredicate returns all claims with a specific predicate.
 func (c *ClaimsDB) GetClaimsByPredicate(predicate string) ([]Claim, error) {
-	rows, err := c.db.Query(`
+	rows, err := c.exec.Query(`
 		SELECT id, subject_id, predicate, object_text, object_id, source_file, source_line,
 		       confidence, claim_tier, extractor, extractor_version, last_verified
 		FROM claims WHERE predicate = ?
@@ -428,7 +462,7 @@ func (c *ClaimsDB) GetClaimsByPredicate(predicate string) ([]Claim, error) {
 
 // ListDeletedFiles returns all source files marked as deleted for a given repo.
 func (c *ClaimsDB) ListDeletedFiles(repo string) ([]SourceFile, error) {
-	rows, err := c.db.Query(`
+	rows, err := c.exec.Query(`
 		SELECT id, repo, relative_path, content_hash, extractor_version, grammar_version, last_indexed, deleted
 		FROM source_files WHERE repo = ? AND deleted = 1
 	`, repo)
@@ -460,7 +494,7 @@ func (c *ClaimsDB) ListDeletedFiles(repo string) ([]SourceFile, error) {
 // and extractor/grammar version matching. Returns true if all three match.
 func (c *ClaimsDB) IsCacheHit(repo, relativePath, contentHash, extractorVersion, grammarVersion string) bool {
 	var count int
-	err := c.db.QueryRow(`
+	err := c.exec.QueryRow(`
 		SELECT COUNT(*) FROM source_files
 		WHERE repo = ? AND relative_path = ? AND content_hash = ?
 		  AND extractor_version = ? AND COALESCE(grammar_version, '') = ?
@@ -508,7 +542,7 @@ func (c *ClaimsDB) GetStructuralClaimsByImportPath(importPath string) ([]SymbolW
 
 // ListDistinctImportPaths returns all distinct import paths in the database.
 func (c *ClaimsDB) ListDistinctImportPaths(limit int) ([]string, error) {
-	rows, err := c.db.Query(`
+	rows, err := c.exec.Query(`
 		SELECT DISTINCT import_path FROM symbols ORDER BY import_path LIMIT ?
 	`, limit)
 	if err != nil {
@@ -530,7 +564,7 @@ func (c *ClaimsDB) ListDistinctImportPaths(limit int) ([]string, error) {
 // pattern using SQL LIKE. Use "%" as wildcard. For exact match, pass the name
 // directly without wildcards.
 func (c *ClaimsDB) SearchSymbolsByName(pattern string) ([]Symbol, error) {
-	rows, err := c.db.Query(`
+	rows, err := c.exec.Query(`
 		SELECT id, repo, import_path, symbol_name, language, kind, visibility, display_name, scip_symbol
 		FROM symbols WHERE symbol_name LIKE ?
 		ORDER BY symbol_name
@@ -578,7 +612,7 @@ func (c *ClaimsDB) GetClaimsByFileAndLineRange(sourceFile string, startLine, end
 		args = []interface{}{sourceFile, startLine, endLine}
 	}
 
-	rows, err := c.db.Query(query, args...)
+	rows, err := c.exec.Query(query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("get claims by file and line range: %w", err)
 	}
@@ -608,7 +642,7 @@ func (c *ClaimsDB) GetClaimsByFileAndLineRange(sourceFile string, startLine, end
 // a specific extractor for all symbols in a given import path. Used for
 // idempotent re-generation of semantic claims.
 func (c *ClaimsDB) DeleteClaimsByExtractorAndImportPath(extractor, importPath string) error {
-	_, err := c.db.Exec(`
+	_, err := c.exec.Exec(`
 		DELETE FROM claims
 		WHERE extractor = ?
 		  AND claim_tier = 'semantic'
@@ -620,7 +654,7 @@ func (c *ClaimsDB) DeleteClaimsByExtractorAndImportPath(extractor, importPath st
 // DeleteLowConfidenceSemanticClaims removes semantic claims with confidence
 // below the given threshold. Returns the number of rows deleted.
 func (c *ClaimsDB) DeleteLowConfidenceSemanticClaims(threshold float64) (int64, error) {
-	result, err := c.db.Exec(`
+	result, err := c.exec.Exec(`
 		DELETE FROM claims
 		WHERE claim_tier = 'semantic'
 		  AND confidence < ?
@@ -635,7 +669,7 @@ func (c *ClaimsDB) DeleteLowConfidenceSemanticClaims(threshold float64) (int64, 
 // patterns (password, secret, token, credential, api_key). Case-insensitive.
 // Returns the number of rows deleted.
 func (c *ClaimsDB) DeleteSensitiveClaims() (int64, error) {
-	result, err := c.db.Exec(`
+	result, err := c.exec.Exec(`
 		DELETE FROM claims
 		WHERE LOWER(object_text) LIKE '%password%'
 		   OR LOWER(object_text) LIKE '%secret%'
@@ -653,7 +687,7 @@ func (c *ClaimsDB) DeleteSensitiveClaims() (int64, error) {
 // source_files table. Returns an empty string if no source files exist.
 func (c *ClaimsDB) GetLatestLastIndexed() (string, error) {
 	var ts sql.NullString
-	err := c.db.QueryRow("SELECT MAX(last_indexed) FROM source_files").Scan(&ts)
+	err := c.exec.QueryRow("SELECT MAX(last_indexed) FROM source_files").Scan(&ts)
 	if err != nil {
 		return "", fmt.Errorf("get latest last_indexed: %w", err)
 	}
@@ -663,7 +697,7 @@ func (c *ClaimsDB) GetLatestLastIndexed() (string, error) {
 // CountSymbols returns the total number of rows in the symbols table.
 func (c *ClaimsDB) CountSymbols() (int, error) {
 	var count int
-	err := c.db.QueryRow("SELECT COUNT(*) FROM symbols").Scan(&count)
+	err := c.exec.QueryRow("SELECT COUNT(*) FROM symbols").Scan(&count)
 	if err != nil {
 		return 0, fmt.Errorf("count symbols: %w", err)
 	}
@@ -673,7 +707,7 @@ func (c *ClaimsDB) CountSymbols() (int, error) {
 // CountClaims returns the total number of rows in the claims table.
 func (c *ClaimsDB) CountClaims() (int, error) {
 	var count int
-	err := c.db.QueryRow("SELECT COUNT(*) FROM claims").Scan(&count)
+	err := c.exec.QueryRow("SELECT COUNT(*) FROM claims").Scan(&count)
 	if err != nil {
 		return 0, fmt.Errorf("count claims: %w", err)
 	}
@@ -697,10 +731,10 @@ func (c *ClaimsDB) ListDistinctImportPathsWithPrefix(prefix string, limit int) (
 		countQuery = "SELECT COUNT(DISTINCT import_path) FROM symbols WHERE import_path LIKE ?"
 		listQuery = "SELECT DISTINCT import_path FROM symbols WHERE import_path LIKE ? ORDER BY import_path LIMIT ?"
 		// Count first.
-		if err := c.db.QueryRow(countQuery, likePattern).Scan(&totalCount); err != nil {
+		if err := c.exec.QueryRow(countQuery, likePattern).Scan(&totalCount); err != nil {
 			return nil, 0, fmt.Errorf("count distinct import paths with prefix: %w", err)
 		}
-		rows, err := c.db.Query(listQuery, likePattern, limit)
+		rows, err := c.exec.Query(listQuery, likePattern, limit)
 		if err != nil {
 			return nil, 0, fmt.Errorf("list distinct import paths with prefix: %w", err)
 		}
@@ -716,10 +750,10 @@ func (c *ClaimsDB) ListDistinctImportPathsWithPrefix(prefix string, limit int) (
 	}
 
 	// No-prefix path.
-	if err := c.db.QueryRow(countQuery).Scan(&totalCount); err != nil {
+	if err := c.exec.QueryRow(countQuery).Scan(&totalCount); err != nil {
 		return nil, 0, fmt.Errorf("count distinct import paths: %w", err)
 	}
-	rows, err := c.db.Query(listQuery, args...)
+	rows, err := c.exec.Query(listQuery, args...)
 	if err != nil {
 		return nil, 0, fmt.Errorf("list distinct import paths: %w", err)
 	}
@@ -738,7 +772,7 @@ func (c *ClaimsDB) ListDistinctImportPathsWithPrefix(prefix string, limit int) (
 // from all symbol names. Only symbols with names at least n characters long
 // are included. Used by the routing index to map prefixes to repos.
 func (c *ClaimsDB) DistinctSymbolPrefixes(n int) ([]string, error) {
-	rows, err := c.db.Query(
+	rows, err := c.exec.Query(
 		"SELECT DISTINCT LOWER(SUBSTR(symbol_name, 1, ?)) FROM symbols WHERE LENGTH(symbol_name) >= ?",
 		n, n,
 	)
@@ -756,6 +790,66 @@ func (c *ClaimsDB) DistinctSymbolPrefixes(n int) ([]string, error) {
 		prefixes = append(prefixes, p)
 	}
 	return prefixes, rows.Err()
+}
+
+// ExtractionMeta holds metadata about when and from which commit a repo was extracted.
+type ExtractionMeta struct {
+	CommitSHA   string
+	ExtractedAt string
+}
+
+// SetExtractionMeta inserts or updates the extraction metadata for this database.
+// Uses a single-row table keyed by id=1.
+func (c *ClaimsDB) SetExtractionMeta(meta ExtractionMeta) error {
+	_, err := c.exec.Exec(`
+		CREATE TABLE IF NOT EXISTS extraction_meta (
+			id              INTEGER PRIMARY KEY CHECK(id = 1),
+			commit_sha      TEXT NOT NULL,
+			extracted_at    TEXT NOT NULL
+		)
+	`)
+	if err != nil {
+		return fmt.Errorf("create extraction_meta table: %w", err)
+	}
+	_, err = c.exec.Exec(`
+		INSERT INTO extraction_meta (id, commit_sha, extracted_at)
+		VALUES (1, ?, ?)
+		ON CONFLICT(id) DO UPDATE SET
+			commit_sha = excluded.commit_sha,
+			extracted_at = excluded.extracted_at
+	`, meta.CommitSHA, meta.ExtractedAt)
+	if err != nil {
+		return fmt.Errorf("set extraction meta: %w", err)
+	}
+	return nil
+}
+
+// GetExtractionMeta reads the extraction metadata from the database.
+// Returns a zero-value ExtractionMeta (empty strings) if the table does not
+// exist or contains no rows.
+func (c *ClaimsDB) GetExtractionMeta() (ExtractionMeta, error) {
+	var meta ExtractionMeta
+	// Check if table exists first to avoid errors on older DBs.
+	var tableCount int
+	err := c.exec.QueryRow(
+		"SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='extraction_meta'",
+	).Scan(&tableCount)
+	if err != nil {
+		return meta, fmt.Errorf("check extraction_meta table: %w", err)
+	}
+	if tableCount == 0 {
+		return meta, nil
+	}
+	err = c.exec.QueryRow(
+		"SELECT commit_sha, extracted_at FROM extraction_meta WHERE id = 1",
+	).Scan(&meta.CommitSHA, &meta.ExtractedAt)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return ExtractionMeta{}, nil
+		}
+		return meta, fmt.Errorf("get extraction meta: %w", err)
+	}
+	return meta, nil
 }
 
 // Now returns the current time in RFC3339 format.

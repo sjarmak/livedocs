@@ -952,3 +952,143 @@ func TestDBPool_Open_PathTraversal(t *testing.T) {
 		t.Errorf("expected valid repo to open, got: %v", err)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Freshness metadata tests (extraction_meta)
+// ---------------------------------------------------------------------------
+
+// setupMultiRepoDBWithMeta creates repos with extraction_meta set.
+func setupMultiRepoDBWithMeta(t *testing.T, commitSHA string, repos ...string) string {
+	t.Helper()
+	dataDir := setupMultiRepoDB(t, repos...)
+
+	for _, repoName := range repos {
+		dbPath := filepath.Join(dataDir, repoName+".claims.db")
+		cdb, err := db.OpenClaimsDB(dbPath)
+		if err != nil {
+			t.Fatalf("reopen db for %s: %v", repoName, err)
+		}
+		err = cdb.SetExtractionMeta(db.ExtractionMeta{
+			CommitSHA:   commitSHA,
+			ExtractedAt: db.Now(),
+		})
+		if err != nil {
+			t.Fatalf("set extraction meta for %s: %v", repoName, err)
+		}
+		cdb.Close()
+	}
+
+	return dataDir
+}
+
+func TestListRepos_WithExtractionMeta(t *testing.T) {
+	dataDir := setupMultiRepoDBWithMeta(t, "deadbeef1234", "alpha", "beta")
+	pool := NewDBPool(dataDir, DefaultMaxOpenDBs)
+	defer pool.Close()
+
+	handler := ListReposHandler(pool)
+	result, err := handler(context.Background(), &requestAdapter{raw: makeRequest(nil)})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.IsError() {
+		t.Fatalf("tool returned error: %s", result.Text())
+	}
+
+	var resp listReposResponse
+	if err := json.Unmarshal([]byte(result.Text()), &resp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
+	for _, r := range resp.Repos {
+		if r.ExtractedCommit != "deadbeef1234" {
+			t.Errorf("repo %s: expected extracted_commit=deadbeef1234, got %s", r.Repo, r.ExtractedCommit)
+		}
+		if r.ExtractedAt == "" {
+			t.Errorf("repo %s: expected non-empty extracted_at", r.Repo)
+		}
+	}
+}
+
+func TestListPackages_WithExtractionMeta(t *testing.T) {
+	dataDir := setupMultiRepoDBWithMeta(t, "cafebabe5678", "myrepo")
+	pool := NewDBPool(dataDir, DefaultMaxOpenDBs)
+	defer pool.Close()
+
+	handler := ListPackagesHandler(pool)
+	result, err := handler(context.Background(), &requestAdapter{raw: makeRequest(map[string]any{
+		"repo": "myrepo",
+	})})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.IsError() {
+		t.Fatalf("tool returned error: %s", result.Text())
+	}
+
+	var resp listPackagesResponse
+	if err := json.Unmarshal([]byte(result.Text()), &resp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
+	if resp.ExtractedCommit != "cafebabe5678" {
+		t.Errorf("expected extracted_commit=cafebabe5678, got %s", resp.ExtractedCommit)
+	}
+	if resp.ExtractedAt == "" {
+		t.Errorf("expected non-empty extracted_at")
+	}
+}
+
+func TestDescribePackage_WithExtractionMeta(t *testing.T) {
+	dataDir := setupMultiRepoDBWithMeta(t, "face0ff0abcd", "myrepo")
+	pool := NewDBPool(dataDir, DefaultMaxOpenDBs)
+	defer pool.Close()
+
+	handler := DescribePackageHandler(pool)
+	result, err := handler(context.Background(), &requestAdapter{raw: makeRequest(map[string]any{
+		"repo":        "myrepo",
+		"import_path": "example.com/myrepo/pkg",
+	})})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.IsError() {
+		t.Fatalf("tool returned error: %s", result.Text())
+	}
+
+	text := result.Text()
+	if !hasSubstr(text, "face0ff0abcd") {
+		t.Errorf("expected commit SHA in describe_package output, got:\n%s", text)
+	}
+	if !hasSubstr(text, "Data extracted at") {
+		t.Errorf("expected extraction timestamp in output")
+	}
+}
+
+func TestListRepos_WithoutExtractionMeta(t *testing.T) {
+	// Repos without extraction_meta should still work — fields are omitempty.
+	dataDir := setupMultiRepoDB(t, "nometarepo")
+	pool := NewDBPool(dataDir, DefaultMaxOpenDBs)
+	defer pool.Close()
+
+	handler := ListReposHandler(pool)
+	result, err := handler(context.Background(), &requestAdapter{raw: makeRequest(nil)})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.IsError() {
+		t.Fatalf("tool returned error: %s", result.Text())
+	}
+
+	var resp listReposResponse
+	if err := json.Unmarshal([]byte(result.Text()), &resp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
+	if len(resp.Repos) != 1 {
+		t.Fatalf("expected 1 repo, got %d", len(resp.Repos))
+	}
+	if resp.Repos[0].ExtractedCommit != "" {
+		t.Errorf("expected empty extracted_commit without meta, got %s", resp.Repos[0].ExtractedCommit)
+	}
+}
