@@ -644,6 +644,17 @@ func (c *ClaimsDB) DeleteSensitiveClaims() (int64, error) {
 	return result.RowsAffected()
 }
 
+// GetLatestLastIndexed returns the most recent last_indexed timestamp from the
+// source_files table. Returns an empty string if no source files exist.
+func (c *ClaimsDB) GetLatestLastIndexed() (string, error) {
+	var ts sql.NullString
+	err := c.db.QueryRow("SELECT MAX(last_indexed) FROM source_files").Scan(&ts)
+	if err != nil {
+		return "", fmt.Errorf("get latest last_indexed: %w", err)
+	}
+	return ts.String, nil
+}
+
 // CountSymbols returns the total number of rows in the symbols table.
 func (c *ClaimsDB) CountSymbols() (int, error) {
 	var count int

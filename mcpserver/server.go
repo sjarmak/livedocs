@@ -1,8 +1,12 @@
 // Package mcpserver implements an MCP (Model Context Protocol) server that
-// exposes livedocs functionality as tools. It provides three tools:
+// exposes livedocs functionality as tools. It provides seven tools:
 //   - query_claims: search claims by symbol name and optional predicate
 //   - check_drift: detect documentation drift for a file
 //   - verify_section: check if claims anchored to a line range are still valid
+//   - check_ai_context: verify AI context files for stale references
+//   - list_repos: list all repositories in multi-repo mode
+//   - list_packages: list import paths for a repository
+//   - describe_package: render Markdown documentation for a package
 //
 // The server communicates over stdio using JSON-RPC per the MCP spec.
 package mcpserver
@@ -11,6 +15,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
+	"os/signal"
+	"syscall"
 
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
@@ -23,8 +30,10 @@ import (
 
 // Config holds the configuration for the MCP server.
 type Config struct {
-	// DBPath is the path to the claims SQLite database.
+	// DBPath is the path to the claims SQLite database (single-DB mode).
 	DBPath string
+	// DataDir is the directory containing per-repo .claims.db files (multi-repo mode).
+	DataDir string
 	// Telemetry enables opt-in anonymous telemetry collection.
 	Telemetry bool
 }
@@ -33,20 +42,59 @@ type Config struct {
 type Server struct {
 	mcpServer *server.MCPServer
 	claimsDB  *db.ClaimsDB
+	pool      *DBPool
 	telemetry *Collector
 }
 
 // New creates a new MCP server with the given configuration.
 // The caller must call Close when done.
+//
+// In single-DB mode (DBPath set), the server registers the 4 legacy tools.
+// In multi-repo mode (DataDir set), the server additionally registers
+// list_repos, list_packages, and describe_package.
 func New(cfg Config) (*Server, error) {
-	claimsDB, err := db.OpenClaimsDB(cfg.DBPath)
-	if err != nil {
-		return nil, fmt.Errorf("open claims db: %w", err)
+	// Validate: at least one mode must be specified.
+	if cfg.DBPath == "" && cfg.DataDir == "" {
+		return nil, fmt.Errorf("either DBPath or DataDir must be specified")
 	}
-	s := NewWithDB(claimsDB)
+
+	// Validate DataDir exists if specified.
+	if cfg.DataDir != "" {
+		info, err := os.Stat(cfg.DataDir)
+		if err != nil {
+			return nil, fmt.Errorf("data directory %s: %w", cfg.DataDir, err)
+		}
+		if !info.IsDir() {
+			return nil, fmt.Errorf("data directory %s is not a directory", cfg.DataDir)
+		}
+	}
+
+	var s *Server
+
+	if cfg.DBPath != "" {
+		// Single-DB mode: open the database and register legacy tools.
+		claimsDB, err := db.OpenClaimsDB(cfg.DBPath)
+		if err != nil {
+			return nil, fmt.Errorf("open claims db: %w", err)
+		}
+		s = NewWithDB(claimsDB)
+	} else {
+		// Multi-repo mode: create pool, no single claimsDB.
+		s = &Server{}
+		s.mcpServer = s.buildMCPServer()
+	}
+
+	// If DataDir is set, create pool and register multi-repo tools.
+	if cfg.DataDir != "" {
+		pool := NewDBPool(cfg.DataDir, DefaultMaxOpenDBs)
+		s.pool = pool
+		s.registerMultiRepoTools(pool)
+	}
+
 	s.telemetry = NewCollector(CollectorConfig{
 		Enabled: cfg.Telemetry,
 	})
+
 	return s, nil
 }
 
@@ -65,11 +113,28 @@ func (s *Server) buildMCPServer() *server.MCPServer {
 		server.WithToolCapabilities(false),
 		server.WithRecovery(),
 	)
-	srv.AddTool(queryClaimsTool(), s.withTelemetry("query_claims", s.handleQueryClaims))
-	srv.AddTool(checkDriftTool(), s.withTelemetry("check_drift", s.handleCheckDrift))
-	srv.AddTool(verifySectionTool(), s.withTelemetry("verify_section", s.handleVerifySection))
-	srv.AddTool(checkAIContextTool(), s.withTelemetry("check_ai_context", handleCheckAIContext))
+	// Register legacy tools only when we have a single claimsDB.
+	if s.claimsDB != nil {
+		srv.AddTool(queryClaimsTool(), s.withTelemetry("query_claims", s.handleQueryClaims))
+		srv.AddTool(checkDriftTool(), s.withTelemetry("check_drift", s.handleCheckDrift))
+		srv.AddTool(verifySectionTool(), s.withTelemetry("verify_section", s.handleVerifySection))
+		srv.AddTool(checkAIContextTool(), s.withTelemetry("check_ai_context", handleCheckAIContext))
+	}
 	return srv
+}
+
+// registerMultiRepoTools registers the three multi-repo tools via the adapter layer.
+func (s *Server) registerMultiRepoTools(pool *DBPool) {
+	defs := []ToolDef{
+		ListReposToolDef(pool),
+		ListPackagesToolDef(pool),
+		DescribePackageToolDef(pool),
+	}
+	for _, def := range defs {
+		tool := buildTool(def)
+		handler := adaptHandler(def.Handler)
+		s.mcpServer.AddTool(tool, handler)
+	}
 }
 
 // withTelemetry wraps a tool handler to record telemetry when enabled.
@@ -93,15 +158,39 @@ func (s *Server) Close() error {
 	if s.telemetry != nil {
 		_ = s.telemetry.Flush()
 	}
+	if s.pool != nil {
+		_ = s.pool.Close()
+	}
 	if s.claimsDB != nil {
 		return s.claimsDB.Close()
 	}
 	return nil
 }
 
-// Serve starts the MCP server over stdio. Blocks until the connection closes.
+// Serve starts the MCP server over stdio. Blocks until the connection closes
+// or a SIGTERM/SIGINT signal is received. Emits a ready signal to stderr
+// on successful init.
 func (s *Server) Serve() error {
-	return server.ServeStdio(s.mcpServer)
+	// Emit ready signal to stderr.
+	fmt.Fprintf(os.Stderr, "{\"status\":\"ready\"}\n")
+
+	// Set up signal handling for clean shutdown.
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
+	defer stop()
+
+	// Run the stdio server in a goroutine so we can react to signals.
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- server.ServeStdio(s.mcpServer)
+	}()
+
+	select {
+	case err := <-errCh:
+		return err
+	case <-ctx.Done():
+		// Signal received — clean shutdown.
+		return nil
+	}
 }
 
 // --- Tool definitions ---
