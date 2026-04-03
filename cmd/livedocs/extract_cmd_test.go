@@ -385,6 +385,97 @@ func main() { Hello() }
 	}
 }
 
+func TestExtractAtomicReplace(t *testing.T) {
+	resetExtractFlags()
+
+	repoDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(repoDir, "main.go"), []byte("package main\n"), 0644); err != nil {
+		t.Fatalf("write go file: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(repoDir, "go.mod"), []byte("module example.com/test\n\ngo 1.21\n"), 0644); err != nil {
+		t.Fatalf("write go.mod: %v", err)
+	}
+
+	outDir := t.TempDir()
+	outputDB := filepath.Join(outDir, "atomic.claims.db")
+
+	// Place a sentinel file at the output path to verify it gets replaced (not removed first).
+	if err := os.WriteFile(outputDB, []byte("sentinel-data"), 0644); err != nil {
+		t.Fatalf("write sentinel: %v", err)
+	}
+
+	buf := new(bytes.Buffer)
+	rootCmd.SetOut(buf)
+	rootCmd.SetArgs([]string{"extract", "--repo", "atomic-repo", "--output", outputDB, repoDir})
+	if err := rootCmd.Execute(); err != nil {
+		t.Fatalf("extract command failed: %v", err)
+	}
+
+	// Output DB should exist and be a valid SQLite file (not the sentinel).
+	content, err := os.ReadFile(outputDB)
+	if err != nil {
+		t.Fatalf("read output db: %v", err)
+	}
+	if string(content) == "sentinel-data" {
+		t.Error("output DB still contains sentinel data; atomic rename did not happen")
+	}
+	// SQLite files start with "SQLite format 3\000".
+	if len(content) < 16 || string(content[:15]) != "SQLite format 3" {
+		t.Error("output DB is not a valid SQLite file")
+	}
+
+	// No temp files should remain in the output directory.
+	entries, err := os.ReadDir(outDir)
+	if err != nil {
+		t.Fatalf("read dir: %v", err)
+	}
+	for _, e := range entries {
+		if strings.Contains(e.Name(), ".tmp.") {
+			t.Errorf("temp file left behind: %s", e.Name())
+		}
+	}
+}
+
+func TestExtractAtomicNoTempFileOnSuccess(t *testing.T) {
+	resetExtractFlags()
+
+	repoDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(repoDir, "main.go"), []byte("package main\n"), 0644); err != nil {
+		t.Fatalf("write go file: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(repoDir, "go.mod"), []byte("module example.com/test\n\ngo 1.21\n"), 0644); err != nil {
+		t.Fatalf("write go.mod: %v", err)
+	}
+
+	outDir := t.TempDir()
+	outputDB := filepath.Join(outDir, "notmp.claims.db")
+
+	buf := new(bytes.Buffer)
+	rootCmd.SetOut(buf)
+	rootCmd.SetArgs([]string{"extract", "--repo", "notmp-repo", "--output", outputDB, repoDir})
+	if err := rootCmd.Execute(); err != nil {
+		t.Fatalf("extract command failed: %v", err)
+	}
+
+	// Exactly one file should remain in the output directory (the DB itself).
+	entries, err := os.ReadDir(outDir)
+	if err != nil {
+		t.Fatalf("read dir: %v", err)
+	}
+	for _, e := range entries {
+		if strings.Contains(e.Name(), ".tmp.") {
+			t.Errorf("temp file left behind: %s", e.Name())
+		}
+	}
+	if len(entries) != 1 {
+		names := make([]string, len(entries))
+		for i, e := range entries {
+			names[i] = e.Name()
+		}
+		t.Errorf("expected exactly 1 file in output dir, got %d: %v", len(entries), names)
+	}
+}
+
 func TestExtractSensitiveContentFilter(t *testing.T) {
 	resetExtractFlags()
 

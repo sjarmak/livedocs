@@ -88,11 +88,29 @@ func runExtract(ctx context.Context, cmd *cobra.Command, repoDir, repoName, outp
 		outputPath = repoName + ".claims.db"
 	}
 
-	// Remove existing DB to start fresh.
-	_ = os.Remove(outputPath)
+	// Use atomic file replacement: extract into a temp file, then rename.
+	// This prevents MCP readers from seeing an empty/missing DB during extraction.
+	outputDir := filepath.Dir(outputPath)
+	if outputDir == "" {
+		outputDir = "."
+	}
+	tmpFile, err := os.CreateTemp(outputDir, filepath.Base(outputPath)+".tmp.*")
+	if err != nil {
+		return fmt.Errorf("create temp file: %w", err)
+	}
+	tmpPath := tmpFile.Name()
+	tmpFile.Close() // Close so OpenClaimsDB can open it
 
-	// Open on-disk claims DB.
-	claimsDB, err := db.OpenClaimsDB(outputPath)
+	// Clean up temp file on failure; on success we rename it.
+	extractOK := false
+	defer func() {
+		if !extractOK {
+			os.Remove(tmpPath)
+		}
+	}()
+
+	// Open claims DB at temp path.
+	claimsDB, err := db.OpenClaimsDB(tmpPath)
 	if err != nil {
 		return fmt.Errorf("open claims db: %w", err)
 	}
@@ -320,6 +338,15 @@ func runExtract(ctx context.Context, cmd *cobra.Command, repoDir, repoName, outp
 		fmt.Fprintf(out, "- **Semantic claims filtered**: %d\n", semanticFiltered)
 	}
 	fmt.Fprintf(out, "- **Duration**: %s\n", duration.Round(time.Millisecond))
+
+	// Close DB before rename so all data is flushed.
+	claimsDB.Close()
+
+	// Atomically replace the output file.
+	if err := os.Rename(tmpPath, outputPath); err != nil {
+		return fmt.Errorf("atomic rename %s -> %s: %w", tmpPath, outputPath, err)
+	}
+	extractOK = true
 
 	return nil
 }
