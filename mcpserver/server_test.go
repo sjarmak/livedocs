@@ -14,6 +14,12 @@ import (
 	"github.com/live-docs/live_docs/db"
 )
 
+// makeAdapterRequest creates a ToolRequest from a map of arguments for testing
+// legacy handlers that now use adapter types.
+func makeAdapterRequest(args map[string]any) ToolRequest {
+	return WrapRequest(makeRequest(args))
+}
+
 func hasSubstr(s, substr string) bool { return strings.Contains(s, substr) }
 
 // setupTestDB creates a temporary SQLite database with schema and test data.
@@ -118,61 +124,66 @@ func makeRequest(args map[string]any) mcp.CallToolRequest {
 
 // --- Tool schema quality tests ---
 
+// dummyServer returns a Server with a nil claimsDB, used only to obtain ToolDef metadata.
+func dummyServer() *Server {
+	return &Server{}
+}
+
 func TestToolSchemas_HaveDescriptions(t *testing.T) {
-	tools := []struct {
-		name string
-		tool mcp.Tool
-	}{
-		{"query_claims", queryClaimsTool()},
-		{"check_drift", checkDriftTool()},
-		{"verify_section", verifySectionTool()},
-		{"check_ai_context", checkAIContextTool()},
+	s := dummyServer()
+	defs := []ToolDef{
+		queryClaimsToolDef(s),
+		checkDriftToolDef(s),
+		verifySectionToolDef(s),
+		checkAIContextToolDef(),
 	}
 
-	for _, tt := range tools {
-		t.Run(tt.name, func(t *testing.T) {
-			if tt.tool.Description == "" {
-				t.Errorf("tool %s has no description", tt.name)
+	for _, def := range defs {
+		t.Run(def.Name, func(t *testing.T) {
+			if def.Description == "" {
+				t.Errorf("tool %s has no description", def.Name)
 			}
-			if len(tt.tool.Description) < 50 {
-				t.Errorf("tool %s description too short (%d chars), expected detailed description with examples", tt.name, len(tt.tool.Description))
+			if len(def.Description) < 50 {
+				t.Errorf("tool %s description too short (%d chars), expected detailed description with examples", def.Name, len(def.Description))
 			}
 		})
 	}
 }
 
 func TestToolSchemas_ParameterDescriptions(t *testing.T) {
-	tools := []struct {
-		name   string
-		tool   mcp.Tool
+	s := dummyServer()
+	tests := []struct {
+		def    ToolDef
 		params []string
 	}{
-		{"query_claims", queryClaimsTool(), []string{"symbol", "predicate"}},
-		{"check_drift", checkDriftTool(), []string{"file_path", "code_dir"}},
-		{"verify_section", verifySectionTool(), []string{"file_path", "start_line", "end_line"}},
-		{"check_ai_context", checkAIContextTool(), []string{"path"}},
+		{queryClaimsToolDef(s), []string{"symbol", "predicate"}},
+		{checkDriftToolDef(s), []string{"file_path", "code_dir"}},
+		{verifySectionToolDef(s), []string{"file_path", "start_line", "end_line"}},
+		{checkAIContextToolDef(), []string{"path"}},
 	}
 
-	for _, tt := range tools {
-		t.Run(tt.name, func(t *testing.T) {
-			props := tt.tool.InputSchema.Properties
+	for _, tt := range tests {
+		t.Run(tt.def.Name, func(t *testing.T) {
+			// Build the mcp.Tool to inspect schema properties.
+			tool := buildTool(tt.def)
+			props := tool.InputSchema.Properties
 			if props == nil {
-				t.Fatalf("tool %s: InputSchema.Properties is nil", tt.name)
+				t.Fatalf("tool %s: InputSchema.Properties is nil", tt.def.Name)
 			}
 			for _, param := range tt.params {
 				prop, ok := props[param]
 				if !ok {
-					t.Errorf("tool %s: missing parameter %q in schema", tt.name, param)
+					t.Errorf("tool %s: missing parameter %q in schema", tt.def.Name, param)
 					continue
 				}
 				propMap, ok := prop.(map[string]interface{})
 				if !ok {
-					t.Errorf("tool %s: parameter %q is not a map", tt.name, param)
+					t.Errorf("tool %s: parameter %q is not a map", tt.def.Name, param)
 					continue
 				}
 				desc, ok := propMap["description"]
 				if !ok || desc == "" {
-					t.Errorf("tool %s: parameter %q has no description", tt.name, param)
+					t.Errorf("tool %s: parameter %q has no description", tt.def.Name, param)
 				}
 			}
 		})
@@ -216,7 +227,7 @@ func TestQueryClaims_ExactMatch(t *testing.T) {
 	cdb := setupTestDB(t)
 	srv := NewWithDB(cdb)
 
-	req := makeRequest(map[string]any{
+	req := makeAdapterRequest(map[string]any{
 		"symbol": "NewServer",
 	})
 
@@ -224,12 +235,12 @@ func TestQueryClaims_ExactMatch(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if result.IsError {
-		t.Fatalf("tool returned error: %v", result.Content)
+	if result.IsError() {
+		t.Fatalf("tool returned error: %s", result.Text())
 	}
 
 	// Parse the JSON response.
-	text := result.Content[0].(mcp.TextContent).Text
+	text := result.Text()
 	var qr queryClaimsResult
 	if err := json.Unmarshal([]byte(text), &qr); err != nil {
 		t.Fatalf("unmarshal result: %v", err)
@@ -250,7 +261,7 @@ func TestQueryClaims_WildcardMatch(t *testing.T) {
 	cdb := setupTestDB(t)
 	srv := NewWithDB(cdb)
 
-	req := makeRequest(map[string]any{
+	req := makeAdapterRequest(map[string]any{
 		"symbol": "New%",
 	})
 
@@ -259,9 +270,8 @@ func TestQueryClaims_WildcardMatch(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	text := result.Content[0].(mcp.TextContent).Text
 	var qr queryClaimsResult
-	if err := json.Unmarshal([]byte(text), &qr); err != nil {
+	if err := json.Unmarshal([]byte(result.Text()), &qr); err != nil {
 		t.Fatalf("unmarshal result: %v", err)
 	}
 
@@ -277,7 +287,7 @@ func TestQueryClaims_PredicateFilter(t *testing.T) {
 	cdb := setupTestDB(t)
 	srv := NewWithDB(cdb)
 
-	req := makeRequest(map[string]any{
+	req := makeAdapterRequest(map[string]any{
 		"symbol":    "NewServer",
 		"predicate": "has_doc",
 	})
@@ -287,9 +297,8 @@ func TestQueryClaims_PredicateFilter(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	text := result.Content[0].(mcp.TextContent).Text
 	var qr queryClaimsResult
-	if err := json.Unmarshal([]byte(text), &qr); err != nil {
+	if err := json.Unmarshal([]byte(result.Text()), &qr); err != nil {
 		t.Fatalf("unmarshal result: %v", err)
 	}
 
@@ -302,7 +311,7 @@ func TestQueryClaims_NoResults(t *testing.T) {
 	cdb := setupTestDB(t)
 	srv := NewWithDB(cdb)
 
-	req := makeRequest(map[string]any{
+	req := makeAdapterRequest(map[string]any{
 		"symbol": "NonExistent",
 	})
 
@@ -311,9 +320,8 @@ func TestQueryClaims_NoResults(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	text := result.Content[0].(mcp.TextContent).Text
-	if !hasSubstr(text, `No symbols found matching "NonExistent"`) {
-		t.Errorf("unexpected text: %s", text)
+	if !hasSubstr(result.Text(), `No symbols found matching "NonExistent"`) {
+		t.Errorf("unexpected text: %s", result.Text())
 	}
 }
 
@@ -321,13 +329,13 @@ func TestQueryClaims_MissingSymbol(t *testing.T) {
 	cdb := setupTestDB(t)
 	srv := NewWithDB(cdb)
 
-	req := makeRequest(map[string]any{})
+	req := makeAdapterRequest(map[string]any{})
 
 	result, err := srv.handleQueryClaims(context.Background(), req)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if !result.IsError {
+	if !result.IsError() {
 		t.Errorf("expected error result for missing symbol")
 	}
 }
@@ -349,7 +357,7 @@ func TestCheckDrift(t *testing.T) {
 	cdb := setupTestDB(t)
 	srv := NewWithDB(cdb)
 
-	req := makeRequest(map[string]any{
+	req := makeAdapterRequest(map[string]any{
 		"file_path": readme,
 	})
 
@@ -357,13 +365,12 @@ func TestCheckDrift(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if result.IsError {
-		t.Fatalf("tool returned error: %v", result.Content)
+	if result.IsError() {
+		t.Fatalf("tool returned error: %s", result.Text())
 	}
 
-	text := result.Content[0].(mcp.TextContent).Text
 	var dr checkDriftResult
-	if err := json.Unmarshal([]byte(text), &dr); err != nil {
+	if err := json.Unmarshal([]byte(result.Text()), &dr); err != nil {
 		t.Fatalf("unmarshal result: %v", err)
 	}
 
@@ -389,13 +396,13 @@ func TestCheckDrift_MissingFilePath(t *testing.T) {
 	cdb := setupTestDB(t)
 	srv := NewWithDB(cdb)
 
-	req := makeRequest(map[string]any{})
+	req := makeAdapterRequest(map[string]any{})
 
 	result, err := srv.handleCheckDrift(context.Background(), req)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if !result.IsError {
+	if !result.IsError() {
 		t.Errorf("expected error result for missing file_path")
 	}
 }
@@ -405,7 +412,7 @@ func TestVerifySection(t *testing.T) {
 	srv := NewWithDB(cdb)
 
 	// Query claims for server.go lines 40-45 (our test claims are at lines 41 and 42).
-	req := makeRequest(map[string]any{
+	req := makeAdapterRequest(map[string]any{
 		"file_path":  "server.go",
 		"start_line": 40,
 		"end_line":   45,
@@ -415,13 +422,12 @@ func TestVerifySection(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if result.IsError {
-		t.Fatalf("tool returned error: %v", result.Content)
+	if result.IsError() {
+		t.Fatalf("tool returned error: %s", result.Text())
 	}
 
-	text := result.Content[0].(mcp.TextContent).Text
 	var vr verifySectionResult
-	if err := json.Unmarshal([]byte(text), &vr); err != nil {
+	if err := json.Unmarshal([]byte(result.Text()), &vr); err != nil {
 		t.Fatalf("unmarshal result: %v", err)
 	}
 
@@ -437,7 +443,7 @@ func TestVerifySection_NoClaims(t *testing.T) {
 	cdb := setupTestDB(t)
 	srv := NewWithDB(cdb)
 
-	req := makeRequest(map[string]any{
+	req := makeAdapterRequest(map[string]any{
 		"file_path":  "nonexistent.go",
 		"start_line": 1,
 		"end_line":   10,
@@ -447,13 +453,12 @@ func TestVerifySection_NoClaims(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if result.IsError {
+	if result.IsError() {
 		t.Fatalf("unexpected error result")
 	}
 
-	text := result.Content[0].(mcp.TextContent).Text
-	if !hasSubstr(text, "No claims found for nonexistent.go lines 1-10") {
-		t.Errorf("unexpected text: %s", text)
+	if !hasSubstr(result.Text(), "No claims found for nonexistent.go lines 1-10") {
+		t.Errorf("unexpected text: %s", result.Text())
 	}
 }
 
@@ -461,7 +466,7 @@ func TestVerifySection_InvalidRange(t *testing.T) {
 	cdb := setupTestDB(t)
 	srv := NewWithDB(cdb)
 
-	req := makeRequest(map[string]any{
+	req := makeAdapterRequest(map[string]any{
 		"file_path":  "server.go",
 		"start_line": 50,
 		"end_line":   10,
@@ -471,7 +476,7 @@ func TestVerifySection_InvalidRange(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if !result.IsError {
+	if !result.IsError() {
 		t.Errorf("expected error for invalid range")
 	}
 }
@@ -894,5 +899,56 @@ func TestNew_BothModes(t *testing.T) {
 	}
 	if srv.pool == nil {
 		t.Error("expected pool in dual-mode")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Path traversal validation tests
+// ---------------------------------------------------------------------------
+
+func TestValidateRepoName(t *testing.T) {
+	tests := []struct {
+		name    string
+		repo    string
+		wantErr bool
+	}{
+		{"valid simple name", "kubernetes", false},
+		{"valid with hyphen", "my-repo", false},
+		{"valid with dots", "repo.v2", false},
+		{"empty name", "", true},
+		{"path traversal dotdot", "../etc/passwd", true},
+		{"path traversal dotdot only", "..", true},
+		{"path traversal embedded", "foo/../bar", true},
+		{"forward slash", "foo/bar", true},
+		{"absolute path", "/etc/passwd", true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validateRepoName(tt.repo)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("validateRepoName(%q) error = %v, wantErr %v", tt.repo, err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestDBPool_Open_PathTraversal(t *testing.T) {
+	dataDir := setupMultiRepoDB(t, "safe-repo")
+	pool := NewDBPool(dataDir, DefaultMaxOpenDBs)
+	defer pool.Close()
+
+	// Attempt path traversal via Open.
+	_, err := pool.Open("../../../etc/passwd")
+	if err == nil {
+		t.Error("expected error for path traversal repo name")
+	}
+	if !hasSubstr(err.Error(), "path traversal") {
+		t.Errorf("expected path traversal error, got: %v", err)
+	}
+
+	// Valid repo should still work.
+	_, err = pool.Open("safe-repo")
+	if err != nil {
+		t.Errorf("expected valid repo to open, got: %v", err)
 	}
 }

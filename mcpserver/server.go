@@ -19,9 +19,6 @@ import (
 	"os/signal"
 	"syscall"
 
-	"github.com/mark3labs/mcp-go/mcp"
-	"github.com/mark3labs/mcp-go/server"
-
 	"github.com/live-docs/live_docs/aicontext"
 	"github.com/live-docs/live_docs/anchor"
 	"github.com/live-docs/live_docs/db"
@@ -40,7 +37,7 @@ type Config struct {
 
 // Server wraps the MCP server and its dependencies.
 type Server struct {
-	mcpServer *server.MCPServer
+	registry  ToolRegistry
 	claimsDB  *db.ClaimsDB
 	pool      *DBPool
 	telemetry *Collector
@@ -81,7 +78,7 @@ func New(cfg Config) (*Server, error) {
 	} else {
 		// Multi-repo mode: create pool, no single claimsDB.
 		s = &Server{}
-		s.mcpServer = s.buildMCPServer()
+		s.registry = s.buildRegistry()
 	}
 
 	// If DataDir is set, create pool and register multi-repo tools.
@@ -102,25 +99,26 @@ func New(cfg Config) (*Server, error) {
 // This is useful for testing. The caller is responsible for closing the DB.
 func NewWithDB(claimsDB *db.ClaimsDB) *Server {
 	s := &Server{claimsDB: claimsDB}
-	s.mcpServer = s.buildMCPServer()
+	s.registry = s.buildRegistry()
 	return s
 }
 
-func (s *Server) buildMCPServer() *server.MCPServer {
-	srv := server.NewMCPServer(
-		"livedocs",
-		"0.1.0",
-		server.WithToolCapabilities(false),
-		server.WithRecovery(),
-	)
+func (s *Server) buildRegistry() ToolRegistry {
+	reg := NewRegistry("livedocs", "0.1.0")
 	// Register legacy tools only when we have a single claimsDB.
 	if s.claimsDB != nil {
-		srv.AddTool(queryClaimsTool(), s.withTelemetry("query_claims", s.handleQueryClaims))
-		srv.AddTool(checkDriftTool(), s.withTelemetry("check_drift", s.handleCheckDrift))
-		srv.AddTool(verifySectionTool(), s.withTelemetry("verify_section", s.handleVerifySection))
-		srv.AddTool(checkAIContextTool(), s.withTelemetry("check_ai_context", handleCheckAIContext))
+		legacyDefs := []ToolDef{
+			queryClaimsToolDef(s),
+			checkDriftToolDef(s),
+			verifySectionToolDef(s),
+			checkAIContextToolDef(),
+		}
+		for _, def := range legacyDefs {
+			def.Handler = s.withTelemetry(def.Name, def.Handler)
+			reg.Register(def)
+		}
 	}
-	return srv
+	return reg
 }
 
 // registerMultiRepoTools registers the three multi-repo tools via the adapter layer.
@@ -131,15 +129,13 @@ func (s *Server) registerMultiRepoTools(pool *DBPool) {
 		DescribePackageToolDef(pool),
 	}
 	for _, def := range defs {
-		tool := buildTool(def)
-		handler := adaptHandler(def.Handler)
-		s.mcpServer.AddTool(tool, handler)
+		s.registry.Register(def)
 	}
 }
 
-// withTelemetry wraps a tool handler to record telemetry when enabled.
-func (s *Server) withTelemetry(name string, handler server.ToolHandlerFunc) server.ToolHandlerFunc {
-	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+// withTelemetry wraps a ToolHandler to record telemetry when enabled.
+func (s *Server) withTelemetry(name string, handler ToolHandler) ToolHandler {
+	return func(ctx context.Context, req ToolRequest) (ToolResult, error) {
 		if s.telemetry != nil {
 			repoPath := req.GetString("path", req.GetString("file_path", ""))
 			s.telemetry.Record(name, repoPath)
@@ -149,8 +145,8 @@ func (s *Server) withTelemetry(name string, handler server.ToolHandlerFunc) serv
 }
 
 // MCPServer returns the underlying MCP server for use with transports.
-func (s *Server) MCPServer() *server.MCPServer {
-	return s.mcpServer
+func (s *Server) MCPServer() interface{} {
+	return s.registry.Underlying()
 }
 
 // Close releases server resources, flushing any pending telemetry.
@@ -181,7 +177,7 @@ func (s *Server) Serve() error {
 	// Run the stdio server in a goroutine so we can react to signals.
 	errCh := make(chan error, 1)
 	go func() {
-		errCh <- server.ServeStdio(s.mcpServer)
+		errCh <- s.registry.Serve()
 	}()
 
 	select {
@@ -195,66 +191,59 @@ func (s *Server) Serve() error {
 
 // --- Tool definitions ---
 
-func queryClaimsTool() mcp.Tool {
-	return mcp.NewTool("query_claims",
-		mcp.WithDescription(`Search documentation claims by symbol name and optional predicate.
+func queryClaimsToolDef(s *Server) ToolDef {
+	return ToolDef{
+		Name: "query_claims",
+		Description: `Search documentation claims by symbol name and optional predicate.
 
 Returns structured claims from the livedocs claims database, grouped by symbol.
 Each claim includes its predicate (relationship type), source location, confidence score, and tier.
 
 Example response:
-{"symbols":[{"symbol":{"id":1,"repo":"myrepo","import_path":"pkg/server","name":"NewServer","kind":"function","language":"go"},"claims":[{"id":1,"predicate":"defines","object_text":"creates a new server instance","source_file":"server.go","source_line":42,"confidence":1.0,"tier":"structural"}]}],"total_claims":1}`),
-		mcp.WithString("symbol",
-			mcp.Required(),
-			mcp.Description("Symbol name to search for. Use exact names like 'NewServer' or SQL LIKE wildcards: 'New%' matches NewServer, NewClient, etc. Use '%Handler%' to find all handler symbols."),
-		),
-		mcp.WithString("predicate",
-			mcp.Description("Filter by claim predicate. Common predicates: 'defines' (structural definition), 'has_doc' (documentation comment), 'imports' (import relationship), 'purpose' (semantic purpose). Omit to return all claims for matching symbols."),
-		),
-	)
+{"symbols":[{"symbol":{"id":1,"repo":"myrepo","import_path":"pkg/server","name":"NewServer","kind":"function","language":"go"},"claims":[{"id":1,"predicate":"defines","object_text":"creates a new server instance","source_file":"server.go","source_line":42,"confidence":1.0,"tier":"structural"}]}],"total_claims":1}`,
+		Params: []ParamDef{
+			{Name: "symbol", Type: ParamString, Required: true, Description: "Symbol name to search for. Use exact names like 'NewServer' or SQL LIKE wildcards: 'New%' matches NewServer, NewClient, etc. Use '%Handler%' to find all handler symbols."},
+			{Name: "predicate", Type: ParamString, Required: false, Description: "Filter by claim predicate. Common predicates: 'defines' (structural definition), 'has_doc' (documentation comment), 'imports' (import relationship), 'purpose' (semantic purpose). Omit to return all claims for matching symbols."},
+		},
+		Handler: s.handleQueryClaims,
+	}
 }
 
-func checkDriftTool() mcp.Tool {
-	return mcp.NewTool("check_drift",
-		mcp.WithDescription(`Detect documentation drift by comparing symbol references in a README against actual code exports.
+func checkDriftToolDef(s *Server) ToolDef {
+	return ToolDef{
+		Name: "check_drift",
+		Description: `Detect documentation drift by comparing symbol references in a README against actual code exports.
 
 Finds symbols mentioned in documentation that no longer exist in code (stale references)
 and exported symbols in code that are not mentioned in documentation (undocumented).
 
 Example response:
-{"file_path":"pkg/server/README.md","has_drift":true,"stale_count":1,"undocumented_count":2,"stale_package_count":0,"findings":[{"kind":"stale_symbol","symbol":"OldHandler","detail":"referenced in README but not found in code"}]}`),
-		mcp.WithString("file_path",
-			mcp.Required(),
-			mcp.Description("Absolute or relative path to a README or markdown file to check for drift. Example: 'pkg/server/README.md'."),
-		),
-		mcp.WithString("code_dir",
-			mcp.Description("Code directory to compare against. Defaults to the directory containing file_path. Use when docs and code are in different directories."),
-		),
-	)
+{"file_path":"pkg/server/README.md","has_drift":true,"stale_count":1,"undocumented_count":2,"stale_package_count":0,"findings":[{"kind":"stale_symbol","symbol":"OldHandler","detail":"referenced in README but not found in code"}]}`,
+		Params: []ParamDef{
+			{Name: "file_path", Type: ParamString, Required: true, Description: "Absolute or relative path to a README or markdown file to check for drift. Example: 'pkg/server/README.md'."},
+			{Name: "code_dir", Type: ParamString, Required: false, Description: "Code directory to compare against. Defaults to the directory containing file_path. Use when docs and code are in different directories."},
+		},
+		Handler: s.handleCheckDrift,
+	}
 }
 
-func verifySectionTool() mcp.Tool {
-	return mcp.NewTool("verify_section",
-		mcp.WithDescription(`Verify whether documentation claims anchored to a specific file and line range are still valid.
+func verifySectionToolDef(s *Server) ToolDef {
+	return ToolDef{
+		Name: "verify_section",
+		Description: `Verify whether documentation claims anchored to a specific file and line range are still valid.
 
 Returns each claim's status: verified (still accurate), stale (code changed), or invalid (anchor lost).
 Use this after editing code to check if nearby documentation needs updating.
 
 Example response:
-{"file_path":"server.go","start_line":40,"end_line":50,"total_anchors":2,"verified":1,"stale":1,"invalid":0,"claims":[{"claim_id":1,"predicate":"defines","object_text":"creates a new server","source_line":42,"status":"verified"}]}`),
-		mcp.WithString("file_path",
-			mcp.Required(),
-			mcp.Description("Source file path whose claims to verify. Must match the path used during claim extraction (e.g. 'server.go' or 'pkg/server/server.go')."),
-		),
-		mcp.WithNumber("start_line",
-			mcp.Required(),
-			mcp.Description("First line number of the range to check (1-based, inclusive)."),
-		),
-		mcp.WithNumber("end_line",
-			mcp.Required(),
-			mcp.Description("Last line number of the range to check (1-based, inclusive). Must be >= start_line."),
-		),
-	)
+{"file_path":"server.go","start_line":40,"end_line":50,"total_anchors":2,"verified":1,"stale":1,"invalid":0,"claims":[{"claim_id":1,"predicate":"defines","object_text":"creates a new server","source_line":42,"status":"verified"}}`,
+		Params: []ParamDef{
+			{Name: "file_path", Type: ParamString, Required: true, Description: "Source file path whose claims to verify. Must match the path used during claim extraction (e.g. 'server.go' or 'pkg/server/server.go')."},
+			{Name: "start_line", Type: ParamNumber, Required: true, Description: "First line number of the range to check (1-based, inclusive)."},
+			{Name: "end_line", Type: ParamNumber, Required: true, Description: "Last line number of the range to check (1-based, inclusive). Must be >= start_line."},
+		},
+		Handler: s.handleVerifySection,
+	}
 }
 
 // --- Tool handlers ---
@@ -289,27 +278,27 @@ type claimInfo struct {
 	Tier       string  `json:"tier"`
 }
 
-func (s *Server) handleQueryClaims(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+func (s *Server) handleQueryClaims(_ context.Context, req ToolRequest) (ToolResult, error) {
 	symbol, err := req.RequireString("symbol")
 	if err != nil {
-		return mcp.NewToolResultError(err.Error()), nil
+		return NewErrorResult(err.Error()), nil
 	}
 	predicate := req.GetString("predicate", "")
 
 	symbols, err := s.claimsDB.SearchSymbolsByName(symbol)
 	if err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("search symbols: %v", err)), nil
+		return NewErrorResultf("search symbols: %v", err), nil
 	}
 
 	if len(symbols) == 0 {
-		return mcp.NewToolResultText(fmt.Sprintf("No symbols found matching %q. Try a broader wildcard pattern like '%%%s%%' or check that claims have been extracted for this repository.", symbol, symbol)), nil
+		return NewTextResult(fmt.Sprintf("No symbols found matching %q. Try a broader wildcard pattern like '%%%s%%' or check that claims have been extracted for this repository.", symbol, symbol)), nil
 	}
 
 	result := queryClaimsResult{}
 	for _, sym := range symbols {
 		claims, err := s.claimsDB.GetClaimsBySubject(sym.ID)
 		if err != nil {
-			return mcp.NewToolResultError(fmt.Sprintf("get claims for symbol %d: %v", sym.ID, err)), nil
+			return NewErrorResultf("get claims for symbol %d: %v", sym.ID, err), nil
 		}
 
 		var filtered []claimInfo
@@ -349,14 +338,14 @@ func (s *Server) handleQueryClaims(_ context.Context, req mcp.CallToolRequest) (
 		if predicate != "" {
 			msg += fmt.Sprintf(" with predicate %q. Available predicates: defines, has_doc, imports, purpose", predicate)
 		}
-		return mcp.NewToolResultText(msg), nil
+		return NewTextResult(msg), nil
 	}
 
 	data, err := json.Marshal(result)
 	if err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("marshal result: %v", err)), nil
+		return NewErrorResultf("marshal result: %v", err), nil
 	}
-	return mcp.NewToolResultText(string(data)), nil
+	return NewTextResult(string(data)), nil
 }
 
 // checkDriftResult is the JSON response for check_drift.
@@ -375,16 +364,16 @@ type driftFinding struct {
 	Detail string `json:"detail"`
 }
 
-func (s *Server) handleCheckDrift(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+func (s *Server) handleCheckDrift(_ context.Context, req ToolRequest) (ToolResult, error) {
 	filePath, err := req.RequireString("file_path")
 	if err != nil {
-		return mcp.NewToolResultError(err.Error()), nil
+		return NewErrorResult(err.Error()), nil
 	}
 	codeDir := req.GetString("code_dir", "")
 
 	report, err := drift.Detect(filePath, codeDir)
 	if err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("drift detect: %v", err)), nil
+		return NewErrorResultf("drift detect: %v", err), nil
 	}
 
 	result := checkDriftResult{
@@ -405,9 +394,9 @@ func (s *Server) handleCheckDrift(_ context.Context, req mcp.CallToolRequest) (*
 
 	data, err := json.Marshal(result)
 	if err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("marshal result: %v", err)), nil
+		return NewErrorResultf("marshal result: %v", err), nil
 	}
-	return mcp.NewToolResultText(string(data)), nil
+	return NewTextResult(string(data)), nil
 }
 
 // verifySectionResult is the JSON response for verify_section.
@@ -430,34 +419,34 @@ type verifySectionItem struct {
 	Status     string `json:"status"`
 }
 
-func (s *Server) handleVerifySection(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+func (s *Server) handleVerifySection(_ context.Context, req ToolRequest) (ToolResult, error) {
 	filePath, err := req.RequireString("file_path")
 	if err != nil {
-		return mcp.NewToolResultError(err.Error()), nil
+		return NewErrorResult(err.Error()), nil
 	}
 	startLine, err := req.RequireInt("start_line")
 	if err != nil {
-		return mcp.NewToolResultError(err.Error()), nil
+		return NewErrorResult(err.Error()), nil
 	}
 	endLine, err := req.RequireInt("end_line")
 	if err != nil {
-		return mcp.NewToolResultError(err.Error()), nil
+		return NewErrorResult(err.Error()), nil
 	}
 
 	if startLine < 0 || endLine < 0 {
-		return mcp.NewToolResultError("start_line and end_line must be non-negative (1-based line numbers)"), nil
+		return NewErrorResult("start_line and end_line must be non-negative (1-based line numbers)"), nil
 	}
 	if startLine > endLine && endLine != 0 {
-		return mcp.NewToolResultError(fmt.Sprintf("start_line (%d) must be <= end_line (%d)", startLine, endLine)), nil
+		return NewErrorResultf("start_line (%d) must be <= end_line (%d)", startLine, endLine), nil
 	}
 
 	claims, err := s.claimsDB.GetClaimsByFileAndLineRange(filePath, startLine, endLine)
 	if err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("get claims: %v", err)), nil
+		return NewErrorResultf("get claims: %v", err), nil
 	}
 
 	if len(claims) == 0 {
-		return mcp.NewToolResultText(fmt.Sprintf("No claims found for %s lines %d-%d. Ensure claims have been extracted for this file and that the path matches exactly.", filePath, startLine, endLine)), nil
+		return NewTextResult(fmt.Sprintf("No claims found for %s lines %d-%d. Ensure claims have been extracted for this file and that the path matches exactly.", filePath, startLine, endLine)), nil
 	}
 
 	// Build anchor index from the claims and check which overlap with the range.
@@ -490,8 +479,8 @@ func (s *Server) handleVerifySection(_ context.Context, req mcp.CallToolRequest)
 
 	for _, cl := range claims {
 		status := anchor.StatusVerified
-		if s, ok := anchorStatus[cl.ID]; ok {
-			status = s
+		if st, ok := anchorStatus[cl.ID]; ok {
+			status = st
 		}
 		result.ClaimsList = append(result.ClaimsList, verifySectionItem{
 			ClaimID:    cl.ID,
@@ -504,27 +493,28 @@ func (s *Server) handleVerifySection(_ context.Context, req mcp.CallToolRequest)
 
 	data, err := json.Marshal(result)
 	if err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("marshal result: %v", err)), nil
+		return NewErrorResultf("marshal result: %v", err), nil
 	}
-	return mcp.NewToolResultText(string(data)), nil
+	return NewTextResult(string(data)), nil
 }
 
 // --- check_ai_context tool ---
 
-func checkAIContextTool() mcp.Tool {
-	return mcp.NewTool("check_ai_context",
-		mcp.WithDescription(`Verify AI context files (CLAUDE.md, AGENTS.md, .cursorrules, .cursor/rules, etc.) for stale references.
+func checkAIContextToolDef() ToolDef {
+	return ToolDef{
+		Name: "check_ai_context",
+		Description: `Verify AI context files (CLAUDE.md, AGENTS.md, .cursorrules, .cursor/rules, etc.) for stale references.
 
 Scans for file paths that no longer exist, broken package references, and outdated claims
 in AI assistant instruction files. Helps keep AI context accurate as code evolves.
 
 Example response:
-{"path":"/repo","files":["CLAUDE.md"],"total_claims":5,"valid_count":4,"stale_count":1,"has_drift":true,"findings":[{"kind":"file_path","value":"src/old.go","source_file":"CLAUDE.md","line":12,"status":"stale","detail":"file does not exist"}]}`),
-		mcp.WithString("path",
-			mcp.Required(),
-			mcp.Description("Repository root path to scan. AI context files are discovered automatically (CLAUDE.md, AGENTS.md, .cursorrules, .cursor/rules/, etc.)."),
-		),
-	)
+{"path":"/repo","files":["CLAUDE.md"],"total_claims":5,"valid_count":4,"stale_count":1,"has_drift":true,"findings":[{"kind":"file_path","value":"src/old.go","source_file":"CLAUDE.md","line":12,"status":"stale","detail":"file does not exist"}]}`,
+		Params: []ParamDef{
+			{Name: "path", Type: ParamString, Required: true, Description: "Repository root path to scan. AI context files are discovered automatically (CLAUDE.md, AGENTS.md, .cursorrules, .cursor/rules/, etc.)."},
+		},
+		Handler: handleCheckAIContext,
+	}
 }
 
 // aiContextResult is the JSON response for check_ai_context.
@@ -547,15 +537,15 @@ type aiContextFinding struct {
 	Detail     string `json:"detail"`
 }
 
-func handleCheckAIContext(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+func handleCheckAIContext(_ context.Context, req ToolRequest) (ToolResult, error) {
 	path, err := req.RequireString("path")
 	if err != nil {
-		return mcp.NewToolResultError(err.Error()), nil
+		return NewErrorResult(err.Error()), nil
 	}
 
 	report, err := aicontext.Check(path)
 	if err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("check AI context: %v", err)), nil
+		return NewErrorResultf("check AI context: %v", err), nil
 	}
 
 	result := aiContextResult{
@@ -580,7 +570,7 @@ func handleCheckAIContext(_ context.Context, req mcp.CallToolRequest) (*mcp.Call
 
 	data, err := json.Marshal(result)
 	if err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("marshal result: %v", err)), nil
+		return NewErrorResultf("marshal result: %v", err), nil
 	}
-	return mcp.NewToolResultText(string(data)), nil
+	return NewTextResult(string(data)), nil
 }

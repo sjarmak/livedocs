@@ -3,6 +3,7 @@ package mcpserver
 import (
 	"container/list"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -53,11 +54,34 @@ func NewDBPool(dataDir string, maxOpen int) *DBPool {
 	}
 }
 
+// validateRepoName rejects repo names that could cause path traversal.
+// Repo names must not contain path separators, "..", or the OS-specific
+// path separator character.
+func validateRepoName(name string) error {
+	if name == "" {
+		return fmt.Errorf("repo name must not be empty")
+	}
+	if strings.Contains(name, "..") {
+		return fmt.Errorf("repo name %q contains path traversal sequence", name)
+	}
+	if strings.Contains(name, "/") {
+		return fmt.Errorf("repo name %q contains path separator", name)
+	}
+	if os.PathSeparator != '/' && strings.ContainsRune(name, os.PathSeparator) {
+		return fmt.Errorf("repo name %q contains path separator", name)
+	}
+	return nil
+}
+
 // Open returns a *db.ClaimsDB for the given repo name, opening it lazily on
 // first access. If the pool is at capacity, the least recently used connection
 // is evicted (closed) before opening a new one. Subsequent calls for the same
 // repo return the cached connection and promote it in the LRU order.
 func (p *DBPool) Open(repoName string) (*db.ClaimsDB, error) {
+	if err := validateRepoName(repoName); err != nil {
+		return nil, err
+	}
+
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
