@@ -12,6 +12,7 @@ import (
 
 var (
 	mcpDBPath    string
+	mcpDataDir   string
 	mcpTelemetry bool
 )
 
@@ -29,13 +30,21 @@ Exposes four tools to AI assistants:
 Setup: claude mcp add livedocs -- livedocs mcp
 See SETUP.md for Cursor and Windsurf configuration.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		dbPath := mcpDBPath
-		if dbPath == "" {
-			dbPath = filepath.Join(".livedocs", "claims.db")
+		cfg := mcpserver.Config{}
+
+		if mcpDataDir != "" {
+			cfg.DataDir = mcpDataDir
+		}
+		if mcpDBPath != "" {
+			cfg.DBPath = mcpDBPath
+		}
+		// If neither flag is set, fall back to the default single-DB path.
+		if cfg.DBPath == "" && cfg.DataDir == "" {
+			cfg.DBPath = filepath.Join(".livedocs", "claims.db")
 		}
 
-		telemetry := mcpTelemetry || os.Getenv("LIVEDOCS_TELEMETRY") == "1"
-		srv, err := mcpserver.New(mcpserver.Config{DBPath: dbPath, Telemetry: telemetry})
+		cfg.Telemetry = mcpTelemetry || os.Getenv("LIVEDOCS_TELEMETRY") == "1"
+		srv, err := mcpserver.New(cfg)
 		if err != nil {
 			return fmt.Errorf("create mcp server: %w", err)
 		}
@@ -47,5 +56,6 @@ See SETUP.md for Cursor and Windsurf configuration.`,
 
 func init() {
 	mcpCmd.Flags().StringVar(&mcpDBPath, "db", "", "path to claims database (default: .livedocs/claims.db)")
+	mcpCmd.Flags().StringVar(&mcpDataDir, "data-dir", "", "directory containing per-repo .claims.db files (multi-repo mode)")
 	mcpCmd.Flags().BoolVar(&mcpTelemetry, "telemetry", false, "enable anonymous usage telemetry (writes daily metrics to ~/.livedocs/telemetry/)")
 }

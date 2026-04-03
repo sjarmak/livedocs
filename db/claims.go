@@ -77,6 +77,11 @@ func OpenClaimsDB(path string) (*ClaimsDB, error) {
 	return &ClaimsDB{db: db}, nil
 }
 
+// DB returns the underlying *sql.DB for direct queries.
+func (c *ClaimsDB) DB() *sql.DB {
+	return c.db
+}
+
 // Close closes the database connection.
 func (c *ClaimsDB) Close() error {
 	return c.db.Close()
@@ -727,6 +732,30 @@ func (c *ClaimsDB) ListDistinctImportPathsWithPrefix(prefix string, limit int) (
 		paths = append(paths, p)
 	}
 	return paths, totalCount, rows.Err()
+}
+
+// DistinctSymbolPrefixes returns the distinct lowercase prefixes of length n
+// from all symbol names. Only symbols with names at least n characters long
+// are included. Used by the routing index to map prefixes to repos.
+func (c *ClaimsDB) DistinctSymbolPrefixes(n int) ([]string, error) {
+	rows, err := c.db.Query(
+		"SELECT DISTINCT LOWER(SUBSTR(symbol_name, 1, ?)) FROM symbols WHERE LENGTH(symbol_name) >= ?",
+		n, n,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("distinct symbol prefixes: %w", err)
+	}
+	defer rows.Close()
+
+	var prefixes []string
+	for rows.Next() {
+		var p string
+		if err := rows.Scan(&p); err != nil {
+			return nil, fmt.Errorf("scan prefix: %w", err)
+		}
+		prefixes = append(prefixes, p)
+	}
+	return prefixes, rows.Err()
 }
 
 // Now returns the current time in RFC3339 format.
