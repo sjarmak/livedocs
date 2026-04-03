@@ -21,4 +21,5 @@ func init() {
 	rootCmd.AddCommand(verifyCmd)
 	rootCmd.AddCommand(verifyClaimsCmd)
 	rootCmd.AddCommand(versionCmd)
+	rootCmd.AddCommand(watchCmd)
 }
