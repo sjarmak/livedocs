@@ -1,6 +1,6 @@
 # PRD: Live Documentation System
 
-> **Status:** Post-premortem (v3). Updated 2026-03-31 after 5-lens premortem risk analysis. See `premortem_live_docs_architecture.md` for full failure narratives. Previous: convergence debate (`convergence_report.md`).
+> **Status:** Post-implementation (v4). Updated 2026-04-02 after Phase 1-2 completion. Phases 0-2 fully implemented and tested. Phase 3-4 acceptance criteria updated to reflect actual CLI commands and available test corpus. See `premortem_live_docs_architecture.md` for failure narratives. Previous: convergence debate (`convergence_report.md`).
 
 ## Problem Statement
 
@@ -79,13 +79,13 @@ The system uses **claims-backed generation with verification gates**:
   - Acceptance: `go test ./extractor/goextractor/...` passes. Running extractor on `~/kubernetes/client-go/tools/cache` produces claims with predicates `defines`, `has_signature`, `imports`, `exports`, `has_doc`. Memory stays under 8GB (validated by `go test -run TestMemory` or equivalent).
 
 - **Tree-sitter extractor**: Universal fast-path extractor with strict predicate boundary (`defines`, `imports`, `exports`, `has_doc`, `is_test`, `is_generated` only).
-  - Acceptance: `go test ./extractor/treesitter/...` passes. Extractor handles `.go`, `.ts`, `.py`, `.sh` files. Running on `extractor/treesitter/testdata/sample.go` produces claims. WASM-based runtime (wazero) — `go build` succeeds with no CGO (`CGO_ENABLED=0 go build ./cmd/livedocs`).
+  - Acceptance: `go test ./extractor/treesitter/...` passes. Extractor handles `.go`, `.ts`, `.py`, `.sh` files. Running on `extractor/treesitter/testdata/sample.go` produces claims. Uses CGO-based `smacker/go-tree-sitter` (wazero evaluated and rejected — see `validation/wazero_eval.md`). Build via `Dockerfile` or `make build` for CGO compilation.
 
 - **Diff-triggered incremental pipeline**: On commit/PR, content-hash check → re-extract affected claims → re-verify → re-render.
   - Acceptance: `go test ./pipeline/...` passes. `livedocs diff --repo client-go <commit-a> <commit-b>` outputs only changed packages. Unchanged files are skipped (verified by checking cache hits in output). Pipeline completes in <30s for a 10-file diff on client-go.
 
 - **Verification pipeline**: AST diffing for structural claims. Contract anchors for semantic claims.
-  - Acceptance: `go test ./anchor/...` passes. `livedocs verify ~/kubernetes/client-go` exits 0 when docs match code, exits 1 when drift detected. Output lists specific drifted claims with file:line references.
+  - Acceptance: `go test ./anchor/...` passes. `livedocs verify-claims ~/kubernetes/client-go` exits 0 when docs match code, exits 1 when drift detected. Output lists specific drifted claims with file:line references.
 
 - **Content-hash caching**: SHA-256 of source + extractor version + grammar version. LRU eviction at 2GB cap. Deletion-aware reconciliation.
   - Acceptance: `go test ./cache/...` passes. Running extraction twice on same files → second run completes in <2s (cache hit). Changing extractor version invalidates cache (verified by test). Deleting a source file and re-running → claims for that file are tombstoned (`SELECT COUNT(*) FROM claims WHERE source_file='deleted.go'` returns 0).
@@ -108,27 +108,21 @@ The system uses **claims-backed generation with verification gates**:
   - Acceptance: `livedocs export --format markdown --repo client-go ~/kubernetes/client-go/tools/cache` produces a Markdown file. Output includes sections not in `go doc`: "Used By" (reverse dependencies), "Implements" (interface satisfaction), "Cross-Package References". `go test ./renderer/...` passes.
 
 - **Drift detection on existing docs**: Contract anchors against existing READMEs.
-  - Acceptance: `livedocs verify --check-existing ~/kubernetes/kubernetes` scans existing README.md files. Output reports claims that contradict current code with severity levels. `go test ./drift/...` passes.
+  - Acceptance: `livedocs verify-claims --check-existing ~/kubernetes/kubernetes` scans existing README.md files. Output reports claims that contradict current code with severity levels. `go test ./drift/...` passes.
 
 - **Claim-level staleness scoring**: Granular per-claim staleness.
-  - Acceptance: `sqlite3 <db> "SELECT COUNT(*) FROM claims WHERE last_verified < (SELECT MAX(last_modified) FROM sources WHERE sources.file = claims.source_file)"` returns the stale count. `livedocs verify --staleness` reports per-claim ages.
+  - Acceptance: `sqlite3 <db> "SELECT COUNT(*) FROM claims WHERE last_verified < (SELECT MAX(last_modified) FROM sources WHERE sources.file = claims.source_file)"` returns the stale count. `livedocs verify-claims --staleness` reports per-claim ages.
 
 - **Staleness canary**: Sample 50 claims per run, halt if >2% stale.
-  - Acceptance: `livedocs verify --canary` samples 50 random claims, re-verifies against source, prints pass/fail rate. Exits non-zero if staleness >2%.
+  - Acceptance: `livedocs verify-claims --canary` samples 50 random claims, re-verifies against source, prints pass/fail rate. Exits non-zero if staleness >2%.
 
 ### Nice-to-Have
-
-- **Semantic claim generation** (Tier 2) with LLM + verification gate.
-  - Acceptance: `go test ./semantic/...` passes. `livedocs extract --tier2 --repo client-go ~/kubernetes/client-go/tools/cache` produces semantic claims (purpose, usage patterns). Each claim has `claim_tier='semantic'` and `confidence` score. Verification gate rejects claims with confidence <0.7.
 
 - **Doc-as-PR-comment**: Preview claim impact alongside code diffs.
   - Acceptance: `livedocs prbot --dry-run <pr-url>` outputs the comment body without posting. Comment shows added/removed/changed claims per changed file.
 
-- **Security filter**: Prevent leaking test credentials or attack surface info.
-  - Acceptance: Claims containing patterns matching `password|secret|token|credential|api_key` in object_text are flagged and excluded from rendered output.
-
 - **Documentation canary tests**: Quality assurance for generated docs.
-  - Acceptance: `livedocs verify --canary-questions` generates 5 questions per package that docs should answer, checks if rendered docs contain answers.
+  - Acceptance: `livedocs verify-claims --canary-questions` generates 5 questions per package that docs should answer, checks if rendered docs contain answers.
 
 - **Adversarial doc fuzzing**: Generate questions docs should answer.
   - Acceptance: `livedocs fuzz --repo client-go tools/cache` generates edge-case questions and checks doc completeness.
@@ -145,59 +139,76 @@ The system uses **claims-backed generation with verification gates**:
 
 ## Phased Implementation (Post-Premortem)
 
-**Phase 0 (Day 1-2): Usefulness Validation** — DONE
+**Phase 0: Usefulness Validation** — DONE
 
 - Hand-write target documentation for 5 representative k8s packages
 - Compare against `go doc` output
 - Decision gate: proceed with Tier 1
 - Verification: `ls validation/tier1_samples/*.md | wc -l` == 5; `cat validation/tier1_verdict.md` contains go/no-go decision
 
-**Phase 1 (Week 1-2): Foundation — Go extractor + Claims DB** — PARTIALLY DONE
+**Phase 1: Foundation — Go extractor + Claims DB** — DONE
 
 - Go deep extractor with `go/packages` + `go/types` + `go/doc`
 - Per-repo SQLite claims DB with polyglot-ready schema
-- Tree-sitter extractor (universal fast path)
+- Tree-sitter extractor (universal fast path, CGO-based — wazero rejected per `validation/wazero_eval.md`)
+- Generated code exclusion (`*_generated.go`, `*_zz_generated*`, `*pb.go`)
 - Test on reduced corpus (5 repos)
 - Verification:
   - `go test ./db/... ./extractor/... ./extractor/goextractor/... ./extractor/treesitter/...` all pass
-  - `CGO_ENABLED=0 go build ./cmd/livedocs` succeeds (no CGO)
+  - `make build` or `docker build .` succeeds (CGO required — see wazero eval)
   - `livedocs extract --repo client-go ~/kubernetes/client-go` produces SQLite with >100 symbols, >500 claims
   - `sqlite3 <db> ".schema symbols"` shows `language` and `visibility` columns
+  - `go test -tags integration ./integration/... -run TestExtractClientGo` passes (29k+ claims)
+  - `go test ./extractor/... -run TestGeneratedExclusion` passes
 
-**Phase 2 (Week 3-4): Incremental pipeline + Tier 1 rendering**
+**Phase 2: Incremental pipeline + Tier 1 rendering** — DONE
 
 - Content-hash caching with extractor+grammar version in keys
 - Stateless post-commit hook (flat-file manifest, no SQLite)
 - Deletion-aware reconciliation
-- Tier 1 "enhanced go doc" rendering
+- Tier 1 "enhanced go doc" rendering with Used By, Implements, Cross-Package References
+- `livedocs verify-claims` with `--staleness`, `--canary`, `--check-existing`
+- `hack/verify-livedocs.sh` CI wrapper
 - Verification:
   - `go test ./pipeline/... ./cache/... ./renderer/... ./gitdiff/...` all pass
   - `livedocs diff --repo client-go <old> <new>` outputs only changed packages, completes in <30s
-  - `livedocs check` completes in <2s (no SQLite access)
-  - `livedocs export --format markdown --repo client-go ~/kubernetes/client-go/tools/cache` produces Markdown with "Used By", "Implements", "Cross-Package References" sections
-  - Cache test: extract same repo twice → second run <2s
+  - `livedocs check --manifest` completes in <2s (no SQLite access)
+  - `livedocs export --format markdown --repo client-go --db <db> ~/kubernetes/client-go/tools/cache` produces Markdown with "Used By", "Implements", "Cross-Package References" sections
+  - `go test -tags integration ./integration/... -run TestCacheHit` passes (second run <2s)
+  - `go test -tags integration ./integration/... -run TestDiffClientGo` passes (<30s)
 
-**Phase 3 (Month 2): Tier 2 semantic claims + full corpus**
+**Phase 3: Tier 2 semantic claims + full corpus**
 
-- LLM-generated semantic claims with verification gate
-- Expand to full 79-repo corpus
-- Drift detection against existing READMEs
+- Wire `--tier2` flag to `livedocs extract` command using existing `semantic/` package
+- Batch extraction across all 79 kubernetes repos
+- End-to-end drift detection against existing READMEs
+- Security filter for sensitive content in claims
 - Verification:
   - `go test ./semantic/... ./drift/... ./anchor/...` all pass
-  - `livedocs extract --tier2 --repo client-go ~/kubernetes/client-go/tools/cache` produces claims with `claim_tier='semantic'`
-  - `livedocs verify --check-existing ~/kubernetes/kubernetes` reports drift in existing READMEs
-  - `livedocs verify ~/kubernetes/client-go` exits 0 when docs match, 1 when drift found
+  - `livedocs extract --tier2 --repo client-go ~/kubernetes/client-go/tools/cache` produces claims with `claim_tier='semantic'` and `confidence` score in the DB
+  - Verification gate rejects claims with confidence <0.7: `sqlite3 <db> "SELECT COUNT(*) FROM claims WHERE claim_tier='semantic' AND confidence < 0.7"` returns 0
+  - `livedocs extract --tier2` requires `ANTHROPIC_API_KEY` env var; exits with clear error if missing
+  - `go test ./semantic/... -run TestGenerator` passes with mock LLM (no real API calls in unit tests)
+  - Batch corpus extraction: `livedocs extract --repo <name> ~/kubernetes/<repo>` succeeds for all 79 repos. A script `scripts/extract-corpus.sh` loops through all repos, stores DBs in `data/claims/`, and produces a summary CSV (`data/corpus-summary.csv`) with columns: repo, symbols, structural_claims, semantic_claims, duration_ms, errors
+  - `data/corpus-summary.csv` shows >0 symbols for each repo with Go source files
+  - Total structural claims across corpus >100,000
+  - `livedocs verify-claims --check-existing ~/kubernetes/kubernetes` scans existing README.md files, reports drift with severity levels, exits non-zero if drift found
+  - `livedocs verify-claims ~/kubernetes/client-go` exits 0 when structural claims match source
+  - Claims containing patterns matching `password|secret|token|credential|api_key` in object_text are flagged: `sqlite3 <db> "SELECT COUNT(*) FROM claims WHERE object_text LIKE '%password%' OR object_text LIKE '%secret%' OR object_text LIKE '%api_key%'"` returns 0 (filtered during extraction)
 
-**Phase 4 (Month 3+): Continuous maintenance + polyglot**
+**Phase 4: Continuous maintenance + polyglot**
 
-- Diff-triggered pipeline on every commit
+- Diff-triggered pipeline on every commit (CI integration)
 - Staleness canary (halt if >2% stale)
-- Python, Shell tree-sitter support
+- Python and Shell extraction validation on real repos
+- End-to-end incremental pipeline test
 - Verification:
-  - `livedocs verify --canary` samples 50 claims, exits non-zero if >2% stale
-  - `livedocs extract --repo pytorch ~/test-repos/pytorch/torch/nn` produces claims for `.py` files
-  - `livedocs extract --repo bash-scripts ~/test-repos/scripts` produces claims for `.sh` files
-  - End-to-end: modify a source file → `livedocs diff` detects it → `livedocs extract` re-extracts → `livedocs verify` confirms consistency
+  - `livedocs verify-claims --canary --db <db>` samples 50 claims, exits non-zero if >2% stale
+  - Python extraction: `livedocs extract --repo kubernetes ~/kubernetes/kubernetes` extracts claims from `.py` files (hack/ scripts). `sqlite3 <db> "SELECT COUNT(*) FROM claims WHERE source_file LIKE '%.py'"` returns >0
+  - Shell extraction: `livedocs extract --repo kubernetes ~/kubernetes/kubernetes` extracts claims from `.sh` files (hack/ scripts). `sqlite3 <db> "SELECT COUNT(*) FROM claims WHERE source_file LIKE '%.sh'"` returns >0
+  - End-to-end incremental test (integration test with build tag): create a temp repo, commit file A, extract, commit modified file A + new file B, run `livedocs diff`, verify only A and B are re-extracted, run `livedocs verify-claims`, confirm consistency
+  - `livedocs check --update-manifest` generates `.livedocs/manifest` for a repo; subsequent `livedocs check --manifest` detects doc impact from `git diff` in <2s
+  - `hack/verify-livedocs.sh ~/kubernetes/client-go` exits 0 (no drift in a repo with no docs to drift against)
 
 ## Open Questions (Post-Convergence)
 
@@ -206,6 +217,7 @@ The system uses **claims-backed generation with verification gates**:
 3. ~~Quality threshold for auto-merge~~ → _Resolved: Tier 1 (AST-only) auto-merges; Tier 2+ requires review_
 4. ~~Bootstrap strategy~~ → _Resolved: AST extraction for all packages in Phase 1, LLM enrichment in Phase 3_
 5. How to prevent "documentation theater"? _(open — needs usage analytics in Phase 4)_
+6. ~~CGO-free build~~ → _Resolved: wazero evaluated and rejected (no Go grammar). CGO retained with Docker/goreleaser mitigations. See `validation/wazero_eval.md`_
 
 ## Research Provenance
 
