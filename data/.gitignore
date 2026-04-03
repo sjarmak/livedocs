@@ -1,0 +1,3 @@
+# Ignore generated claims databases and CSV (large/binary files)
+claims/*.claims.db
+corpus-summary.csv
