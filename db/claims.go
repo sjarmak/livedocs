@@ -607,6 +607,38 @@ func (c *ClaimsDB) DeleteClaimsByExtractorAndImportPath(extractor, importPath st
 	return err
 }
 
+// DeleteLowConfidenceSemanticClaims removes semantic claims with confidence
+// below the given threshold. Returns the number of rows deleted.
+func (c *ClaimsDB) DeleteLowConfidenceSemanticClaims(threshold float64) (int64, error) {
+	result, err := c.db.Exec(`
+		DELETE FROM claims
+		WHERE claim_tier = 'semantic'
+		  AND confidence < ?
+	`, threshold)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
+// DeleteSensitiveClaims removes claims whose object_text contains sensitive
+// patterns (password, secret, token, credential, api_key). Case-insensitive.
+// Returns the number of rows deleted.
+func (c *ClaimsDB) DeleteSensitiveClaims() (int64, error) {
+	result, err := c.db.Exec(`
+		DELETE FROM claims
+		WHERE LOWER(object_text) LIKE '%password%'
+		   OR LOWER(object_text) LIKE '%secret%'
+		   OR LOWER(object_text) LIKE '%token%'
+		   OR LOWER(object_text) LIKE '%credential%'
+		   OR LOWER(object_text) LIKE '%api_key%'
+	`)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
 // Now returns the current time in RFC3339 format.
 func Now() string {
 	return time.Now().UTC().Format(time.RFC3339)

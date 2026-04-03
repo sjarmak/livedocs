@@ -17,12 +17,23 @@ import (
 	"github.com/live-docs/live_docs/extractor/goextractor"
 	"github.com/live-docs/live_docs/extractor/lang"
 	"github.com/live-docs/live_docs/extractor/treesitter"
+	"github.com/live-docs/live_docs/semantic"
 )
 
 var (
 	extractRepo   string
 	extractOutput string
+	extractTier2  bool
 )
+
+// newLLMClient creates the LLM client for semantic extraction.
+// Overridable in tests to inject a mock.
+var newLLMClient = func(apiKey string) (semantic.LLMClient, error) {
+	return semantic.NewAnthropicClient(apiKey)
+}
+
+// confidenceThreshold is the minimum confidence for semantic claims.
+const confidenceThreshold = 0.7
 
 var extractCmd = &cobra.Command{
 	Use:   "extract <path>",
@@ -55,6 +66,7 @@ Creates a per-repo SQLite database containing symbols and claims.`,
 func init() {
 	extractCmd.Flags().StringVar(&extractRepo, "repo", "", "repository name (default: directory basename)")
 	extractCmd.Flags().StringVarP(&extractOutput, "output", "o", "", "output SQLite file path (default: <repo>.claims.db)")
+	extractCmd.Flags().BoolVar(&extractTier2, "tier2", false, "generate Tier 2 semantic claims via LLM (requires ANTHROPIC_API_KEY)")
 }
 
 // skipDirs contains directory names to skip during file walking.
@@ -241,6 +253,53 @@ func runExtract(ctx context.Context, cmd *cobra.Command, repoDir, repoName, outp
 		return fmt.Errorf("walk repo: %w", err)
 	}
 
+	// Phase 3: Tier 2 semantic extraction (if requested).
+	var semanticStored int
+	var semanticFiltered int64
+	if extractTier2 {
+		apiKey := os.Getenv("ANTHROPIC_API_KEY")
+		if apiKey == "" {
+			return fmt.Errorf("ANTHROPIC_API_KEY environment variable is required for --tier2 semantic extraction")
+		}
+
+		fmt.Fprintf(out, "Running Tier 2 semantic extraction...\n")
+
+		client, clientErr := newLLMClient(apiKey)
+		if clientErr != nil {
+			return fmt.Errorf("create LLM client: %w", clientErr)
+		}
+
+		gen, genErr := semantic.NewGenerator(claimsDB, client, repoName)
+		if genErr != nil {
+			return fmt.Errorf("create semantic generator: %w", genErr)
+		}
+
+		batchResult, batchErr := gen.GenerateBatchFromDB(ctx, -1)
+		if batchErr != nil {
+			return fmt.Errorf("semantic batch generation: %w", batchErr)
+		}
+		semanticStored = batchResult.TotalClaims
+
+		// Confidence gate: remove semantic claims below threshold.
+		deleted, delErr := claimsDB.DeleteLowConfidenceSemanticClaims(confidenceThreshold)
+		if delErr != nil {
+			return fmt.Errorf("confidence gate: %w", delErr)
+		}
+		semanticFiltered = deleted
+
+		// Security filter: remove claims with sensitive content from semantic tier.
+		sensitiveDeleted, sensErr := claimsDB.DeleteSensitiveClaims()
+		if sensErr != nil {
+			return fmt.Errorf("sensitive content filter: %w", sensErr)
+		}
+		semanticFiltered += sensitiveDeleted
+
+		semanticStored -= int(semanticFiltered)
+
+		fmt.Fprintf(out, "Semantic claims: %d stored, %d filtered (confidence < %.1f or sensitive)\n",
+			semanticStored, semanticFiltered, confidenceThreshold)
+	}
+
 	// Count symbols in DB.
 	totalSymbols = countSymbols(claimsDB)
 
@@ -256,14 +315,22 @@ func runExtract(ctx context.Context, cmd *cobra.Command, repoDir, repoName, outp
 	fmt.Fprintf(out, "- **Non-Go files extracted**: %d\n", extractedFiles)
 	fmt.Fprintf(out, "- **Files skipped**: %d\n", skippedFiles)
 	fmt.Fprintf(out, "- **Errors**: %d\n", errorCount)
+	if extractTier2 {
+		fmt.Fprintf(out, "- **Semantic claims stored**: %d\n", semanticStored)
+		fmt.Fprintf(out, "- **Semantic claims filtered**: %d\n", semanticFiltered)
+	}
 	fmt.Fprintf(out, "- **Duration**: %s\n", duration.Round(time.Millisecond))
 
 	return nil
 }
 
 // storeClaims upserts symbols and inserts claims from a slice of extractor claims.
+// Claims with sensitive content in ObjectText are filtered out before storage.
 // Returns the number of claims stored.
 func storeClaims(claimsDB *db.ClaimsDB, repoName string, claims []extractor.Claim) (int, error) {
+	// Filter out claims containing sensitive content.
+	claims = extractor.FilterSensitiveClaims(claims)
+
 	stored := 0
 	for _, claim := range claims {
 		if claim.SubjectRepo == "" {
