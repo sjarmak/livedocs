@@ -186,6 +186,11 @@ func extractFunctionCategories(symbols []db.Symbol, claimsBySymbol map[int64][]d
 		if sym.Kind != "func" || sym.Visibility != "public" {
 			continue
 		}
+		// Skip test, benchmark, and example functions — they inflate output
+		// and are not useful for codebase onboarding.
+		if isTestFunction(sym.SymbolName) {
+			continue
+		}
 		category := ""
 		for _, cl := range claimsBySymbol[sym.ID] {
 			if cl.Predicate == "has_kind" && cl.ObjectText != "" {
@@ -281,4 +286,11 @@ func extractFileMetadata(symbols []db.Symbol, claimsBySymbol map[int64][]db.Clai
 	}
 	sort.Strings(testFiles)
 	return sourceCount, testCount, testFiles
+}
+
+// isTestFunction returns true for Go test, benchmark, and example functions.
+func isTestFunction(name string) bool {
+	return strings.HasPrefix(name, "Test") ||
+		strings.HasPrefix(name, "Benchmark") ||
+		strings.HasPrefix(name, "Example")
 }

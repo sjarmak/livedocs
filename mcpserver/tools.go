@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -65,6 +66,11 @@ func ListReposHandler(pool *DBPool) ToolHandler {
 
 			ts, _ := cdb.GetLatestLastIndexed()
 
+			// Skip empty repos (no extracted symbols).
+			if symbols == 0 {
+				continue
+			}
+
 			info := repoInfo{
 				Repo:        repoName,
 				Symbols:     symbols,
@@ -77,6 +83,11 @@ func ListReposHandler(pool *DBPool) ToolHandler {
 				anyStale = true
 			}
 		}
+
+		// Sort by symbol count descending — most relevant repos first.
+		sort.Slice(resp.Repos, func(i, j int) bool {
+			return resp.Repos[i].Symbols > resp.Repos[j].Symbols
+		})
 
 		if anyStale {
 			resp.StaleWarning = "One or more repos have data older than 7 days. Re-run extraction for fresh results."
