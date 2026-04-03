@@ -20,16 +20,16 @@ livedocs extract
 
 ## Claude Code
 
-One command:
+Single-repo mode (one repository):
 
 ```bash
 claude mcp add livedocs -- livedocs mcp
 ```
 
-Or with a custom database path:
+Multi-repo mode (corpus of repositories):
 
 ```bash
-claude mcp add livedocs -- livedocs mcp --db /path/to/claims.db
+claude mcp add livedocs -- livedocs mcp --data-dir /path/to/claims/
 ```
 
 ## Cursor
@@ -47,14 +47,14 @@ Add to `.cursor/mcp.json` in your project root:
 }
 ```
 
-With a custom database path:
+For multi-repo mode:
 
 ```json
 {
   "mcpServers": {
     "livedocs": {
       "command": "livedocs",
-      "args": ["mcp", "--db", "/path/to/claims.db"]
+      "args": ["mcp", "--data-dir", "/path/to/claims/"]
     }
   }
 }
@@ -77,6 +77,8 @@ Add to your Windsurf MCP configuration (`~/.windsurf/mcp.json` or project-level)
 
 ## Available Tools
 
+### Single-Repo Mode (`--db`)
+
 | Tool               | Description                                                             |
 | ------------------ | ----------------------------------------------------------------------- |
 | `query_claims`     | Search documentation claims by symbol name (supports wildcards)         |
@@ -84,19 +86,44 @@ Add to your Windsurf MCP configuration (`~/.windsurf/mcp.json` or project-level)
 | `verify_section`   | Check if claims for a file and line range are still valid               |
 | `check_ai_context` | Verify AI context files (CLAUDE.md, .cursorrules) for broken references |
 
+### Multi-Repo Mode (`--data-dir`)
+
+| Tool               | Description                                                           |
+| ------------------ | --------------------------------------------------------------------- |
+| `list_repos`       | List all repositories with symbol and claim counts                    |
+| `list_packages`    | List import paths for a repository, with optional prefix filter       |
+| `describe_package` | Render Markdown documentation for a package (interfaces, deps, types) |
+| `search_symbols`   | Cross-repo symbol search with routing index                           |
+
+## Static Context Generation
+
+For tools without MCP support, generate static documentation files:
+
+```bash
+# Single package to stdout
+livedocs context client-go tools/cache
+
+# All packages in a repo (generates .livedocs/<repo>/<pkg>/CONTEXT.md)
+livedocs context client-go
+```
+
 ## Usage Examples
 
 After connecting, ask your AI assistant:
 
-- "Query claims for the NewServer symbol"
-- "Check drift on pkg/server/README.md"
-- "Verify section server.go lines 40-80"
-- "Check AI context for this repository"
+- "List all available repos" (multi-repo)
+- "Describe the tools/cache package in client-go" (multi-repo)
+- "Search for NewInformer across all repos" (multi-repo)
+- "Query claims for the NewServer symbol" (single-repo)
+- "Check drift on pkg/server/README.md" (single-repo)
+- "Verify section server.go lines 40-80" (single-repo)
 
 ## Troubleshooting
 
 **"No symbols found"** - Run `livedocs extract` first to populate the claims database.
 
 **"open claims db" error** - Ensure `.livedocs/claims.db` exists in the working directory, or pass `--db` with the correct path.
+
+**"data directory ... no such file"** - The `--data-dir` path must exist and contain `*.claims.db` files.
 
 **Server not responding** - Verify `livedocs mcp` runs without errors: `echo '{}' | livedocs mcp` should produce JSON-RPC output.
