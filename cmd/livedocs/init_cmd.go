@@ -10,7 +10,10 @@ import (
 	"github.com/live-docs/live_docs/initcmd"
 )
 
-var initForce bool
+var (
+	initForce bool
+	initHook  bool
+)
 
 var initCmd = &cobra.Command{
 	Use:   "init [path]",
@@ -64,10 +67,24 @@ var initCmd = &cobra.Command{
 			fmt.Fprintf(out, "  Errors:     %d (non-fatal)\n", len(result.Errors))
 		}
 
+		// Install post-commit hook if requested.
+		if initHook {
+			installed, err := initcmd.InstallPostCommitHook(absPath)
+			if err != nil {
+				return fmt.Errorf("install hook: %w", err)
+			}
+			if installed {
+				fmt.Fprintln(out, "\nInstalled git post-commit hook for livedocs extract")
+			} else {
+				fmt.Fprintln(out, "\nGit post-commit hook already contains livedocs trigger")
+			}
+		}
+
 		return nil
 	},
 }
 
 func init() {
 	initCmd.Flags().BoolVar(&initForce, "force", false, "overwrite existing .livedocs.yaml")
+	initCmd.Flags().BoolVar(&initHook, "hook", false, "install git post-commit hook for automatic extraction")
 }
