@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/live-docs/live_docs/db"
 )
@@ -22,10 +23,12 @@ const (
 	maxOpenConnsPerDB = 2
 )
 
-// poolEntry tracks a single open claims DB and its position in the LRU list.
+// poolEntry tracks a single open claims DB, its position in the LRU list,
+// and the file modification time when it was opened.
 type poolEntry struct {
 	repoName string
 	claimsDB *db.ClaimsDB
+	modTime  time.Time // mtime of the DB file when the connection was opened
 }
 
 // DBPool manages a pool of lazily-opened, LRU-evicted per-repo SQLite connections.
@@ -85,10 +88,24 @@ func (p *DBPool) Open(repoName string) (*db.ClaimsDB, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
-	// Cache hit: promote to front of LRU and return.
+	// Cache hit: check if the underlying file has been modified since we opened it.
 	if elem, ok := p.conns[repoName]; ok {
-		p.lru.MoveToFront(elem)
-		return elem.Value.(*poolEntry).claimsDB, nil
+		entry := elem.Value.(*poolEntry)
+		stale, err := p.isStale(repoName, entry.modTime)
+		if err != nil {
+			// If we can't stat the file, treat the cached connection as valid
+			// rather than breaking callers (file may have been temporarily unavailable).
+			p.lru.MoveToFront(elem)
+			return entry.claimsDB, nil
+		}
+		if !stale {
+			p.lru.MoveToFront(elem)
+			return entry.claimsDB, nil
+		}
+		// File is newer — close old connection and remove from pool.
+		_ = entry.claimsDB.Close()
+		p.lru.Remove(elem)
+		delete(p.conns, repoName)
 	}
 
 	// Evict LRU if at capacity.
@@ -104,11 +121,27 @@ func (p *DBPool) Open(repoName string) (*db.ClaimsDB, error) {
 	}
 	cdb.SetMaxOpenConns(maxOpenConnsPerDB)
 
-	entry := &poolEntry{repoName: repoName, claimsDB: cdb}
+	// Record the file's current mtime for future staleness checks.
+	var modTime time.Time
+	if info, err := os.Stat(path); err == nil {
+		modTime = info.ModTime()
+	}
+
+	entry := &poolEntry{repoName: repoName, claimsDB: cdb, modTime: modTime}
 	elem := p.lru.PushFront(entry)
 	p.conns[repoName] = elem
 
 	return cdb, nil
+}
+
+// isStale reports whether the DB file for repoName has been modified since cachedMtime.
+// Caller must hold p.mu.
+func (p *DBPool) isStale(repoName string, cachedMtime time.Time) (bool, error) {
+	info, err := os.Stat(p.dbPath(repoName))
+	if err != nil {
+		return false, err
+	}
+	return info.ModTime().After(cachedMtime), nil
 }
 
 // evictLRU closes and removes the least recently used connection.

@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"sort"
 	"testing"
+	"time"
 )
 
 // createTestDBDir creates a temp directory with empty .claims.db files for the given repo names.
@@ -251,5 +252,121 @@ func TestDBPool_DefaultMaxOpen(t *testing.T) {
 
 	if pool.maxOpen != DefaultMaxOpenDBs {
 		t.Errorf("maxOpen = %d, want %d (default)", pool.maxOpen, DefaultMaxOpenDBs)
+	}
+}
+
+func TestDBPool_InvalidationOnModifiedFile(t *testing.T) {
+	dir := t.TempDir()
+	pool := NewDBPool(dir, DefaultMaxOpenDBs)
+	defer pool.Close()
+
+	repoName := "invalidation-test"
+
+	// First open creates the DB.
+	cdb1, err := pool.Open(repoName)
+	if err != nil {
+		t.Fatalf("first Open() error: %v", err)
+	}
+	if err := cdb1.CreateSchema(); err != nil {
+		t.Fatalf("CreateSchema() error: %v", err)
+	}
+
+	// Second open without modification returns the same instance.
+	cdb2, err := pool.Open(repoName)
+	if err != nil {
+		t.Fatalf("second Open() error: %v", err)
+	}
+	if cdb1 != cdb2 {
+		t.Error("expected same instance when file not modified")
+	}
+
+	// Touch the DB file with a future mtime to simulate extraction update.
+	dbPath := pool.dbPath(repoName)
+	future := time.Now().Add(2 * time.Second)
+	if err := os.Chtimes(dbPath, future, future); err != nil {
+		t.Fatalf("Chtimes() error: %v", err)
+	}
+
+	// Third open should detect the newer mtime and return a fresh connection.
+	cdb3, err := pool.Open(repoName)
+	if err != nil {
+		t.Fatalf("third Open() after touch error: %v", err)
+	}
+	if cdb3 == cdb1 {
+		t.Error("expected new instance after file modification, got same pointer")
+	}
+
+	// Pool should still have exactly 1 entry for this repo.
+	if pool.Len() != 1 {
+		t.Errorf("pool.Len() = %d after invalidation, want 1", pool.Len())
+	}
+}
+
+func TestDBPool_InvalidationPreservesPoolCount(t *testing.T) {
+	dir := t.TempDir()
+	pool := NewDBPool(dir, 3)
+	defer pool.Close()
+
+	// Open 3 repos to fill the pool.
+	for _, name := range []string{"repo-x", "repo-y", "repo-z"} {
+		if _, err := pool.Open(name); err != nil {
+			t.Fatalf("Open(%s): %v", name, err)
+		}
+	}
+	if pool.Len() != 3 {
+		t.Fatalf("pool.Len() = %d, want 3", pool.Len())
+	}
+
+	// Touch repo-y to invalidate it.
+	dbPath := pool.dbPath("repo-y")
+	future := time.Now().Add(2 * time.Second)
+	if err := os.Chtimes(dbPath, future, future); err != nil {
+		t.Fatalf("Chtimes() error: %v", err)
+	}
+
+	// Reopen repo-y — invalidation replaces it; pool count stays 3, no eviction needed.
+	if _, err := pool.Open("repo-y"); err != nil {
+		t.Fatalf("Open(repo-y) after invalidation: %v", err)
+	}
+	if pool.Len() != 3 {
+		t.Errorf("pool.Len() = %d after invalidation reopen, want 3", pool.Len())
+	}
+
+	// All three repos should still be present.
+	pool.mu.Lock()
+	for _, name := range []string{"repo-x", "repo-y", "repo-z"} {
+		if _, ok := pool.conns[name]; !ok {
+			t.Errorf("repo %s should still be in pool after invalidation of repo-y", name)
+		}
+	}
+	pool.mu.Unlock()
+}
+
+func TestDBPool_NoInvalidationWhenStatFails(t *testing.T) {
+	dir := t.TempDir()
+	pool := NewDBPool(dir, DefaultMaxOpenDBs)
+	defer pool.Close()
+
+	repoName := "stat-fail-test"
+
+	// Open creates the DB.
+	cdb1, err := pool.Open(repoName)
+	if err != nil {
+		t.Fatalf("Open() error: %v", err)
+	}
+
+	// Remove the DB file to make stat fail.
+	dbPath := pool.dbPath(repoName)
+	if err := os.Remove(dbPath); err != nil {
+		t.Fatalf("Remove() error: %v", err)
+	}
+
+	// Open should return the cached connection since stat fails.
+	cdb2, err := pool.Open(repoName)
+	if err != nil {
+		t.Fatalf("Open() after remove error: %v", err)
+	}
+	if cdb1 != cdb2 {
+		t.Error("expected same instance when stat fails (file removed)")
 	}
 }
