@@ -6,7 +6,9 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/live-docs/live_docs/db"
 	"github.com/live-docs/live_docs/extractor"
@@ -492,6 +494,177 @@ func TestIsSQLiteBusy(t *testing.T) {
 				t.Errorf("isSQLiteBusy(%v) = %v, want %v", tt.err, got, tt.want)
 			}
 		})
+	}
+}
+
+// --- staleness cache tests ---
+
+// mockClock provides a controllable time source for testing.
+type mockClock struct {
+	mu  sync.Mutex
+	now time.Time
+}
+
+func newMockClock() *mockClock {
+	return &mockClock{now: time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)}
+}
+
+func (c *mockClock) Now() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.now
+}
+
+func (c *mockClock) Advance(d time.Duration) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.now = c.now.Add(d)
+}
+
+func TestStalenessCache_HitWithinTTL(t *testing.T) {
+	t.Parallel()
+
+	originalContent := "package main\n"
+	modifiedContent := "package main\n\nfunc Added() {}\n"
+	repoDir := t.TempDir()
+	relPath := "pkg/main.go"
+
+	// Write modified file on disk so it would be stale.
+	absPath := filepath.Join(repoDir, relPath)
+	if err := os.MkdirAll(filepath.Dir(absPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(absPath, []byte(modifiedContent), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cdb, _ := setupStalenessTestDB(t, "myrepo", "example.com/pkg", relPath, originalContent)
+
+	clock := newMockClock()
+	sc := NewStalenessChecker(map[string]string{"myrepo": repoDir}, nil)
+	// Override the cache's clock and the checker's clock.
+	sc.cache.nowFunc = clock.Now
+	sc.nowFunc = clock.Now
+
+	// Read the current file content to know what hash the first call will produce.
+	origContent, err := os.ReadFile(absPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// First call — should read files and detect staleness.
+	stale1 := sc.CheckPackageStaleness(context.Background(), cdb, "myrepo", "example.com/pkg")
+	if len(stale1) != 1 {
+		t.Fatalf("first call: expected 1 stale file, got %d", len(stale1))
+	}
+
+	// Advance clock by 5s (within 10s TTL).
+	clock.Advance(5 * time.Second)
+
+	// Modify the file again so if cache is bypassed, we'd get different results.
+	if err := os.WriteFile(absPath, []byte("package main\n\nfunc Different() {}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Second call — should return cached result, not re-read files.
+	stale2 := sc.CheckPackageStaleness(context.Background(), cdb, "myrepo", "example.com/pkg")
+	if len(stale2) != 1 {
+		t.Fatalf("second call: expected 1 stale file (cached), got %d", len(stale2))
+	}
+
+	// The cached result should have the same hash as the first call's result,
+	// NOT the hash of the newly modified file — proving cache was used.
+	expectedHash := fmt.Sprintf("%x", sha256.Sum256(origContent))
+	if stale2[0].CurrentHash != expectedHash {
+		t.Errorf("cached result has wrong hash: got %q, want %q (cache was bypassed)", stale2[0].CurrentHash, expectedHash)
+	}
+}
+
+func TestStalenessCache_ExpiredAfterTTL(t *testing.T) {
+	t.Parallel()
+
+	originalContent := "package main\n"
+	modifiedContent := "package main\n\nfunc Added() {}\n"
+	repoDir := t.TempDir()
+	relPath := "pkg/main.go"
+
+	absPath := filepath.Join(repoDir, relPath)
+	if err := os.MkdirAll(filepath.Dir(absPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(absPath, []byte(modifiedContent), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cdb, _ := setupStalenessTestDB(t, "myrepo", "example.com/pkg", relPath, originalContent)
+
+	clock := newMockClock()
+	sc := NewStalenessChecker(map[string]string{"myrepo": repoDir}, nil)
+	sc.cache.nowFunc = clock.Now
+	sc.nowFunc = clock.Now
+
+	// First call — populates cache.
+	stale1 := sc.CheckPackageStaleness(context.Background(), cdb, "myrepo", "example.com/pkg")
+	if len(stale1) != 1 {
+		t.Fatalf("first call: expected 1 stale file, got %d", len(stale1))
+	}
+	firstHash := stale1[0].CurrentHash
+
+	// Advance clock past TTL (11s > 10s).
+	clock.Advance(11 * time.Second)
+
+	// Write different content so re-check produces a different hash.
+	newContent := "package main\n\nfunc Refreshed() {}\n"
+	if err := os.WriteFile(absPath, []byte(newContent), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Second call — cache expired, should re-read files.
+	stale2 := sc.CheckPackageStaleness(context.Background(), cdb, "myrepo", "example.com/pkg")
+	if len(stale2) != 1 {
+		t.Fatalf("second call after TTL: expected 1 stale file, got %d", len(stale2))
+	}
+
+	expectedHash := fmt.Sprintf("%x", sha256.Sum256([]byte(newContent)))
+	if stale2[0].CurrentHash != expectedHash {
+		t.Errorf("after TTL expiry: got hash %q, want %q (files were not re-checked)", stale2[0].CurrentHash, expectedHash)
+	}
+	if stale2[0].CurrentHash == firstHash {
+		t.Error("after TTL expiry: hash unchanged — cache was not invalidated")
+	}
+}
+
+func TestStalenessCache_LRUEviction(t *testing.T) {
+	t.Parallel()
+
+	clock := newMockClock()
+	cache := newStalenessCache(clock.Now)
+
+	// Fill cache to capacity.
+	for i := 0; i < staleCacheMaxEntries; i++ {
+		key := fmt.Sprintf("repo:pkg/%d", i)
+		cache.put(key, nil)
+	}
+
+	if len(cache.entries) != staleCacheMaxEntries {
+		t.Fatalf("expected %d entries, got %d", staleCacheMaxEntries, len(cache.entries))
+	}
+
+	// Add one more — should evict the LRU entry (repo:pkg/0).
+	cache.put("repo:pkg/new", []StaleFile{{RelativePath: "new.go"}})
+
+	if len(cache.entries) != staleCacheMaxEntries {
+		t.Fatalf("after eviction: expected %d entries, got %d", staleCacheMaxEntries, len(cache.entries))
+	}
+
+	// The oldest entry should be evicted.
+	if _, ok := cache.get("repo:pkg/0"); ok {
+		t.Error("expected repo:pkg/0 to be evicted, but it was found")
+	}
+
+	// The new entry should exist.
+	if _, ok := cache.get("repo:pkg/new"); !ok {
+		t.Error("expected repo:pkg/new to exist after insertion")
 	}
 }
 

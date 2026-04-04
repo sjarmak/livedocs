@@ -5,6 +5,7 @@
 package mcpserver
 
 import (
+	"container/list"
 	"context"
 	"crypto/sha256"
 	"errors"
@@ -13,10 +14,95 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/live-docs/live_docs/db"
 	"github.com/live-docs/live_docs/extractor"
 )
+
+const (
+	// staleCacheTTL is how long a staleness check result is considered fresh.
+	staleCacheTTL = 10 * time.Second
+	// staleCacheMaxEntries is the maximum number of cached staleness results.
+	staleCacheMaxEntries = 10000
+)
+
+// cacheEntry holds a cached staleness check result.
+type cacheEntry struct {
+	key        string
+	staleFiles []StaleFile
+	checkedAt  time.Time
+}
+
+// stalenessCache is a bounded LRU cache for staleness check results.
+type stalenessCache struct {
+	mu      sync.Mutex
+	entries map[string]*list.Element
+	order   *list.List // front = most recently used
+	nowFunc func() time.Time
+}
+
+// newStalenessCache creates a new empty staleness cache.
+func newStalenessCache(nowFunc func() time.Time) *stalenessCache {
+	return &stalenessCache{
+		entries: make(map[string]*list.Element),
+		order:   list.New(),
+		nowFunc: nowFunc,
+	}
+}
+
+// get returns the cached stale files and true if a valid (non-expired) entry
+// exists for the given key. On hit, the entry is promoted to the front.
+func (c *stalenessCache) get(key string) ([]StaleFile, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	elem, ok := c.entries[key]
+	if !ok {
+		return nil, false
+	}
+	entry := elem.Value.(*cacheEntry)
+	if c.nowFunc().Sub(entry.checkedAt) >= staleCacheTTL {
+		// Expired — remove and report miss.
+		c.order.Remove(elem)
+		delete(c.entries, key)
+		return nil, false
+	}
+	c.order.MoveToFront(elem)
+	return entry.staleFiles, true
+}
+
+// put stores a staleness check result, evicting the LRU entry if at capacity.
+func (c *stalenessCache) put(key string, staleFiles []StaleFile) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	// Update existing entry.
+	if elem, ok := c.entries[key]; ok {
+		entry := elem.Value.(*cacheEntry)
+		entry.staleFiles = staleFiles
+		entry.checkedAt = c.nowFunc()
+		c.order.MoveToFront(elem)
+		return
+	}
+
+	// Evict LRU if at capacity.
+	if c.order.Len() >= staleCacheMaxEntries {
+		back := c.order.Back()
+		if back != nil {
+			evicted := c.order.Remove(back).(*cacheEntry)
+			delete(c.entries, evicted.key)
+		}
+	}
+
+	entry := &cacheEntry{
+		key:        key,
+		staleFiles: staleFiles,
+		checkedAt:  c.nowFunc(),
+	}
+	elem := c.order.PushFront(entry)
+	c.entries[key] = elem
+}
 
 // StalenessChecker checks whether source files are stale relative to stored
 // content hashes and can trigger single-file re-extraction. It is safe for
@@ -25,6 +111,8 @@ type StalenessChecker struct {
 	repoRoots map[string]string   // repo name -> absolute path to repo root
 	registry  *extractor.Registry // extractor registry for re-extraction
 	mu        sync.RWMutex        // protects repoRoots
+	cache     *stalenessCache     // bounded LRU cache for staleness results
+	nowFunc   func() time.Time    // clock function (overridable for testing)
 }
 
 // NewStalenessChecker creates a StalenessChecker with the given repo root mappings
@@ -34,9 +122,12 @@ func NewStalenessChecker(repoRoots map[string]string, registry *extractor.Regist
 	for k, v := range repoRoots {
 		roots[k] = v
 	}
+	nowFn := time.Now
 	return &StalenessChecker{
 		repoRoots: roots,
 		registry:  registry,
+		cache:     newStalenessCache(nowFn),
+		nowFunc:   nowFn,
 	}
 }
 
@@ -57,6 +148,12 @@ func (sc *StalenessChecker) CheckPackageStaleness(ctx context.Context, cdb *db.C
 	sc.mu.RUnlock()
 	if !ok {
 		return nil
+	}
+
+	// Check cache before doing any file I/O.
+	cacheKey := repoName + ":" + importPath
+	if cached, hit := sc.cache.get(cacheKey); hit {
+		return cached
 	}
 
 	sourceFiles, err := cdb.GetSourceFilesByImportPath(importPath)
@@ -92,6 +189,10 @@ func (sc *StalenessChecker) CheckPackageStaleness(ctx context.Context, cdb *db.C
 			})
 		}
 	}
+
+	// Store result in cache for future lookups.
+	sc.cache.put(cacheKey, stale)
+
 	return stale
 }
 
