@@ -228,7 +228,7 @@ func DescribePackageHandler(pool *DBPool, sc *StalenessChecker) ToolHandler {
 		// Lazy staleness check: detect and optionally re-extract changed files.
 		var staleWarningMD string
 		if sc != nil {
-			staleFiles := sc.CheckPackageStaleness(cdb, repoName, importPath)
+			staleFiles := sc.CheckPackageStaleness(ctx, cdb, repoName, importPath)
 			if len(staleFiles) > 0 {
 				refreshed, errs := sc.RefreshStaleFiles(ctx, cdb, staleFiles)
 				staleWarningMD = stalenessWarning(staleFiles, refreshed, errs)

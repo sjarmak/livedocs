@@ -7,6 +7,7 @@ package mcpserver
 import (
 	"context"
 	"crypto/sha256"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -50,7 +51,7 @@ type StaleFile struct {
 // CheckPackageStaleness checks whether any source files for the given import
 // path have changed on disk since last extraction. Returns the list of stale
 // files. If the repo root is not configured, returns nil (no-op).
-func (sc *StalenessChecker) CheckPackageStaleness(cdb *db.ClaimsDB, repoName, importPath string) []StaleFile {
+func (sc *StalenessChecker) CheckPackageStaleness(ctx context.Context, cdb *db.ClaimsDB, repoName, importPath string) []StaleFile {
 	sc.mu.RLock()
 	repoRoot, ok := sc.repoRoots[repoName]
 	sc.mu.RUnlock()
@@ -65,10 +66,20 @@ func (sc *StalenessChecker) CheckPackageStaleness(cdb *db.ClaimsDB, repoName, im
 
 	var stale []StaleFile
 	for _, sf := range sourceFiles {
+		// Check for cancellation between file reads.
+		select {
+		case <-ctx.Done():
+			return stale
+		default:
+		}
+
 		absPath := filepath.Join(repoRoot, sf.RelativePath)
 		content, err := os.ReadFile(absPath)
 		if err != nil {
-			// File might have been deleted or be unreadable — skip.
+			if errors.Is(err, os.ErrNotExist) {
+				// File was deleted — remove its claims from the DB.
+				_ = cdb.MarkFileDeleted(repoName, sf.RelativePath)
+			}
 			continue
 		}
 		currentHash := fmt.Sprintf("%x", sha256.Sum256(content))
@@ -84,9 +95,32 @@ func (sc *StalenessChecker) CheckPackageStaleness(cdb *db.ClaimsDB, repoName, im
 	return stale
 }
 
+// isSQLiteBusy reports whether an error is a SQLITE_BUSY / database-is-locked error.
+func isSQLiteBusy(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "SQLITE_BUSY") || strings.Contains(msg, "database is locked")
+}
+
+// safeReExtract wraps reExtractFile in a recover() so that tree-sitter panics
+// are caught and returned as errors instead of crashing the process.
+func safeReExtract(sc *StalenessChecker, ctx context.Context, cdb *db.ClaimsDB, repoName, repoRoot, relPath string) (err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("panic during re-extraction of %s: %v", relPath, r)
+		}
+	}()
+	return sc.reExtractFile(ctx, cdb, repoName, repoRoot, relPath)
+}
+
 // RefreshStaleFiles re-extracts the given stale files and updates the claims DB.
 // This is best-effort: errors are collected but do not stop processing. Returns
 // the number of files successfully re-extracted and any errors encountered.
+//
+// The function checks ctx.Done() before each file, wraps extraction in recover()
+// to catch tree-sitter panics, and treats SQLITE_BUSY errors as non-fatal warnings.
 func (sc *StalenessChecker) RefreshStaleFiles(ctx context.Context, cdb *db.ClaimsDB, staleFiles []StaleFile) (int, []error) {
 	if sc.registry == nil || len(staleFiles) == 0 {
 		return 0, nil
@@ -96,6 +130,14 @@ func (sc *StalenessChecker) RefreshStaleFiles(ctx context.Context, cdb *db.Claim
 	var errs []error
 
 	for _, sf := range staleFiles {
+		// Check for context cancellation before each file.
+		select {
+		case <-ctx.Done():
+			errs = append(errs, fmt.Errorf("context cancelled before re-extracting %s: %w", sf.RelativePath, ctx.Err()))
+			return refreshed, errs
+		default:
+		}
+
 		sc.mu.RLock()
 		repoRoot, ok := sc.repoRoots[sf.RepoName]
 		sc.mu.RUnlock()
@@ -103,8 +145,13 @@ func (sc *StalenessChecker) RefreshStaleFiles(ctx context.Context, cdb *db.Claim
 			continue
 		}
 
-		err := sc.reExtractFile(ctx, cdb, sf.RepoName, repoRoot, sf.RelativePath)
+		err := safeReExtract(sc, ctx, cdb, sf.RepoName, repoRoot, sf.RelativePath)
 		if err != nil {
+			if isSQLiteBusy(err) {
+				// SQLITE_BUSY is a warning — collect and continue to next file.
+				errs = append(errs, fmt.Errorf("warning: SQLITE_BUSY for %s: %w", sf.RelativePath, err))
+				continue
+			}
 			errs = append(errs, fmt.Errorf("re-extract %s: %w", sf.RelativePath, err))
 			continue
 		}

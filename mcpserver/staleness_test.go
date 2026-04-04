@@ -80,7 +80,7 @@ func TestStalenessChecker_CheckPackageStaleness_NoRepoRoot(t *testing.T) {
 	cdb, _ := setupStalenessTestDB(t, "myrepo", "example.com/pkg", "pkg/main.go", "package main")
 
 	sc := NewStalenessChecker(nil, nil)
-	stale := sc.CheckPackageStaleness(cdb, "myrepo", "example.com/pkg")
+	stale := sc.CheckPackageStaleness(context.Background(), cdb, "myrepo", "example.com/pkg")
 	if len(stale) != 0 {
 		t.Errorf("expected no stale files when repo root not configured, got %d", len(stale))
 	}
@@ -105,7 +105,7 @@ func TestStalenessChecker_CheckPackageStaleness_NotStale(t *testing.T) {
 	cdb, _ := setupStalenessTestDB(t, "myrepo", "example.com/pkg", relPath, originalContent)
 
 	sc := NewStalenessChecker(map[string]string{"myrepo": repoDir}, nil)
-	stale := sc.CheckPackageStaleness(cdb, "myrepo", "example.com/pkg")
+	stale := sc.CheckPackageStaleness(context.Background(), cdb, "myrepo", "example.com/pkg")
 	if len(stale) != 0 {
 		t.Errorf("expected no stale files, got %d", len(stale))
 	}
@@ -132,7 +132,7 @@ func TestStalenessChecker_CheckPackageStaleness_Stale(t *testing.T) {
 	cdb, storedHash := setupStalenessTestDB(t, "myrepo", "example.com/pkg", relPath, originalContent)
 
 	sc := NewStalenessChecker(map[string]string{"myrepo": repoDir}, nil)
-	stale := sc.CheckPackageStaleness(cdb, "myrepo", "example.com/pkg")
+	stale := sc.CheckPackageStaleness(context.Background(), cdb, "myrepo", "example.com/pkg")
 
 	if len(stale) != 1 {
 		t.Fatalf("expected 1 stale file, got %d", len(stale))
@@ -159,11 +159,50 @@ func TestStalenessChecker_CheckPackageStaleness_FileDeleted(t *testing.T) {
 	cdb, _ := setupStalenessTestDB(t, "myrepo", "example.com/pkg", relPath, "package main\n")
 
 	sc := NewStalenessChecker(map[string]string{"myrepo": repoDir}, nil)
-	stale := sc.CheckPackageStaleness(cdb, "myrepo", "example.com/pkg")
+	stale := sc.CheckPackageStaleness(context.Background(), cdb, "myrepo", "example.com/pkg")
 
 	// Deleted files are skipped, not reported as stale.
 	if len(stale) != 0 {
 		t.Errorf("expected no stale files for deleted file, got %d", len(stale))
+	}
+
+	// Verify MarkFileDeleted was called: the source_file record should be gone.
+	files, err := cdb.GetSourceFilesByImportPath("example.com/pkg")
+	if err != nil {
+		t.Fatalf("GetSourceFilesByImportPath after delete: %v", err)
+	}
+	if len(files) != 0 {
+		t.Errorf("expected 0 source files after MarkFileDeleted, got %d", len(files))
+	}
+}
+
+func TestStalenessChecker_CheckPackageStaleness_CancelledContext(t *testing.T) {
+	t.Parallel()
+
+	repoDir := t.TempDir()
+	relPath := "pkg/main.go"
+
+	// Create the file on disk with different content so it would be stale.
+	absPath := filepath.Join(repoDir, relPath)
+	if err := os.MkdirAll(filepath.Dir(absPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(absPath, []byte("modified content\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cdb, _ := setupStalenessTestDB(t, "myrepo", "example.com/pkg", relPath, "package main\n")
+
+	// Pre-cancel the context.
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	sc := NewStalenessChecker(map[string]string{"myrepo": repoDir}, nil)
+	stale := sc.CheckPackageStaleness(ctx, cdb, "myrepo", "example.com/pkg")
+
+	// Should return immediately without reading files.
+	if len(stale) != 0 {
+		t.Errorf("expected 0 stale files with cancelled context, got %d", len(stale))
 	}
 }
 
