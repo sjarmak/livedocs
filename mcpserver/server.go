@@ -148,7 +148,7 @@ func (s *Server) registerMultiRepoTools(pool *DBPool) {
 
 	defs := []ToolDef{
 		ListReposToolDef(pool),
-		ListPackagesToolDef(pool),
+		ListPackagesToolDef(pool, s.staleness),
 		DescribePackageToolDef(pool, s.staleness),
 		SearchSymbolsToolDef(pool, index),
 	}

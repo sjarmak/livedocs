@@ -2,7 +2,9 @@ package mcpserver
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -13,6 +15,11 @@ import (
 
 	"github.com/live-docs/live_docs/db"
 )
+
+// computeSHA256 returns the hex-encoded SHA-256 hash of a string.
+func computeSHA256(s string) string {
+	return fmt.Sprintf("%x", sha256.Sum256([]byte(s)))
+}
 
 // makeAdapterRequest creates a ToolRequest from a map of arguments for testing
 // legacy handlers that now use adapter types.
@@ -621,7 +628,7 @@ func TestListPackages(t *testing.T) {
 	pool := NewDBPool(dataDir, DefaultMaxOpenDBs)
 	defer pool.Close()
 
-	handler := ListPackagesHandler(pool)
+	handler := ListPackagesHandler(pool, nil)
 	result, err := handler(context.Background(), &requestAdapter{raw: makeRequest(map[string]any{
 		"repo": "myrepo",
 	})})
@@ -653,7 +660,7 @@ func TestListPackages_WithPrefix(t *testing.T) {
 	pool := NewDBPool(dataDir, DefaultMaxOpenDBs)
 	defer pool.Close()
 
-	handler := ListPackagesHandler(pool)
+	handler := ListPackagesHandler(pool, nil)
 
 	// Prefix that matches.
 	result, err := handler(context.Background(), &requestAdapter{raw: makeRequest(map[string]any{
@@ -695,7 +702,7 @@ func TestListPackages_MissingRepo(t *testing.T) {
 	pool := NewDBPool(dataDir, DefaultMaxOpenDBs)
 	defer pool.Close()
 
-	handler := ListPackagesHandler(pool)
+	handler := ListPackagesHandler(pool, nil)
 	result, err := handler(context.Background(), &requestAdapter{raw: makeRequest(map[string]any{})})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -1015,7 +1022,7 @@ func TestListPackages_WithExtractionMeta(t *testing.T) {
 	pool := NewDBPool(dataDir, DefaultMaxOpenDBs)
 	defer pool.Close()
 
-	handler := ListPackagesHandler(pool)
+	handler := ListPackagesHandler(pool, nil)
 	result, err := handler(context.Background(), &requestAdapter{raw: makeRequest(map[string]any{
 		"repo": "myrepo",
 	})})
@@ -1090,5 +1097,144 @@ func TestListRepos_WithoutExtractionMeta(t *testing.T) {
 	}
 	if resp.Repos[0].ExtractedCommit != "" {
 		t.Errorf("expected empty extracted_commit without meta, got %s", resp.Repos[0].ExtractedCommit)
+	}
+}
+
+func TestListPackages_StaleAnnotation(t *testing.T) {
+	t.Parallel()
+
+	dataDir := setupMultiRepoDB(t, "myrepo")
+	pool := NewDBPool(dataDir, DefaultMaxOpenDBs)
+	defer pool.Close()
+
+	// setupMultiRepoDB stores func1.go with content hash "abc123".
+	// Create a repo root directory with func1.go containing different content
+	// so the staleness checker detects it as stale.
+	repoDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(repoDir, "func1.go"), []byte("modified content\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	sc := NewStalenessChecker(map[string]string{"myrepo": repoDir}, nil)
+
+	handler := ListPackagesHandler(pool, sc)
+	result, err := handler(context.Background(), &requestAdapter{raw: makeRequest(map[string]any{
+		"repo": "myrepo",
+	})})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.IsError() {
+		t.Fatalf("tool returned error: %s", result.Text())
+	}
+
+	var resp listPackagesResponse
+	if err := json.Unmarshal([]byte(result.Text()), &resp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
+	if len(resp.StalePaths) != 1 {
+		t.Fatalf("expected 1 stale path, got %d", len(resp.StalePaths))
+	}
+	if resp.StalePaths[0] != "example.com/myrepo/pkg" {
+		t.Errorf("expected stale path 'example.com/myrepo/pkg', got %s", resp.StalePaths[0])
+	}
+}
+
+func TestListPackages_StaleAnnotation_NilChecker(t *testing.T) {
+	t.Parallel()
+
+	dataDir := setupMultiRepoDB(t, "myrepo")
+	pool := NewDBPool(dataDir, DefaultMaxOpenDBs)
+	defer pool.Close()
+
+	// With nil StalenessChecker, stale_paths should be absent.
+	handler := ListPackagesHandler(pool, nil)
+	result, err := handler(context.Background(), &requestAdapter{raw: makeRequest(map[string]any{
+		"repo": "myrepo",
+	})})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var resp listPackagesResponse
+	if err := json.Unmarshal([]byte(result.Text()), &resp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
+	if len(resp.StalePaths) != 0 {
+		t.Errorf("expected no stale paths with nil checker, got %v", resp.StalePaths)
+	}
+}
+
+func TestListPackages_StaleAnnotation_NoStaleFiles(t *testing.T) {
+	t.Parallel()
+
+	// Compute the same hash that setupMultiRepoDB stores ("abc123" is just a dummy hash).
+	// We need to create a file whose sha256 matches "abc123" — that won't work.
+	// Instead, create a custom DB with a known content hash.
+	repoDir := t.TempDir()
+	fileContent := "package pkg\n"
+	if err := os.WriteFile(filepath.Join(repoDir, "pkg.go"), []byte(fileContent), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	dbDir := t.TempDir()
+	dbPath := filepath.Join(dbDir, "myrepo.claims.db")
+	cdb, err := db.OpenClaimsDB(dbPath)
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	if err := cdb.CreateSchema(); err != nil {
+		t.Fatalf("create schema: %v", err)
+	}
+
+	// Use the real content hash so the file is NOT stale.
+	hash := computeSHA256(fileContent)
+	symID, err := cdb.UpsertSymbol(db.Symbol{
+		Repo: "myrepo", ImportPath: "example.com/myrepo/pkg",
+		SymbolName: "Func1", Language: "go", Kind: "func", Visibility: "public",
+	})
+	if err != nil {
+		t.Fatalf("upsert symbol: %v", err)
+	}
+	_, err = cdb.InsertClaim(db.Claim{
+		SubjectID: symID, Predicate: "defines", ObjectText: "does something",
+		SourceFile: "pkg.go", SourceLine: 1, Confidence: 1.0,
+		ClaimTier: "structural", Extractor: "treesitter", ExtractorVersion: "v1",
+		LastVerified: db.Now(),
+	})
+	if err != nil {
+		t.Fatalf("insert claim: %v", err)
+	}
+	_, err = cdb.UpsertSourceFile(db.SourceFile{
+		Repo: "myrepo", RelativePath: "pkg.go", ContentHash: hash,
+		ExtractorVersion: "v1", LastIndexed: db.Now(),
+	})
+	if err != nil {
+		t.Fatalf("upsert source file: %v", err)
+	}
+	cdb.Close()
+
+	pool := NewDBPool(dbDir, DefaultMaxOpenDBs)
+	defer pool.Close()
+
+	sc := NewStalenessChecker(map[string]string{"myrepo": repoDir}, nil)
+	handler := ListPackagesHandler(pool, sc)
+	result, err := handler(context.Background(), &requestAdapter{raw: makeRequest(map[string]any{
+		"repo": "myrepo",
+	})})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var resp listPackagesResponse
+	if err := json.Unmarshal([]byte(result.Text()), &resp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
+	// File content matches stored hash, so no stale paths.
+	if len(resp.StalePaths) != 0 {
+		t.Errorf("expected no stale paths when files are fresh, got %v", resp.StalePaths)
 	}
 }

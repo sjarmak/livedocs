@@ -130,14 +130,17 @@ Includes extracted_at timestamp and warns if data is older than 7 days.`,
 type listPackagesResponse struct {
 	ImportPaths     []string `json:"import_paths"`
 	TotalCount      int      `json:"total_count"`
+	StalePaths      []string `json:"stale_paths,omitempty"`
 	ExtractedAt     string   `json:"extracted_at,omitempty"`
 	ExtractedCommit string   `json:"extracted_commit,omitempty"`
 	StaleWarning    string   `json:"stale_warning,omitempty"`
 }
 
 // ListPackagesHandler returns a ToolHandler that lists packages for a repo.
-func ListPackagesHandler(pool *DBPool) ToolHandler {
-	return func(_ context.Context, req ToolRequest) (ToolResult, error) {
+// If sc is non-nil, each listed package is checked for staleness and stale
+// import paths are included in the stale_paths field of the response.
+func ListPackagesHandler(pool *DBPool, sc *StalenessChecker) ToolHandler {
+	return func(ctx context.Context, req ToolRequest) (ToolResult, error) {
 		repoName, err := req.RequireString("repo")
 		if err != nil {
 			return NewErrorResult("missing required parameter 'repo'"), nil
@@ -172,6 +175,20 @@ func ListPackagesHandler(pool *DBPool) ToolHandler {
 			resp.ImportPaths = []string{}
 		}
 
+		// Check each package for staleness when StalenessChecker is available.
+		if sc != nil {
+			var stalePaths []string
+			for _, ip := range paths {
+				staleFiles := sc.CheckPackageStaleness(ctx, cdb, repoName, ip)
+				if len(staleFiles) > 0 {
+					stalePaths = append(stalePaths, ip)
+				}
+			}
+			if len(stalePaths) > 0 {
+				resp.StalePaths = stalePaths
+			}
+		}
+
 		if ts != "" && isStale(ts) {
 			resp.StaleWarning = "Data is older than 7 days. Re-run extraction for fresh results."
 		}
@@ -185,20 +202,22 @@ func ListPackagesHandler(pool *DBPool) ToolHandler {
 }
 
 // ListPackagesToolDef returns the ToolDef for list_packages.
-func ListPackagesToolDef(pool *DBPool) ToolDef {
+// If sc is non-nil, staleness checking is enabled for listed packages.
+func ListPackagesToolDef(pool *DBPool, sc *StalenessChecker) ToolDef {
 	return ToolDef{
 		Name: "list_packages",
 		Description: `List import paths (packages) for a given repository.
 
 Returns up to 200 import paths matching an optional prefix, with a total count.
 Includes extracted_at timestamp and warns if data is older than 7 days.
+When repo roots are configured, includes stale_paths listing packages with changed files on disk.
 
 Example: list_packages(repo="kubernetes", prefix="k8s.io/api/") returns all packages under that prefix.`,
 		Params: []ParamDef{
 			{Name: "repo", Type: ParamString, Required: true, Description: "Repository name (matches the .claims.db filename without extension)."},
 			{Name: "prefix", Type: ParamString, Required: false, Description: "Optional import path prefix to filter packages. Example: 'k8s.io/api/'."},
 		},
-		Handler: ListPackagesHandler(pool),
+		Handler: ListPackagesHandler(pool, sc),
 	}
 }
 
