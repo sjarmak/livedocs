@@ -14,7 +14,7 @@ import (
 
 	"github.com/live-docs/live_docs/cache"
 	"github.com/live-docs/live_docs/db"
-	"github.com/live-docs/live_docs/extractor"
+	"github.com/live-docs/live_docs/extractor/defaults"
 	"github.com/live-docs/live_docs/extractor/goextractor"
 	"github.com/live-docs/live_docs/pipeline"
 	"github.com/live-docs/live_docs/watch"
@@ -203,7 +203,7 @@ func runWatchMulti(cmd *cobra.Command, entries []watch.RepoEntry, stateFile stri
 		resources = append(resources, repoResources{claimsDB: claimsDB, cacheStore: cacheStore})
 
 		// Build registry and pipeline.
-		registry := extractor.BuildDefaultRegistry(entry.Name)
+		registry := defaults.BuildDefaultRegistry(entry.Name)
 		p := pipeline.New(pipeline.Config{
 			Repo:     entry.Name,
 			RepoDir:  entry.Path,
