@@ -56,28 +56,54 @@ type PipelineRunner interface {
 	Run(ctx context.Context, fromCommit, toCommit string) (pipeline.Result, error)
 }
 
+// DeepExtractFn is a callback that runs the Go deep extractor on the repo
+// and stores the resulting claims. It is called periodically by the watcher
+// when DeepInterval is configured.
+type DeepExtractFn func(ctx context.Context) error
+
+// AccessTimeFunc returns the last time the given repo was queried.
+// If the repo has never been queried, it returns the zero time and false.
+type AccessTimeFunc func(repoName string) (time.Time, bool)
+
 // Config holds the configuration for a Watcher.
 type Config struct {
-	RepoDir   string         // absolute path to the git repo root
-	RepoName  string         // repository identifier
-	Interval  time.Duration  // polling interval
-	StateFile string         // path to the state JSON file
-	Pipeline  PipelineRunner // pipeline to run on changes
-	Out       io.Writer      // output writer for log messages
-	Git       GitOps         // git operations (nil = use real git)
-	State     *State         // shared state (nil = load from StateFile)
+	RepoDir      string         // absolute path to the git repo root
+	RepoName     string         // repository identifier
+	Interval     time.Duration  // polling interval (base interval when no freshness tiers)
+	DeepInterval time.Duration  // deep extraction interval (0 = disabled)
+	StateFile    string         // path to the state JSON file
+	Pipeline     PipelineRunner // pipeline to run on changes
+	DeepExtract  DeepExtractFn  // deep extraction callback (nil = disabled)
+	Out          io.Writer      // output writer for log messages
+	Git          GitOps         // git operations (nil = use real git)
+	State        *State         // shared state (nil = load from StateFile)
+
+	// Freshness tier fields — when set, polling interval is adjusted
+	// dynamically based on how recently the repo was queried via MCP.
+	FreshnessTiers []FreshnessTier  // tier boundaries (nil = use fixed Interval)
+	ColdInterval   time.Duration    // interval for repos not matching any tier
+	AccessTimeFn   AccessTimeFunc   // returns last query time for a repo (nil = disabled)
+	NowFunc        func() time.Time // injectable clock (nil = time.Now)
 }
 
 // Watcher polls git for HEAD changes and triggers pipeline extraction.
 type Watcher struct {
-	repoDir   string
-	repoName  string
-	interval  time.Duration
-	stateFile string
-	pipeline  PipelineRunner
-	out       io.Writer
-	git       GitOps
-	state     *State // shared state, may be nil (loaded on Run)
+	repoDir      string
+	repoName     string
+	interval     time.Duration
+	deepInterval time.Duration
+	stateFile    string
+	pipeline     PipelineRunner
+	deepExtract  DeepExtractFn
+	out          io.Writer
+	git          GitOps
+	state        *State // shared state, may be nil (loaded on Run)
+
+	// Freshness tier support.
+	freshnessTiers []FreshnessTier
+	coldInterval   time.Duration
+	accessTimeFn   AccessTimeFunc
+	nowFunc        func() time.Time
 }
 
 // New creates a Watcher from the given Config.
@@ -86,16 +112,43 @@ func New(cfg Config) *Watcher {
 	if git == nil {
 		git = realGitOps{}
 	}
-	return &Watcher{
-		repoDir:   cfg.RepoDir,
-		repoName:  cfg.RepoName,
-		interval:  cfg.Interval,
-		stateFile: cfg.StateFile,
-		pipeline:  cfg.Pipeline,
-		out:       cfg.Out,
-		git:       git,
-		state:     cfg.State,
+	nowFunc := cfg.NowFunc
+	if nowFunc == nil {
+		nowFunc = time.Now
 	}
+	return &Watcher{
+		repoDir:        cfg.RepoDir,
+		repoName:       cfg.RepoName,
+		interval:       cfg.Interval,
+		deepInterval:   cfg.DeepInterval,
+		stateFile:      cfg.StateFile,
+		pipeline:       cfg.Pipeline,
+		deepExtract:    cfg.DeepExtract,
+		out:            cfg.Out,
+		git:            git,
+		state:          cfg.State,
+		freshnessTiers: cfg.FreshnessTiers,
+		coldInterval:   cfg.ColdInterval,
+		accessTimeFn:   cfg.AccessTimeFn,
+		nowFunc:        nowFunc,
+	}
+}
+
+// effectiveInterval returns the current polling interval, taking freshness
+// tiers into account. If no tiers are configured, it returns the base interval.
+func (w *Watcher) effectiveInterval() time.Duration {
+	if w.accessTimeFn == nil || len(w.freshnessTiers) == 0 {
+		return w.interval
+	}
+	lastQuery, ok := w.accessTimeFn(w.repoName)
+	if !ok {
+		lastQuery = time.Time{} // zero time — treated as never queried
+	}
+	coldInterval := w.coldInterval
+	if coldInterval == 0 {
+		coldInterval = w.interval // fall back to base interval
+	}
+	return SelectInterval(w.freshnessTiers, lastQuery, w.nowFunc(), coldInterval)
 }
 
 // Run starts the watch loop. It blocks until ctx is cancelled.
@@ -112,10 +165,20 @@ func (w *Watcher) Run(ctx context.Context) error {
 		fmt.Fprintf(w.out, "watch: no prior state for %s, will do full extraction on first change\n", w.repoName)
 	}
 
-	fmt.Fprintf(w.out, "watch: polling %s every %s\n", w.repoDir, w.interval)
+	curInterval := w.effectiveInterval()
+	fmt.Fprintf(w.out, "watch: polling %s every %s\n", w.repoDir, curInterval)
 
-	ticker := time.NewTicker(w.interval)
+	ticker := time.NewTicker(curInterval)
 	defer ticker.Stop()
+
+	// Set up deep extraction ticker if configured.
+	var deepC <-chan time.Time
+	if w.deepInterval > 0 && w.deepExtract != nil {
+		fmt.Fprintf(w.out, "watch: deep extraction every %s for %s\n", w.deepInterval, w.repoName)
+		deepTicker := time.NewTicker(w.deepInterval)
+		defer deepTicker.Stop()
+		deepC = deepTicker.C
+	}
 
 	// Check immediately on start, then on each tick.
 	if err := w.check(ctx, state, &lastSHA); err != nil {
@@ -131,8 +194,33 @@ func (w *Watcher) Run(ctx context.Context) error {
 			if err := w.check(ctx, state, &lastSHA); err != nil {
 				fmt.Fprintf(w.out, "watch: check error: %v\n", err)
 			}
+			// Re-evaluate the polling interval based on current access recency.
+			if w.accessTimeFn != nil && len(w.freshnessTiers) > 0 {
+				newInterval := w.effectiveInterval()
+				if newInterval != curInterval {
+					fmt.Fprintf(w.out, "watch: adjusting poll interval for %s: %s -> %s\n", w.repoName, curInterval, newInterval)
+					curInterval = newInterval
+					ticker.Reset(curInterval)
+				}
+			}
+		case <-deepC:
+			w.runDeepExtract(ctx)
 		}
 	}
+}
+
+// runDeepExtract invokes the deep extraction callback and logs the result.
+func (w *Watcher) runDeepExtract(ctx context.Context) {
+	if w.deepExtract == nil {
+		return
+	}
+	fmt.Fprintf(w.out, "watch: starting deep extraction for %s\n", w.repoName)
+	start := time.Now()
+	if err := w.deepExtract(ctx); err != nil {
+		fmt.Fprintf(w.out, "watch: deep extraction error for %s: %v\n", w.repoName, err)
+		return
+	}
+	fmt.Fprintf(w.out, "watch: deep extraction complete for %s (%s)\n", w.repoName, time.Since(start).Round(time.Millisecond))
 }
 
 // check performs a single poll cycle: get HEAD, compare, run pipeline if changed.

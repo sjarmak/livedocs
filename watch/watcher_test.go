@@ -3,6 +3,7 @@ package watch
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -428,6 +429,99 @@ func TestWatcher_MultiRepoIndependentState(t *testing.T) {
 	}
 }
 
+func TestWatcher_DynamicFreshnessInterval(t *testing.T) {
+	// Verifies that the watcher adjusts its polling interval based on
+	// the access time returned by AccessTimeFn.
+	tmp := t.TempDir()
+	stateFile := filepath.Join(tmp, "state.json")
+
+	// Pre-populate state so the watcher doesn't trigger pipeline runs.
+	s := NewState()
+	s.SetSHA("test-repo", "sha_stable")
+	if err := SaveState(stateFile, s); err != nil {
+		t.Fatal(err)
+	}
+
+	var buf safeWriter
+	git := &mockGitOps{
+		heads: []string{"sha_stable"},
+	}
+	p := &mockPipeline{}
+
+	// Start with a "hot" access time (5 minutes ago).
+	now := time.Date(2026, 4, 3, 12, 0, 0, 0, time.UTC)
+	accessTime := now.Add(-5 * time.Minute) // hot tier
+
+	tiers := []FreshnessTier{
+		{MaxAge: 1 * time.Hour, Interval: 10 * time.Millisecond},   // hot (short for test)
+		{MaxAge: 24 * time.Hour, Interval: 100 * time.Millisecond}, // warm
+	}
+
+	w := New(Config{
+		RepoDir:        "/fake/repo",
+		RepoName:       "test-repo",
+		Interval:       50 * time.Millisecond, // base (should not be used when tiers active)
+		StateFile:      stateFile,
+		Pipeline:       p,
+		Out:            &buf,
+		Git:            git,
+		State:          s,
+		FreshnessTiers: tiers,
+		ColdInterval:   500 * time.Millisecond,
+		AccessTimeFn: func(repoName string) (time.Time, bool) {
+			return accessTime, true
+		},
+		NowFunc: func() time.Time { return now },
+	})
+
+	// effectiveInterval should return hot tier interval.
+	got := w.effectiveInterval()
+	if got != 10*time.Millisecond {
+		t.Fatalf("effectiveInterval() = %v, want 10ms (hot tier)", got)
+	}
+
+	// No access — should return cold interval.
+	w2 := New(Config{
+		RepoDir:        "/fake/repo",
+		RepoName:       "never-queried",
+		Interval:       50 * time.Millisecond,
+		StateFile:      stateFile,
+		Pipeline:       p,
+		Out:            &buf,
+		Git:            git,
+		State:          s,
+		FreshnessTiers: tiers,
+		ColdInterval:   500 * time.Millisecond,
+		AccessTimeFn: func(repoName string) (time.Time, bool) {
+			return time.Time{}, false
+		},
+		NowFunc: func() time.Time { return now },
+	})
+
+	got = w2.effectiveInterval()
+	if got != 500*time.Millisecond {
+		t.Fatalf("effectiveInterval() = %v, want 500ms (cold)", got)
+	}
+}
+
+func TestWatcher_EffectiveIntervalNoTiers(t *testing.T) {
+	// Without freshness tiers, effectiveInterval returns the base interval.
+	var buf safeWriter
+	w := New(Config{
+		RepoDir:  "/fake/repo",
+		RepoName: "test-repo",
+		Interval: 42 * time.Second,
+		Out:      &buf,
+		Pipeline: &mockPipeline{},
+		Git:      &mockGitOps{heads: []string{"sha"}},
+	})
+
+	got := w.effectiveInterval()
+	if got != 42*time.Second {
+		t.Fatalf("effectiveInterval() = %v, want 42s (base)", got)
+	}
+}
+
 func TestWatcher_IntervalFlag(t *testing.T) {
 	// Verify that the interval is respected by checking that with a very
 	// short interval we get multiple polls.
@@ -470,5 +564,206 @@ func TestWatcher_IntervalFlag(t *testing.T) {
 	git.mu.Unlock()
 	if calls < 2 {
 		t.Fatalf("expected multiple git calls with 5ms interval, got %d", calls)
+	}
+}
+
+// mockDeepExtract tracks calls to the deep extraction callback.
+type mockDeepExtract struct {
+	mu    sync.Mutex
+	calls int
+	err   error
+}
+
+func (m *mockDeepExtract) fn(ctx context.Context) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.calls++
+	return m.err
+}
+
+func (m *mockDeepExtract) getCalls() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.calls
+}
+
+func TestWatcher_DeepInterval_Fires(t *testing.T) {
+	tmp := t.TempDir()
+	stateFile := filepath.Join(tmp, "state.json")
+
+	// Pre-populate state so no tree-sitter extraction triggers.
+	s := NewState()
+	s.SetSHA("test-repo", "sha_stable")
+	if err := SaveState(stateFile, s); err != nil {
+		t.Fatal(err)
+	}
+
+	var buf safeWriter
+	git := &mockGitOps{heads: []string{"sha_stable"}}
+	p := &mockPipeline{}
+	deep := &mockDeepExtract{}
+
+	w := New(Config{
+		RepoDir:      "/fake/repo",
+		RepoName:     "test-repo",
+		Interval:     50 * time.Millisecond,
+		DeepInterval: 20 * time.Millisecond,
+		StateFile:    stateFile,
+		Pipeline:     p,
+		DeepExtract:  deep.fn,
+		Out:          &buf,
+		Git:          git,
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Millisecond)
+	defer cancel()
+
+	_ = w.Run(ctx)
+
+	calls := deep.getCalls()
+	if calls < 1 {
+		t.Fatalf("expected at least 1 deep extraction call, got %d", calls)
+	}
+
+	// Pipeline should NOT have run (HEAD unchanged).
+	runs := p.getRuns()
+	if len(runs) != 0 {
+		t.Fatalf("expected 0 pipeline runs, got %d", len(runs))
+	}
+
+	// Verify log output mentions deep extraction.
+	buf.mu.Lock()
+	output := buf.buf.String()
+	buf.mu.Unlock()
+	if !strings.Contains(output, "deep extraction every") {
+		t.Fatalf("expected 'deep extraction every' in output, got: %s", output)
+	}
+	if !strings.Contains(output, "deep extraction complete") {
+		t.Fatalf("expected 'deep extraction complete' in output, got: %s", output)
+	}
+}
+
+func TestWatcher_DeepInterval_Disabled(t *testing.T) {
+	tmp := t.TempDir()
+	stateFile := filepath.Join(tmp, "state.json")
+
+	s := NewState()
+	s.SetSHA("test-repo", "sha_stable")
+	if err := SaveState(stateFile, s); err != nil {
+		t.Fatal(err)
+	}
+
+	var buf safeWriter
+	git := &mockGitOps{heads: []string{"sha_stable"}}
+	p := &mockPipeline{}
+	deep := &mockDeepExtract{}
+
+	// DeepInterval=0 should disable deep extraction even with callback set.
+	w := New(Config{
+		RepoDir:      "/fake/repo",
+		RepoName:     "test-repo",
+		Interval:     10 * time.Millisecond,
+		DeepInterval: 0,
+		StateFile:    stateFile,
+		Pipeline:     p,
+		DeepExtract:  deep.fn,
+		Out:          &buf,
+		Git:          git,
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Millisecond)
+	defer cancel()
+
+	_ = w.Run(ctx)
+
+	calls := deep.getCalls()
+	if calls != 0 {
+		t.Fatalf("expected 0 deep extraction calls when disabled, got %d", calls)
+	}
+}
+
+func TestWatcher_DeepInterval_NilCallback(t *testing.T) {
+	tmp := t.TempDir()
+	stateFile := filepath.Join(tmp, "state.json")
+
+	s := NewState()
+	s.SetSHA("test-repo", "sha_stable")
+	if err := SaveState(stateFile, s); err != nil {
+		t.Fatal(err)
+	}
+
+	var buf safeWriter
+	git := &mockGitOps{heads: []string{"sha_stable"}}
+	p := &mockPipeline{}
+
+	// DeepExtract=nil should not start deep ticker even with interval set.
+	w := New(Config{
+		RepoDir:      "/fake/repo",
+		RepoName:     "test-repo",
+		Interval:     10 * time.Millisecond,
+		DeepInterval: 20 * time.Millisecond,
+		StateFile:    stateFile,
+		Pipeline:     p,
+		DeepExtract:  nil,
+		Out:          &buf,
+		Git:          git,
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Millisecond)
+	defer cancel()
+
+	_ = w.Run(ctx)
+
+	buf.mu.Lock()
+	output := buf.buf.String()
+	buf.mu.Unlock()
+	if strings.Contains(output, "deep extraction every") {
+		t.Fatalf("deep extraction should not be configured with nil callback, got: %s", output)
+	}
+}
+
+func TestWatcher_DeepInterval_Error(t *testing.T) {
+	tmp := t.TempDir()
+	stateFile := filepath.Join(tmp, "state.json")
+
+	s := NewState()
+	s.SetSHA("test-repo", "sha_stable")
+	if err := SaveState(stateFile, s); err != nil {
+		t.Fatal(err)
+	}
+
+	var buf safeWriter
+	git := &mockGitOps{heads: []string{"sha_stable"}}
+	p := &mockPipeline{}
+	deep := &mockDeepExtract{err: fmt.Errorf("deep extraction failed")}
+
+	w := New(Config{
+		RepoDir:      "/fake/repo",
+		RepoName:     "test-repo",
+		Interval:     50 * time.Millisecond,
+		DeepInterval: 20 * time.Millisecond,
+		StateFile:    stateFile,
+		Pipeline:     p,
+		DeepExtract:  deep.fn,
+		Out:          &buf,
+		Git:          git,
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+
+	// Should not crash on deep extraction error.
+	_ = w.Run(ctx)
+
+	calls := deep.getCalls()
+	if calls < 1 {
+		t.Fatalf("expected at least 1 deep extraction call, got %d", calls)
+	}
+
+	buf.mu.Lock()
+	output := buf.buf.String()
+	buf.mu.Unlock()
+	if !strings.Contains(output, "deep extraction error") {
+		t.Fatalf("expected 'deep extraction error' in output, got: %s", output)
 	}
 }

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"time"
 )
 
 // RepoEntry describes a single repository to watch.
@@ -12,6 +13,44 @@ type RepoEntry struct {
 	Path   string `json:"path"`             // absolute or relative path to the git repo
 	Name   string `json:"name,omitempty"`   // repository identifier (default: directory basename)
 	Output string `json:"output,omitempty"` // output SQLite file path (default: <name>.claims.db)
+}
+
+// FreshnessTier maps a recency threshold to a polling interval.
+// If a repo was last queried within MaxAge, use Interval for polling.
+type FreshnessTier struct {
+	MaxAge   time.Duration // query recency threshold
+	Interval time.Duration // polling interval when within this tier
+}
+
+// DefaultFreshnessTiers returns the default tier configuration:
+//   - queried in last 1h  -> 10s poll
+//   - queried in last 24h -> 1m poll
+//   - older / never       -> 5m poll
+func DefaultFreshnessTiers() []FreshnessTier {
+	return []FreshnessTier{
+		{MaxAge: 1 * time.Hour, Interval: 10 * time.Second},
+		{MaxAge: 24 * time.Hour, Interval: 1 * time.Minute},
+	}
+}
+
+// DefaultColdInterval is the polling interval for repos that have not been
+// queried recently (do not match any freshness tier).
+const DefaultColdInterval = 5 * time.Minute
+
+// SelectInterval picks a polling interval based on the time since lastQuery.
+// Tiers are evaluated in order; the first tier whose MaxAge exceeds the age wins.
+// If no tier matches (or lastQuery is zero), coldInterval is returned.
+func SelectInterval(tiers []FreshnessTier, lastQuery time.Time, now time.Time, coldInterval time.Duration) time.Duration {
+	if lastQuery.IsZero() {
+		return coldInterval
+	}
+	age := now.Sub(lastQuery)
+	for _, tier := range tiers {
+		if age <= tier.MaxAge {
+			return tier.Interval
+		}
+	}
+	return coldInterval
 }
 
 // MultiRepoConfig is the top-level structure of a watch config file.

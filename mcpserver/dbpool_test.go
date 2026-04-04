@@ -342,6 +342,67 @@ func TestDBPool_InvalidationPreservesPoolCount(t *testing.T) {
 	pool.mu.Unlock()
 }
 
+func TestDBPool_LastAccess(t *testing.T) {
+	dir := t.TempDir()
+	pool := NewDBPool(dir, DefaultMaxOpenDBs)
+	defer pool.Close()
+
+	// Before any Open, LastAccess returns zero time and false.
+	_, ok := pool.LastAccess("unqueried")
+	if ok {
+		t.Error("LastAccess for unqueried repo should return false")
+	}
+
+	// Open a repo — should record access time.
+	before := time.Now()
+	_, err := pool.Open("accessed-repo")
+	if err != nil {
+		t.Fatalf("Open() error: %v", err)
+	}
+	after := time.Now()
+
+	accessTime, ok := pool.LastAccess("accessed-repo")
+	if !ok {
+		t.Fatal("LastAccess should return true after Open")
+	}
+	if accessTime.Before(before) || accessTime.After(after) {
+		t.Errorf("LastAccess time %v not between %v and %v", accessTime, before, after)
+	}
+
+	// Second Open should update the access time.
+	time.Sleep(1 * time.Millisecond)
+	_, err = pool.Open("accessed-repo")
+	if err != nil {
+		t.Fatalf("second Open() error: %v", err)
+	}
+	accessTime2, _ := pool.LastAccess("accessed-repo")
+	if !accessTime2.After(accessTime) {
+		t.Errorf("second access time %v should be after first %v", accessTime2, accessTime)
+	}
+}
+
+func TestDBPool_LastAccessWithCustomClock(t *testing.T) {
+	dir := t.TempDir()
+	pool := NewDBPool(dir, DefaultMaxOpenDBs)
+	defer pool.Close()
+
+	fixedTime := time.Date(2026, 4, 3, 12, 0, 0, 0, time.UTC)
+	pool.nowFunc = func() time.Time { return fixedTime }
+
+	_, err := pool.Open("clock-test")
+	if err != nil {
+		t.Fatalf("Open() error: %v", err)
+	}
+
+	accessTime, ok := pool.LastAccess("clock-test")
+	if !ok {
+		t.Fatal("LastAccess should return true")
+	}
+	if !accessTime.Equal(fixedTime) {
+		t.Errorf("access time = %v, want %v", accessTime, fixedTime)
+	}
+}
+
 func TestDBPool_NoInvalidationWhenStatFails(t *testing.T) {
 	dir := t.TempDir()
 	pool := NewDBPool(dir, DefaultMaxOpenDBs)

@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func TestLoadConfig_Valid(t *testing.T) {
@@ -189,5 +190,117 @@ func TestLoadConfig_AbsolutePath(t *testing.T) {
 
 	if entries[0].Path != repoDir {
 		t.Errorf("expected absolute path %q, got %q", repoDir, entries[0].Path)
+	}
+}
+
+func TestDefaultFreshnessTiers(t *testing.T) {
+	tiers := DefaultFreshnessTiers()
+	if len(tiers) != 2 {
+		t.Fatalf("expected 2 default tiers, got %d", len(tiers))
+	}
+	if tiers[0].MaxAge != 1*time.Hour {
+		t.Errorf("tier[0].MaxAge = %v, want 1h", tiers[0].MaxAge)
+	}
+	if tiers[0].Interval != 10*time.Second {
+		t.Errorf("tier[0].Interval = %v, want 10s", tiers[0].Interval)
+	}
+	if tiers[1].MaxAge != 24*time.Hour {
+		t.Errorf("tier[1].MaxAge = %v, want 24h", tiers[1].MaxAge)
+	}
+	if tiers[1].Interval != 1*time.Minute {
+		t.Errorf("tier[1].Interval = %v, want 1m", tiers[1].Interval)
+	}
+}
+
+func TestSelectInterval(t *testing.T) {
+	now := time.Date(2026, 4, 3, 12, 0, 0, 0, time.UTC)
+	tiers := DefaultFreshnessTiers()
+	cold := DefaultColdInterval
+
+	tests := []struct {
+		name      string
+		lastQuery time.Time
+		want      time.Duration
+	}{
+		{
+			name:      "queried 5 minutes ago — hot tier",
+			lastQuery: now.Add(-5 * time.Minute),
+			want:      10 * time.Second,
+		},
+		{
+			name:      "queried 59 minutes ago — still hot tier",
+			lastQuery: now.Add(-59 * time.Minute),
+			want:      10 * time.Second,
+		},
+		{
+			name:      "queried exactly 1 hour ago — hot tier boundary",
+			lastQuery: now.Add(-1 * time.Hour),
+			want:      10 * time.Second,
+		},
+		{
+			name:      "queried 2 hours ago — warm tier",
+			lastQuery: now.Add(-2 * time.Hour),
+			want:      1 * time.Minute,
+		},
+		{
+			name:      "queried 23 hours ago — still warm tier",
+			lastQuery: now.Add(-23 * time.Hour),
+			want:      1 * time.Minute,
+		},
+		{
+			name:      "queried 25 hours ago — cold",
+			lastQuery: now.Add(-25 * time.Hour),
+			want:      cold,
+		},
+		{
+			name:      "never queried (zero time) — cold",
+			lastQuery: time.Time{},
+			want:      cold,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := SelectInterval(tiers, tt.lastQuery, now, cold)
+			if got != tt.want {
+				t.Errorf("SelectInterval() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestSelectInterval_NilTiers(t *testing.T) {
+	now := time.Now()
+	cold := 3 * time.Minute
+	got := SelectInterval(nil, now.Add(-1*time.Minute), now, cold)
+	if got != cold {
+		t.Errorf("SelectInterval with nil tiers = %v, want %v (cold)", got, cold)
+	}
+}
+
+func TestSelectInterval_CustomTiers(t *testing.T) {
+	now := time.Date(2026, 4, 3, 12, 0, 0, 0, time.UTC)
+	tiers := []FreshnessTier{
+		{MaxAge: 30 * time.Minute, Interval: 5 * time.Second},
+		{MaxAge: 6 * time.Hour, Interval: 30 * time.Second},
+	}
+	cold := 10 * time.Minute
+
+	// 10 minutes ago — matches first tier.
+	got := SelectInterval(tiers, now.Add(-10*time.Minute), now, cold)
+	if got != 5*time.Second {
+		t.Errorf("got %v, want 5s", got)
+	}
+
+	// 2 hours ago — matches second tier.
+	got = SelectInterval(tiers, now.Add(-2*time.Hour), now, cold)
+	if got != 30*time.Second {
+		t.Errorf("got %v, want 30s", got)
+	}
+
+	// 8 hours ago — cold.
+	got = SelectInterval(tiers, now.Add(-8*time.Hour), now, cold)
+	if got != cold {
+		t.Errorf("got %v, want %v (cold)", got, cold)
 	}
 }

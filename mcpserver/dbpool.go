@@ -31,15 +31,23 @@ type poolEntry struct {
 	modTime  time.Time // mtime of the DB file when the connection was opened
 }
 
+// accessEntry records when a repo was last queried via Open().
+type accessEntry struct {
+	repoName   string
+	lastAccess time.Time
+}
+
 // DBPool manages a pool of lazily-opened, LRU-evicted per-repo SQLite connections.
 // It is safe for concurrent use.
 type DBPool struct {
 	dataDir string
 	maxOpen int
 
-	mu    sync.Mutex
-	conns map[string]*list.Element // repoName -> LRU element containing *poolEntry
-	lru   *list.List               // front = most recently used
+	mu         sync.Mutex
+	conns      map[string]*list.Element // repoName -> LRU element containing *poolEntry
+	lru        *list.List               // front = most recently used
+	lastAccess map[string]time.Time     // repoName -> last Open() call time
+	nowFunc    func() time.Time         // injectable clock for testing
 }
 
 // NewDBPool creates a new DBPool that looks for claims databases in dataDir.
@@ -50,10 +58,12 @@ func NewDBPool(dataDir string, maxOpen int) *DBPool {
 		maxOpen = DefaultMaxOpenDBs
 	}
 	return &DBPool{
-		dataDir: dataDir,
-		maxOpen: maxOpen,
-		conns:   make(map[string]*list.Element),
-		lru:     list.New(),
+		dataDir:    dataDir,
+		maxOpen:    maxOpen,
+		conns:      make(map[string]*list.Element),
+		lru:        list.New(),
+		lastAccess: make(map[string]time.Time),
+		nowFunc:    time.Now,
 	}
 }
 
@@ -87,6 +97,9 @@ func (p *DBPool) Open(repoName string) (*db.ClaimsDB, error) {
 
 	p.mu.Lock()
 	defer p.mu.Unlock()
+
+	// Record the access time for freshness tier calculation.
+	p.lastAccess[repoName] = p.nowFunc()
 
 	// Cache hit: check if the underlying file has been modified since we opened it.
 	if elem, ok := p.conns[repoName]; ok {
@@ -194,6 +207,15 @@ func (p *DBPool) Close() error {
 		delete(p.conns, entry.repoName)
 	}
 	return firstErr
+}
+
+// LastAccess returns the time the given repo was last queried via Open().
+// If the repo has never been accessed, the zero time is returned along with false.
+func (p *DBPool) LastAccess(repoName string) (time.Time, bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	t, ok := p.lastAccess[repoName]
+	return t, ok
 }
 
 // Len returns the number of currently open connections. Useful for testing.
