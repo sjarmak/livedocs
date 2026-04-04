@@ -23,12 +23,13 @@ import (
 )
 
 var (
-	watchInterval  time.Duration
-	watchRepo      string
-	watchOutput    string
-	watchStateFile string
-	watchConfig    string
-	watchReposDir  string
+	watchInterval     time.Duration
+	watchDeepInterval time.Duration
+	watchRepo         string
+	watchOutput       string
+	watchStateFile    string
+	watchConfig       string
+	watchReposDir     string
 )
 
 var watchCmd = &cobra.Command{
@@ -117,12 +118,13 @@ is no longer an ancestor of the current HEAD.`,
 			}
 		}
 
-		return runWatchMulti(cmd, entries, stateFile, watchInterval)
+		return runWatchMulti(cmd, entries, stateFile, watchInterval, watchDeepInterval)
 	},
 }
 
 func init() {
 	watchCmd.Flags().DurationVar(&watchInterval, "interval", 5*time.Second, "polling interval (e.g. 5s, 1m)")
+	watchCmd.Flags().DurationVar(&watchDeepInterval, "deep-interval", 10*time.Minute, "Go deep extractor interval (e.g. 10m, 1h; 0 to disable)")
 	watchCmd.Flags().StringVar(&watchRepo, "repo", "", "repository name (default: directory basename)")
 	watchCmd.Flags().StringVarP(&watchOutput, "output", "o", "", "output SQLite file path (default: <repo>.claims.db)")
 	watchCmd.Flags().StringVar(&watchStateFile, "state-file", "", "state file path (default: .livedocs-watch-state.json next to output)")
@@ -168,7 +170,7 @@ func buildRegistry(repoName string) *extractor.Registry {
 
 // runWatchMulti launches one watcher per repo entry, all sharing the same
 // state file and polling interval. Blocks until ctx is cancelled.
-func runWatchMulti(cmd *cobra.Command, entries []watch.RepoEntry, stateFile string, interval time.Duration) error {
+func runWatchMulti(cmd *cobra.Command, entries []watch.RepoEntry, stateFile string, interval, deepInterval time.Duration) error {
 	out := cmd.OutOrStdout()
 
 	// Set up signal handling for clean shutdown.
@@ -239,14 +241,34 @@ func runWatchMulti(cmd *cobra.Command, entries []watch.RepoEntry, stateFile stri
 			Registry: registry,
 		})
 
+		// Build deep extraction callback.
+		var deepFn watch.DeepExtractFn
+		if deepInterval > 0 {
+			goDeep := &goextractor.GoDeepExtractor{Repo: entry.Name}
+			repoDir := entry.Path
+			deepFn = func(ctx context.Context) error {
+				claims, err := goDeep.Extract(ctx, repoDir, "go")
+				if err != nil {
+					return fmt.Errorf("go deep extract: %w", err)
+				}
+				_, err = storeClaims(claimsDB, entry.Name, claims)
+				if err != nil {
+					return fmt.Errorf("store deep claims: %w", err)
+				}
+				return nil
+			}
+		}
+
 		w := watch.New(watch.Config{
-			RepoDir:   entry.Path,
-			RepoName:  entry.Name,
-			Interval:  interval,
-			StateFile: stateFile,
-			Pipeline:  p,
-			Out:       out,
-			State:     sharedState,
+			RepoDir:      entry.Path,
+			RepoName:     entry.Name,
+			Interval:     interval,
+			DeepInterval: deepInterval,
+			StateFile:    stateFile,
+			Pipeline:     p,
+			DeepExtract:  deepFn,
+			Out:          out,
+			State:        sharedState,
 		})
 
 		wg.Add(1)
