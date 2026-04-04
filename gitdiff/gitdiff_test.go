@@ -261,6 +261,64 @@ func TestFilterHelpers(t *testing.T) {
 	})
 }
 
+func TestDiffBetween_FromEmptyTree(t *testing.T) {
+	// Verify that DiffBetween works when fromCommit is the empty tree SHA,
+	// even if that object does not exist in the repository. This covers the
+	// "fresh repo, no prior state" path in the watcher.
+	dir := t.TempDir()
+
+	run := func(args ...string) {
+		t.Helper()
+		cmd := exec.Command(args[0], args[1:]...)
+		cmd.Dir = dir
+		cmd.Env = append(os.Environ(),
+			"GIT_AUTHOR_NAME=test",
+			"GIT_AUTHOR_EMAIL=test@test.com",
+			"GIT_COMMITTER_NAME=test",
+			"GIT_COMMITTER_EMAIL=test@test.com",
+		)
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("command %v failed: %v\n%s", args, err, out)
+		}
+	}
+
+	run("git", "init")
+	run("git", "checkout", "-b", "main")
+
+	if err := os.WriteFile(filepath.Join(dir, "foo.go"), []byte("package foo"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "bar.go"), []byte("package bar"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	run("git", "add", ".")
+	run("git", "commit", "-m", "initial")
+
+	head := getHEAD(t, dir)
+
+	changes, err := DiffBetween(dir, emptyTreeSHA, head)
+	if err != nil {
+		t.Fatalf("DiffBetween from empty tree: %v", err)
+	}
+
+	if len(changes) != 2 {
+		t.Fatalf("got %d changes, want 2: %+v", len(changes), changes)
+	}
+	for _, c := range changes {
+		if c.Status != StatusAdded {
+			t.Errorf("expected StatusAdded for %s, got %s", c.Path, c.Status)
+		}
+	}
+	byPath := make(map[string]bool)
+	for _, c := range changes {
+		byPath[c.Path] = true
+	}
+	if !byPath["foo.go"] || !byPath["bar.go"] {
+		t.Errorf("expected foo.go and bar.go in changes, got %+v", changes)
+	}
+}
+
 func getHEAD(t *testing.T, dir string) string {
 	t.Helper()
 	cmd := exec.Command("git", "rev-parse", "HEAD")

@@ -27,9 +27,23 @@ type FileChange struct {
 	OldPath string // previous path (only for renames/copies)
 }
 
+// emptyTreeSHA is the well-known SHA of the empty git tree object. It is used
+// as a sentinel by the watcher to signal "diff against nothing" (full extraction).
+// However, this object may not exist in all git repositories, so DiffBetween
+// handles it specially by listing all files at toCommit instead.
+const emptyTreeSHA = "4b825dc642cb6eb9a060e54bf899d69f82cf7118"
+
 // DiffBetween runs git diff --name-status between two commits in the given
 // repo directory and returns the list of file changes.
+//
+// When fromCommit is the empty tree SHA, it falls back to listing all files
+// at toCommit via git ls-tree, returning each as StatusAdded. This avoids
+// the "Invalid revision range" error that occurs when the empty tree object
+// does not exist in the repository's object store.
 func DiffBetween(repoDir, fromCommit, toCommit string) ([]FileChange, error) {
+	if fromCommit == emptyTreeSHA {
+		return listAllFiles(repoDir, toCommit)
+	}
 	cmd := exec.Command("git", "diff", "--name-status", fromCommit, toCommit)
 	cmd.Dir = repoDir
 	out, err := cmd.Output()
@@ -37,6 +51,26 @@ func DiffBetween(repoDir, fromCommit, toCommit string) ([]FileChange, error) {
 		return nil, fmt.Errorf("gitdiff: git diff %s..%s: %w", fromCommit, toCommit, err)
 	}
 	return ParseNameStatus(string(out))
+}
+
+// listAllFiles returns all files tracked at the given commit as StatusAdded
+// changes. It uses git ls-tree -r --name-only which works on any valid commit
+// without requiring the empty tree object to exist.
+func listAllFiles(repoDir, commit string) ([]FileChange, error) {
+	cmd := exec.Command("git", "ls-tree", "-r", "--name-only", commit)
+	cmd.Dir = repoDir
+	out, err := cmd.Output()
+	if err != nil {
+		return nil, fmt.Errorf("gitdiff: git ls-tree %s: %w", commit, err)
+	}
+	var changes []FileChange
+	for _, line := range strings.Split(strings.TrimRight(string(out), "\n"), "\n") {
+		if line == "" {
+			continue
+		}
+		changes = append(changes, FileChange{Status: StatusAdded, Path: line})
+	}
+	return changes, nil
 }
 
 // ParseNameStatus parses the output of git diff --name-status into FileChange
