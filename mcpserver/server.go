@@ -23,6 +23,7 @@ import (
 	"github.com/live-docs/live_docs/anchor"
 	"github.com/live-docs/live_docs/db"
 	"github.com/live-docs/live_docs/drift"
+	"github.com/live-docs/live_docs/extractor"
 )
 
 // Config holds the configuration for the MCP server.
@@ -33,6 +34,15 @@ type Config struct {
 	DataDir string
 	// Telemetry enables opt-in anonymous telemetry collection.
 	Telemetry bool
+	// RepoRoots maps repo names to their source code root directories on disk.
+	// When set, enables lazy staleness checking in MCP query paths: if a queried
+	// file has changed on disk since last extraction, it is re-extracted before
+	// returning the response. Optional — if empty, staleness checking is disabled.
+	RepoRoots map[string]string
+	// ExtractorRegistry is the extractor registry used for lazy re-extraction.
+	// Required when RepoRoots is set and re-extraction is desired. If nil,
+	// staleness is detected but files are not re-extracted (warning only).
+	ExtractorRegistry *extractor.Registry
 }
 
 // Server wraps the MCP server and its dependencies.
@@ -41,6 +51,7 @@ type Server struct {
 	claimsDB  *db.ClaimsDB
 	pool      *DBPool
 	telemetry *Collector
+	staleness *StalenessChecker
 }
 
 // New creates a new MCP server with the given configuration.
@@ -85,6 +96,12 @@ func New(cfg Config) (*Server, error) {
 	if cfg.DataDir != "" {
 		pool := NewDBPool(cfg.DataDir, DefaultMaxOpenDBs)
 		s.pool = pool
+
+		// Create staleness checker if repo roots are configured.
+		if len(cfg.RepoRoots) > 0 {
+			s.staleness = NewStalenessChecker(cfg.RepoRoots, cfg.ExtractorRegistry)
+		}
+
 		s.registerMultiRepoTools(pool)
 	}
 
@@ -132,7 +149,7 @@ func (s *Server) registerMultiRepoTools(pool *DBPool) {
 	defs := []ToolDef{
 		ListReposToolDef(pool),
 		ListPackagesToolDef(pool),
-		DescribePackageToolDef(pool),
+		DescribePackageToolDef(pool, s.staleness),
 		SearchSymbolsToolDef(pool, index),
 	}
 	for _, def := range defs {

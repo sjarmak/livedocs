@@ -207,8 +207,10 @@ Example: list_packages(repo="kubernetes", prefix="k8s.io/api/") returns all pack
 // ---------------------------------------------------------------------------
 
 // DescribePackageHandler returns a ToolHandler that renders package documentation.
-func DescribePackageHandler(pool *DBPool) ToolHandler {
-	return func(_ context.Context, req ToolRequest) (ToolResult, error) {
+// If sc is non-nil, it performs a lazy staleness check and re-extracts changed
+// files before rendering. This is best-effort — failures fall back to stale data.
+func DescribePackageHandler(pool *DBPool, sc *StalenessChecker) ToolHandler {
+	return func(ctx context.Context, req ToolRequest) (ToolResult, error) {
 		repoName, err := req.RequireString("repo")
 		if err != nil {
 			return NewErrorResult("missing required parameter 'repo'"), nil
@@ -221,6 +223,16 @@ func DescribePackageHandler(pool *DBPool) ToolHandler {
 		cdb, err := pool.Open(repoName)
 		if err != nil {
 			return NewErrorResultf("open repo %s: %v", repoName, err), nil
+		}
+
+		// Lazy staleness check: detect and optionally re-extract changed files.
+		var staleWarningMD string
+		if sc != nil {
+			staleFiles := sc.CheckPackageStaleness(cdb, repoName, importPath)
+			if len(staleFiles) > 0 {
+				refreshed, errs := sc.RefreshStaleFiles(ctx, cdb, staleFiles)
+				staleWarningMD = stalenessWarning(staleFiles, refreshed, errs)
+			}
 		}
 
 		pd, err := renderer.LoadPackageData(cdb, importPath)
@@ -256,12 +268,18 @@ func DescribePackageHandler(pool *DBPool) ToolHandler {
 			md = fmt.Sprintf("> Data extracted at %s%s\n\n%s", extractedAt, commitInfo, md)
 		}
 
+		// Prepend lazy-staleness warning if applicable.
+		if staleWarningMD != "" {
+			md = staleWarningMD + md
+		}
+
 		return NewTextResult(md), nil
 	}
 }
 
 // DescribePackageToolDef returns the ToolDef for describe_package.
-func DescribePackageToolDef(pool *DBPool) ToolDef {
+// If sc is non-nil, lazy staleness checking is enabled for this tool.
+func DescribePackageToolDef(pool *DBPool, sc *StalenessChecker) ToolDef {
 	return ToolDef{
 		Name: "describe_package",
 		Description: `Render Markdown documentation for a package in a repository.
@@ -270,12 +288,13 @@ Produces structural documentation including interfaces, dependencies, reverse de
 function categories, and test coverage. Also includes Purpose and Usage Patterns sections when
 semantic claims exist.
 
-Includes extracted_at timestamp and warns if data is older than 7 days.`,
+Includes extracted_at timestamp and warns if data is older than 7 days.
+When repo roots are configured, performs lazy staleness detection and re-extracts changed files on-the-fly.`,
 		Params: []ParamDef{
 			{Name: "repo", Type: ParamString, Required: true, Description: "Repository name (matches the .claims.db filename without extension)."},
 			{Name: "import_path", Type: ParamString, Required: true, Description: "Full import path of the package to describe. Example: 'k8s.io/api/core/v1'."},
 		},
-		Handler: DescribePackageHandler(pool),
+		Handler: DescribePackageHandler(pool, sc),
 	}
 }
 

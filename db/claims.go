@@ -490,6 +490,42 @@ func (c *ClaimsDB) ListDeletedFiles(repo string) ([]SourceFile, error) {
 	return files, rows.Err()
 }
 
+// GetSourceFilesByImportPath returns the distinct source files associated with
+// symbols in the given import path. It joins claims back to source_files to
+// find files that contributed claims for the package.
+func (c *ClaimsDB) GetSourceFilesByImportPath(importPath string) ([]SourceFile, error) {
+	rows, err := c.exec.Query(`
+		SELECT DISTINCT sf.id, sf.repo, sf.relative_path, sf.content_hash,
+		       sf.extractor_version, sf.grammar_version, sf.last_indexed, sf.deleted
+		FROM source_files sf
+		INNER JOIN claims cl ON cl.source_file = sf.relative_path
+		INNER JOIN symbols sym ON cl.subject_id = sym.id AND sym.import_path = ?
+		WHERE sf.deleted = 0
+	`, importPath)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var files []SourceFile
+	for rows.Next() {
+		var sf SourceFile
+		var grammarVersion sql.NullString
+		var deleted int
+		err := rows.Scan(
+			&sf.ID, &sf.Repo, &sf.RelativePath, &sf.ContentHash,
+			&sf.ExtractorVersion, &grammarVersion, &sf.LastIndexed, &deleted,
+		)
+		if err != nil {
+			return nil, err
+		}
+		sf.GrammarVersion = grammarVersion.String
+		sf.Deleted = deleted != 0
+		files = append(files, sf)
+	}
+	return files, rows.Err()
+}
+
 // IsCacheHit checks whether a source file can be skipped based on content hash
 // and extractor/grammar version matching. Returns true if all three match.
 func (c *ClaimsDB) IsCacheHit(repo, relativePath, contentHash, extractorVersion, grammarVersion string) bool {

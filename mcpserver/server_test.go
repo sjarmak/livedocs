@@ -757,7 +757,7 @@ func TestDescribePackage(t *testing.T) {
 	pool := NewDBPool(dataDir, DefaultMaxOpenDBs)
 	defer pool.Close()
 
-	handler := DescribePackageHandler(pool)
+	handler := DescribePackageHandler(pool, nil)
 	result, err := handler(context.Background(), &requestAdapter{raw: makeRequest(map[string]any{
 		"repo":        "myrepo",
 		"import_path": "example.com/myrepo/pkg",
@@ -801,7 +801,7 @@ func TestDescribePackage_MissingParams(t *testing.T) {
 	pool := NewDBPool(dataDir, DefaultMaxOpenDBs)
 	defer pool.Close()
 
-	handler := DescribePackageHandler(pool)
+	handler := DescribePackageHandler(pool, nil)
 
 	// Missing repo.
 	result, err := handler(context.Background(), &requestAdapter{raw: makeRequest(map[string]any{
@@ -832,7 +832,7 @@ func TestDescribePackage_FallsBackGracefully(t *testing.T) {
 	pool := NewDBPool(dataDir, DefaultMaxOpenDBs)
 	defer pool.Close()
 
-	handler := DescribePackageHandler(pool)
+	handler := DescribePackageHandler(pool, nil)
 	result, err := handler(context.Background(), &requestAdapter{raw: makeRequest(map[string]any{
 		"repo":        "basic",
 		"import_path": "example.com/basic/pkg",
@@ -1044,7 +1044,7 @@ func TestDescribePackage_WithExtractionMeta(t *testing.T) {
 	pool := NewDBPool(dataDir, DefaultMaxOpenDBs)
 	defer pool.Close()
 
-	handler := DescribePackageHandler(pool)
+	handler := DescribePackageHandler(pool, nil)
 	result, err := handler(context.Background(), &requestAdapter{raw: makeRequest(map[string]any{
 		"repo":        "myrepo",
 		"import_path": "example.com/myrepo/pkg",
