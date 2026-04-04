@@ -10,6 +10,7 @@ import (
 	"crypto/sha256"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -112,7 +113,6 @@ type StalenessChecker struct {
 	registry  *extractor.Registry // extractor registry for re-extraction
 	mu        sync.RWMutex        // protects repoRoots
 	cache     *stalenessCache     // bounded LRU cache for staleness results
-	nowFunc   func() time.Time    // clock function (overridable for testing)
 }
 
 // NewStalenessChecker creates a StalenessChecker with the given repo root mappings
@@ -127,7 +127,6 @@ func NewStalenessChecker(repoRoots map[string]string, registry *extractor.Regist
 		repoRoots: roots,
 		registry:  registry,
 		cache:     newStalenessCache(nowFn),
-		nowFunc:   nowFn,
 	}
 }
 
@@ -175,7 +174,9 @@ func (sc *StalenessChecker) CheckPackageStaleness(ctx context.Context, cdb *db.C
 		if err != nil {
 			if errors.Is(err, os.ErrNotExist) {
 				// File was deleted — remove its claims from the DB.
-				_ = cdb.MarkFileDeleted(repoName, sf.RelativePath)
+				if err := cdb.MarkFileDeleted(repoName, sf.RelativePath); err != nil {
+					log.Printf("warning: MarkFileDeleted %s/%s: %v", repoName, sf.RelativePath, err)
+				}
 			}
 			continue
 		}
@@ -293,6 +294,17 @@ func (sc *StalenessChecker) reExtractFile(ctx context.Context, cdb *db.ClaimsDB,
 	claims, err := sc.registry.ExtractFile(ctx, absPath)
 	if err != nil {
 		return fmt.Errorf("extract %s: %w", relPath, err)
+	}
+
+	// Zero-claim write guard: refuse to overwrite existing claims with nothing.
+	if len(claims) == 0 {
+		existingClaims, err := cdb.GetClaimsByFile(relPath)
+		if err != nil {
+			return fmt.Errorf("check existing claims for %s: %w", relPath, err)
+		}
+		if len(existingClaims) > 0 {
+			return fmt.Errorf("refusing to overwrite %d claims with 0 for file %s — possible grammar failure", len(existingClaims), relPath)
+		}
 	}
 
 	// Store in a transaction.

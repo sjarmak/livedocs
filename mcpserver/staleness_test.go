@@ -542,9 +542,8 @@ func TestStalenessCache_HitWithinTTL(t *testing.T) {
 
 	clock := newMockClock()
 	sc := NewStalenessChecker(map[string]string{"myrepo": repoDir}, nil)
-	// Override the cache's clock and the checker's clock.
+	// Override the cache's clock.
 	sc.cache.nowFunc = clock.Now
-	sc.nowFunc = clock.Now
 
 	// Read the current file content to know what hash the first call will produce.
 	origContent, err := os.ReadFile(absPath)
@@ -601,7 +600,6 @@ func TestStalenessCache_ExpiredAfterTTL(t *testing.T) {
 	clock := newMockClock()
 	sc := NewStalenessChecker(map[string]string{"myrepo": repoDir}, nil)
 	sc.cache.nowFunc = clock.Now
-	sc.nowFunc = clock.Now
 
 	// First call — populates cache.
 	stale1 := sc.CheckPackageStaleness(context.Background(), cdb, "myrepo", "example.com/pkg")
@@ -665,6 +663,72 @@ func TestStalenessCache_LRUEviction(t *testing.T) {
 	// The new entry should exist.
 	if _, ok := cache.get("repo:pkg/new"); !ok {
 		t.Error("expected repo:pkg/new to exist after insertion")
+	}
+}
+
+func TestReExtractFile_ZeroClaimGuard(t *testing.T) {
+	t.Parallel()
+
+	repoDir := t.TempDir()
+	relPath := "pkg/guarded.go"
+
+	// Create the file on disk.
+	absPath := filepath.Join(repoDir, relPath)
+	if err := os.MkdirAll(filepath.Dir(absPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(absPath, []byte("package pkg\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Set up DB with an existing claim for this file.
+	cdb, _ := setupStalenessTestDB(t, "myrepo", "example.com/pkg", relPath, "package pkg\n")
+
+	// Verify there is at least one existing claim.
+	existingClaims, err := cdb.GetClaimsByFile(relPath)
+	if err != nil {
+		t.Fatalf("GetClaimsByFile: %v", err)
+	}
+	if len(existingClaims) == 0 {
+		t.Fatal("expected existing claims in DB before test")
+	}
+
+	// Mock extractor that returns 0 claims.
+	reg := makeRegistryWithMock(func(_ context.Context, _, _ string) ([]extractor.Claim, error) {
+		return []extractor.Claim{}, nil
+	})
+
+	sc := NewStalenessChecker(map[string]string{"myrepo": repoDir}, reg)
+	staleFiles := []StaleFile{
+		{RelativePath: relPath, RepoName: "myrepo"},
+	}
+
+	refreshed, errs := sc.RefreshStaleFiles(context.Background(), cdb, staleFiles)
+
+	// Should have failed with zero-claim guard error.
+	if refreshed != 0 {
+		t.Errorf("expected 0 refreshed, got %d", refreshed)
+	}
+	if len(errs) == 0 {
+		t.Fatal("expected at least one error for zero-claim guard")
+	}
+	foundGuard := false
+	for _, e := range errs {
+		if strContains(e.Error(), "refusing to overwrite") {
+			foundGuard = true
+		}
+	}
+	if !foundGuard {
+		t.Errorf("expected 'refusing to overwrite' error, got %v", errs)
+	}
+
+	// Verify existing claims are preserved.
+	afterClaims, err := cdb.GetClaimsByFile(relPath)
+	if err != nil {
+		t.Fatalf("GetClaimsByFile after guard: %v", err)
+	}
+	if len(afterClaims) != len(existingClaims) {
+		t.Errorf("expected %d claims preserved, got %d", len(existingClaims), len(afterClaims))
 	}
 }
 
