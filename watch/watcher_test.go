@@ -12,6 +12,18 @@ import (
 	"github.com/live-docs/live_docs/pipeline"
 )
 
+// safeWriter is a goroutine-safe io.Writer for concurrent test use.
+type safeWriter struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (w *safeWriter) Write(p []byte) (int, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.buf.Write(p)
+}
+
 // mockGitOps implements GitOps for testing.
 type mockGitOps struct {
 	mu         sync.Mutex
@@ -359,7 +371,8 @@ func TestWatcher_MultiRepoIndependentState(t *testing.T) {
 	pA := &mockPipeline{}
 	pB := &mockPipeline{}
 
-	var buf bytes.Buffer
+	// Use separate writers per watcher to avoid data race on bytes.Buffer.
+	var bufA, bufB safeWriter
 
 	// Shared state instance so concurrent watchers don't clobber each other.
 	sharedState := NewState()
@@ -370,7 +383,7 @@ func TestWatcher_MultiRepoIndependentState(t *testing.T) {
 		Interval:  50 * time.Millisecond,
 		StateFile: stateFile,
 		Pipeline:  pA,
-		Out:       &buf,
+		Out:       &bufA,
 		Git:       gitA,
 		State:     sharedState,
 	})
@@ -381,7 +394,7 @@ func TestWatcher_MultiRepoIndependentState(t *testing.T) {
 		Interval:  50 * time.Millisecond,
 		StateFile: stateFile,
 		Pipeline:  pB,
-		Out:       &buf,
+		Out:       &bufB,
 		Git:       gitB,
 		State:     sharedState,
 	})
