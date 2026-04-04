@@ -5,6 +5,7 @@ package db
 import (
 	"database/sql"
 	"fmt"
+	"sync"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -70,6 +71,7 @@ type dbExecutor interface {
 type ClaimsDB struct {
 	db   *sql.DB
 	exec dbExecutor // defaults to db; swapped to tx inside RunInTransaction
+	txMu sync.Mutex // serializes RunInTransaction to prevent concurrent c.exec swaps
 }
 
 // OpenClaimsDB opens or creates a per-repo claims database at the given path.
@@ -105,6 +107,9 @@ func (c *ClaimsDB) Close() error {
 // called within fn will use the transaction. If fn returns an error, the
 // transaction is rolled back; otherwise it is committed.
 func (c *ClaimsDB) RunInTransaction(fn func() error) error {
+	c.txMu.Lock()
+	defer c.txMu.Unlock()
+
 	tx, err := c.db.Begin()
 	if err != nil {
 		return fmt.Errorf("begin transaction: %w", err)
@@ -832,6 +837,7 @@ func (c *ClaimsDB) DistinctSymbolPrefixes(n int) ([]string, error) {
 type ExtractionMeta struct {
 	CommitSHA   string
 	ExtractedAt string
+	RepoRoot    string
 }
 
 // SetExtractionMeta inserts or updates the extraction metadata for this database.
@@ -841,19 +847,23 @@ func (c *ClaimsDB) SetExtractionMeta(meta ExtractionMeta) error {
 		CREATE TABLE IF NOT EXISTS extraction_meta (
 			id              INTEGER PRIMARY KEY CHECK(id = 1),
 			commit_sha      TEXT NOT NULL,
-			extracted_at    TEXT NOT NULL
+			extracted_at    TEXT NOT NULL,
+			repo_root       TEXT NOT NULL DEFAULT ''
 		)
 	`)
 	if err != nil {
 		return fmt.Errorf("create extraction_meta table: %w", err)
 	}
+	// Add repo_root column if upgrading from an older schema.
+	_, _ = c.exec.Exec(`ALTER TABLE extraction_meta ADD COLUMN repo_root TEXT NOT NULL DEFAULT ''`)
 	_, err = c.exec.Exec(`
-		INSERT INTO extraction_meta (id, commit_sha, extracted_at)
-		VALUES (1, ?, ?)
+		INSERT INTO extraction_meta (id, commit_sha, extracted_at, repo_root)
+		VALUES (1, ?, ?, ?)
 		ON CONFLICT(id) DO UPDATE SET
 			commit_sha = excluded.commit_sha,
-			extracted_at = excluded.extracted_at
-	`, meta.CommitSHA, meta.ExtractedAt)
+			extracted_at = excluded.extracted_at,
+			repo_root = excluded.repo_root
+	`, meta.CommitSHA, meta.ExtractedAt, meta.RepoRoot)
 	if err != nil {
 		return fmt.Errorf("set extraction meta: %w", err)
 	}
@@ -876,9 +886,10 @@ func (c *ClaimsDB) GetExtractionMeta() (ExtractionMeta, error) {
 	if tableCount == 0 {
 		return meta, nil
 	}
+	// Use COALESCE for backward compat with DBs lacking repo_root column.
 	err = c.exec.QueryRow(
-		"SELECT commit_sha, extracted_at FROM extraction_meta WHERE id = 1",
-	).Scan(&meta.CommitSHA, &meta.ExtractedAt)
+		"SELECT commit_sha, extracted_at, COALESCE(repo_root, '') FROM extraction_meta WHERE id = 1",
+	).Scan(&meta.CommitSHA, &meta.ExtractedAt, &meta.RepoRoot)
 	if err != nil {
 		if err == sql.ErrNoRows {
 			return ExtractionMeta{}, nil

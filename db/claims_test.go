@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 )
 
@@ -800,5 +801,62 @@ func TestRunInTransaction_Rollback(t *testing.T) {
 	_, err = cdb.GetSymbolByCompositeKey("r", "p", "RollbackSym")
 	if err == nil {
 		t.Error("expected error (no rows) after rollback, but symbol was found")
+	}
+}
+
+func TestRunInTransaction_ConcurrentNoRace(t *testing.T) {
+	cdb := tempDB(t)
+
+	const goroutines = 20
+	var wg sync.WaitGroup
+	errs := make(chan error, goroutines)
+
+	for i := 0; i < goroutines; i++ {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			symName := fmt.Sprintf("ConcSym_%d", idx)
+			err := cdb.RunInTransaction(func() error {
+				_, err := cdb.UpsertSymbol(Symbol{
+					Repo: "r", ImportPath: "concurrent", SymbolName: symName,
+					Language: "go", Kind: "func", Visibility: "public",
+				})
+				if err != nil {
+					return fmt.Errorf("upsert symbol %s: %w", symName, err)
+				}
+				_, err = cdb.InsertClaim(Claim{
+					SubjectID: 1, Predicate: "defines", SourceFile: fmt.Sprintf("file_%d.go", idx),
+					Confidence: 1.0, ClaimTier: "structural",
+					Extractor: "test", ExtractorVersion: "1.0", LastVerified: Now(),
+				})
+				if err != nil {
+					return fmt.Errorf("insert claim for %s: %w", symName, err)
+				}
+				return nil
+			})
+			if err != nil {
+				errs <- err
+			}
+		}(i)
+	}
+
+	wg.Wait()
+	close(errs)
+
+	for err := range errs {
+		t.Errorf("concurrent transaction error: %v", err)
+	}
+
+	// Verify all symbols were persisted.
+	for i := 0; i < goroutines; i++ {
+		symName := fmt.Sprintf("ConcSym_%d", i)
+		sym, err := cdb.GetSymbolByCompositeKey("r", "concurrent", symName)
+		if err != nil {
+			t.Errorf("missing symbol %s after concurrent transactions: %v", symName, err)
+			continue
+		}
+		if sym.SymbolName != symName {
+			t.Errorf("expected %s, got %s", symName, sym.SymbolName)
+		}
 	}
 }
