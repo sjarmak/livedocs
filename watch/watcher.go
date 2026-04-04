@@ -65,6 +65,7 @@ type Config struct {
 	Pipeline  PipelineRunner // pipeline to run on changes
 	Out       io.Writer      // output writer for log messages
 	Git       GitOps         // git operations (nil = use real git)
+	State     *State         // shared state (nil = load from StateFile)
 }
 
 // Watcher polls git for HEAD changes and triggers pipeline extraction.
@@ -76,6 +77,7 @@ type Watcher struct {
 	pipeline  PipelineRunner
 	out       io.Writer
 	git       GitOps
+	state     *State // shared state, may be nil (loaded on Run)
 }
 
 // New creates a Watcher from the given Config.
@@ -92,12 +94,16 @@ func New(cfg Config) *Watcher {
 		pipeline:  cfg.Pipeline,
 		out:       cfg.Out,
 		git:       git,
+		state:     cfg.State,
 	}
 }
 
 // Run starts the watch loop. It blocks until ctx is cancelled.
 func (w *Watcher) Run(ctx context.Context) error {
-	state := LoadState(w.stateFile)
+	state := w.state
+	if state == nil {
+		state = LoadState(w.stateFile)
+	}
 	lastSHA := state.GetSHA(w.repoName)
 
 	if lastSHA != "" {

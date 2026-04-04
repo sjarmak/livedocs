@@ -349,6 +349,72 @@ func TestWatcher_PersistsStateAfterRun(t *testing.T) {
 	}
 }
 
+func TestWatcher_MultiRepoIndependentState(t *testing.T) {
+	// Two watchers sharing a single state file track SHAs independently.
+	tmp := t.TempDir()
+	stateFile := filepath.Join(tmp, "shared-state.json")
+
+	gitA := &mockGitOps{heads: []string{"sha_a1"}}
+	gitB := &mockGitOps{heads: []string{"sha_b1"}}
+	pA := &mockPipeline{}
+	pB := &mockPipeline{}
+
+	var buf bytes.Buffer
+
+	// Shared state instance so concurrent watchers don't clobber each other.
+	sharedState := NewState()
+
+	wA := New(Config{
+		RepoDir:   "/fake/repo-a",
+		RepoName:  "repo-a",
+		Interval:  50 * time.Millisecond,
+		StateFile: stateFile,
+		Pipeline:  pA,
+		Out:       &buf,
+		Git:       gitA,
+		State:     sharedState,
+	})
+
+	wB := New(Config{
+		RepoDir:   "/fake/repo-b",
+		RepoName:  "repo-b",
+		Interval:  50 * time.Millisecond,
+		StateFile: stateFile,
+		Pipeline:  pB,
+		Out:       &buf,
+		Git:       gitB,
+		State:     sharedState,
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() { defer wg.Done(); _ = wA.Run(ctx) }()
+	go func() { defer wg.Done(); _ = wB.Run(ctx) }()
+	wg.Wait()
+
+	// Both should have run their pipelines.
+	runsA := pA.getRuns()
+	runsB := pB.getRuns()
+	if len(runsA) < 1 {
+		t.Fatal("expected at least one pipeline run for repo-a")
+	}
+	if len(runsB) < 1 {
+		t.Fatal("expected at least one pipeline run for repo-b")
+	}
+
+	// Verify state has both repos tracked independently.
+	state := LoadState(stateFile)
+	if got := state.GetSHA("repo-a"); got != "sha_a1" {
+		t.Errorf("repo-a SHA = %q, want sha_a1", got)
+	}
+	if got := state.GetSHA("repo-b"); got != "sha_b1" {
+		t.Errorf("repo-b SHA = %q, want sha_b1", got)
+	}
+}
+
 func TestWatcher_IntervalFlag(t *testing.T) {
 	// Verify that the interval is respected by checking that with a very
 	// short interval we get multiple polls.
