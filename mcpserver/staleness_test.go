@@ -310,5 +310,190 @@ func TestGetSourceFilesByImportPath_NoMatch(t *testing.T) {
 	}
 }
 
+// --- mock extractor for resilience tests ---
+
+type mockExtractor struct {
+	extractFn func(ctx context.Context, path, lang string) ([]extractor.Claim, error)
+}
+
+func (m *mockExtractor) Extract(ctx context.Context, path, lang string) ([]extractor.Claim, error) {
+	return m.extractFn(ctx, path, lang)
+}
+
+func (m *mockExtractor) Name() string    { return "mock-extractor" }
+func (m *mockExtractor) Version() string { return "1.0" }
+
+// makeRegistryWithMock creates a Registry with a mock extractor registered for .go files.
+func makeRegistryWithMock(fn func(ctx context.Context, path, lang string) ([]extractor.Claim, error)) *extractor.Registry {
+	reg := extractor.NewRegistry()
+	reg.Register(extractor.LanguageConfig{
+		Language:          "go",
+		Extensions:        []string{".go"},
+		TreeSitterGrammar: "tree-sitter-go",
+		FastExtractor:     &mockExtractor{extractFn: fn},
+	})
+	return reg
+}
+
+func TestRefreshStaleFiles_ContextTimeout(t *testing.T) {
+	t.Parallel()
+
+	// Create a context that is already cancelled.
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	reg := makeRegistryWithMock(func(_ context.Context, _, _ string) ([]extractor.Claim, error) {
+		t.Fatal("extractor should not be called after context cancellation")
+		return nil, nil
+	})
+
+	sc := NewStalenessChecker(map[string]string{"myrepo": "/tmp"}, reg)
+	staleFiles := []StaleFile{
+		{RelativePath: "a.go", RepoName: "myrepo"},
+		{RelativePath: "b.go", RepoName: "myrepo"},
+		{RelativePath: "c.go", RepoName: "myrepo"},
+	}
+
+	refreshed, errs := sc.RefreshStaleFiles(ctx, nil, staleFiles)
+
+	if refreshed != 0 {
+		t.Errorf("expected 0 refreshed with cancelled context, got %d", refreshed)
+	}
+	if len(errs) == 0 {
+		t.Fatal("expected at least one error for context cancellation")
+	}
+	if !strContains(errs[0].Error(), "context cancelled") {
+		t.Errorf("expected context cancellation error, got %q", errs[0].Error())
+	}
+}
+
+func TestRefreshStaleFiles_PanicRecovery(t *testing.T) {
+	t.Parallel()
+
+	repoDir := t.TempDir()
+	relPath := "pkg/panic.go"
+
+	// Create the file on disk so reExtractFile can read it.
+	absPath := filepath.Join(repoDir, relPath)
+	if err := os.MkdirAll(filepath.Dir(absPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(absPath, []byte("package pkg\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	reg := makeRegistryWithMock(func(_ context.Context, _, _ string) ([]extractor.Claim, error) {
+		panic("simulated tree-sitter crash")
+	})
+
+	cdb, _ := setupStalenessTestDB(t, "myrepo", "example.com/pkg", relPath, "package pkg\n")
+
+	sc := NewStalenessChecker(map[string]string{"myrepo": repoDir}, reg)
+	staleFiles := []StaleFile{
+		{RelativePath: relPath, RepoName: "myrepo"},
+	}
+
+	refreshed, errs := sc.RefreshStaleFiles(context.Background(), cdb, staleFiles)
+
+	if refreshed != 0 {
+		t.Errorf("expected 0 refreshed after panic, got %d", refreshed)
+	}
+	if len(errs) == 0 {
+		t.Fatal("expected at least one error for panic recovery")
+	}
+	if !strContains(errs[0].Error(), "panic during re-extraction") {
+		t.Errorf("expected panic error, got %q", errs[0].Error())
+	}
+	if !strContains(errs[0].Error(), "simulated tree-sitter crash") {
+		t.Errorf("expected panic message in error, got %q", errs[0].Error())
+	}
+}
+
+func TestRefreshStaleFiles_SQLiteBusyContinues(t *testing.T) {
+	t.Parallel()
+
+	repoDir := t.TempDir()
+	relPath1 := "pkg/busy.go"
+	relPath2 := "pkg/ok.go"
+
+	// Create both files on disk.
+	for _, rp := range []string{relPath1, relPath2} {
+		absPath := filepath.Join(repoDir, rp)
+		if err := os.MkdirAll(filepath.Dir(absPath), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(absPath, []byte("package pkg\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	callCount := 0
+	reg := makeRegistryWithMock(func(_ context.Context, path, _ string) ([]extractor.Claim, error) {
+		callCount++
+		if strContains(path, "busy.go") {
+			return nil, fmt.Errorf("SQLITE_BUSY (5): database is locked")
+		}
+		return []extractor.Claim{}, nil
+	})
+
+	cdb, _ := setupStalenessTestDB(t, "myrepo", "example.com/pkg", relPath1, "package pkg\n")
+
+	sc := NewStalenessChecker(map[string]string{"myrepo": repoDir}, reg)
+	staleFiles := []StaleFile{
+		{RelativePath: relPath1, RepoName: "myrepo"},
+		{RelativePath: relPath2, RepoName: "myrepo"},
+	}
+
+	refreshed, errs := sc.RefreshStaleFiles(context.Background(), cdb, staleFiles)
+
+	// The second file should still be processed even though the first got SQLITE_BUSY.
+	if callCount < 2 {
+		t.Errorf("expected extractor called for both files, got %d calls", callCount)
+	}
+	// SQLITE_BUSY error should be collected as a warning.
+	if len(errs) == 0 {
+		t.Fatal("expected at least one warning error for SQLITE_BUSY")
+	}
+	foundBusy := false
+	for _, err := range errs {
+		if strContains(err.Error(), "SQLITE_BUSY") {
+			foundBusy = true
+		}
+	}
+	if !foundBusy {
+		t.Errorf("expected SQLITE_BUSY warning in errors, got %v", errs)
+	}
+	// The second file (ok.go) might or might not succeed depending on the DB state,
+	// but processing should not have been stopped by the SQLITE_BUSY error.
+	_ = refreshed
+}
+
+func TestIsSQLiteBusy(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"nil error", nil, false},
+		{"regular error", fmt.Errorf("something else"), false},
+		{"SQLITE_BUSY", fmt.Errorf("SQLITE_BUSY (5)"), true},
+		{"database is locked", fmt.Errorf("database is locked"), true},
+		{"wrapped SQLITE_BUSY", fmt.Errorf("re-extract foo.go: SQLITE_BUSY (5): %w", fmt.Errorf("inner")), true},
+		{"wrapped database locked", fmt.Errorf("tx: database is locked"), true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := isSQLiteBusy(tt.err)
+			if got != tt.want {
+				t.Errorf("isSQLiteBusy(%v) = %v, want %v", tt.err, got, tt.want)
+			}
+		})
+	}
+}
+
 // Ensure the extractor import is used (needed for NewStalenessChecker signature).
 var _ *extractor.Registry
