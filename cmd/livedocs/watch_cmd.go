@@ -16,8 +16,6 @@ import (
 	"github.com/live-docs/live_docs/db"
 	"github.com/live-docs/live_docs/extractor"
 	"github.com/live-docs/live_docs/extractor/goextractor"
-	"github.com/live-docs/live_docs/extractor/lang"
-	"github.com/live-docs/live_docs/extractor/treesitter"
 	"github.com/live-docs/live_docs/pipeline"
 	"github.com/live-docs/live_docs/watch"
 )
@@ -132,42 +130,6 @@ func init() {
 	watchCmd.Flags().StringVar(&watchReposDir, "repos-dir", "", "directory of git repos to watch")
 }
 
-// buildRegistry creates an extractor registry for the given repo name.
-func buildRegistry(repoName string) *extractor.Registry {
-	registry := extractor.NewRegistry()
-
-	goDeep := &goextractor.GoDeepExtractor{Repo: repoName}
-	registry.Register(extractor.LanguageConfig{
-		Language:      "go",
-		Extensions:    []string{".go"},
-		DeepExtractor: goDeep,
-	})
-
-	langRegistry := lang.NewRegistry()
-	tsExtractor := treesitter.New(langRegistry)
-
-	registry.Register(extractor.LanguageConfig{
-		Language:          "typescript",
-		Extensions:        []string{".ts", ".tsx"},
-		TreeSitterGrammar: "tree-sitter-typescript",
-		FastExtractor:     tsExtractor,
-	})
-	registry.Register(extractor.LanguageConfig{
-		Language:          "python",
-		Extensions:        []string{".py"},
-		TreeSitterGrammar: "tree-sitter-python",
-		FastExtractor:     tsExtractor,
-	})
-	registry.Register(extractor.LanguageConfig{
-		Language:          "shell",
-		Extensions:        []string{".sh"},
-		TreeSitterGrammar: "tree-sitter-bash",
-		FastExtractor:     tsExtractor,
-	})
-
-	return registry
-}
-
 // runWatchMulti launches one watcher per repo entry, all sharing the same
 // state file and polling interval. Blocks until ctx is cancelled.
 func runWatchMulti(cmd *cobra.Command, entries []watch.RepoEntry, stateFile string, interval, deepInterval time.Duration) error {
@@ -222,6 +184,15 @@ func runWatchMulti(cmd *cobra.Command, entries []watch.RepoEntry, stateFile stri
 			return fmt.Errorf("create schema for %s: %w", entry.Name, err)
 		}
 
+		// Store extraction metadata with repo root path.
+		if err := claimsDB.SetExtractionMeta(db.ExtractionMeta{
+			ExtractedAt: db.Now(),
+			RepoRoot:    entry.Path,
+		}); err != nil {
+			claimsDB.Close()
+			return fmt.Errorf("set extraction meta for %s: %w", entry.Name, err)
+		}
+
 		// Open in-memory cache.
 		cacheStore, err := cache.NewSQLiteStore(":memory:", 2*1024*1024*1024)
 		if err != nil {
@@ -232,7 +203,7 @@ func runWatchMulti(cmd *cobra.Command, entries []watch.RepoEntry, stateFile stri
 		resources = append(resources, repoResources{claimsDB: claimsDB, cacheStore: cacheStore})
 
 		// Build registry and pipeline.
-		registry := buildRegistry(entry.Name)
+		registry := extractor.BuildDefaultRegistry(entry.Name)
 		p := pipeline.New(pipeline.Config{
 			Repo:     entry.Name,
 			RepoDir:  entry.Path,

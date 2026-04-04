@@ -674,7 +674,7 @@ func TestSetAndGetExtractionMeta(t *testing.T) {
 	if err != nil {
 		t.Fatalf("get extraction meta (empty): %v", err)
 	}
-	if meta.CommitSHA != "" || meta.ExtractedAt != "" {
+	if meta.CommitSHA != "" || meta.ExtractedAt != "" || meta.RepoRoot != "" {
 		t.Errorf("expected empty meta before set, got %+v", meta)
 	}
 
@@ -683,6 +683,7 @@ func TestSetAndGetExtractionMeta(t *testing.T) {
 	err = db.SetExtractionMeta(ExtractionMeta{
 		CommitSHA:   "abc123def456",
 		ExtractedAt: ts,
+		RepoRoot:    "/home/user/repos/myrepo",
 	})
 	if err != nil {
 		t.Fatalf("set extraction meta: %v", err)
@@ -699,12 +700,16 @@ func TestSetAndGetExtractionMeta(t *testing.T) {
 	if meta.ExtractedAt != ts {
 		t.Errorf("expected extracted_at=%s, got %s", ts, meta.ExtractedAt)
 	}
+	if meta.RepoRoot != "/home/user/repos/myrepo" {
+		t.Errorf("expected repo_root=/home/user/repos/myrepo, got %s", meta.RepoRoot)
+	}
 
 	// Update (upsert) should overwrite.
 	ts2 := Now()
 	err = db.SetExtractionMeta(ExtractionMeta{
 		CommitSHA:   "newcommit789",
 		ExtractedAt: ts2,
+		RepoRoot:    "/home/user/repos/other",
 	})
 	if err != nil {
 		t.Fatalf("set extraction meta (update): %v", err)
@@ -716,6 +721,9 @@ func TestSetAndGetExtractionMeta(t *testing.T) {
 	if meta.CommitSHA != "newcommit789" {
 		t.Errorf("expected updated commit_sha=newcommit789, got %s", meta.CommitSHA)
 	}
+	if meta.RepoRoot != "/home/user/repos/other" {
+		t.Errorf("expected updated repo_root=/home/user/repos/other, got %s", meta.RepoRoot)
+	}
 }
 
 func TestGetExtractionMeta_NoTable(t *testing.T) {
@@ -725,7 +733,7 @@ func TestGetExtractionMeta_NoTable(t *testing.T) {
 	if err != nil {
 		t.Fatalf("get extraction meta (no table): %v", err)
 	}
-	if meta.CommitSHA != "" || meta.ExtractedAt != "" {
+	if meta.CommitSHA != "" || meta.ExtractedAt != "" || meta.RepoRoot != "" {
 		t.Errorf("expected empty meta when table missing, got %+v", meta)
 	}
 }

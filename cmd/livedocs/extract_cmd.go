@@ -339,6 +339,14 @@ func runExtract(ctx context.Context, cmd *cobra.Command, repoDir, repoName, outp
 	}
 	fmt.Fprintf(out, "- **Duration**: %s\n", duration.Round(time.Millisecond))
 
+	// Store extraction metadata with repo root path.
+	if err := claimsDB.SetExtractionMeta(db.ExtractionMeta{
+		ExtractedAt: db.Now(),
+		RepoRoot:    repoDir,
+	}); err != nil {
+		return fmt.Errorf("set extraction meta: %w", err)
+	}
+
 	// Close DB before rename so all data is flushed.
 	claimsDB.Close()
 
