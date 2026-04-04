@@ -51,6 +51,35 @@ func TestDiscoverRepoRoots(t *testing.T) {
 			wantLen: 0,
 		},
 		{
+			name: "GetExtractionMeta failure is skipped",
+			setup: func(t *testing.T, dir string) {
+				// Create a valid SQLite DB with a malformed extraction_meta table.
+				// The table exists (so the table-existence check passes) but has
+				// wrong columns, causing the SELECT to fail with "no such column".
+				path := filepath.Join(dir, "badmeta.claims.db")
+				cdb, err := db.OpenClaimsDB(path)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := cdb.CreateSchema(); err != nil {
+					t.Fatal(err)
+				}
+				// Create extraction_meta with incompatible schema.
+				_, err = cdb.DB().Exec("CREATE TABLE extraction_meta (id INTEGER PRIMARY KEY, bogus TEXT)")
+				if err != nil {
+					t.Fatal(err)
+				}
+				// Insert a row so the query doesn't hit sql.ErrNoRows.
+				_, err = cdb.DB().Exec("INSERT INTO extraction_meta (id, bogus) VALUES (1, 'bad')")
+				if err != nil {
+					t.Fatal(err)
+				}
+				cdb.Close()
+			},
+			// GetExtractionMeta returns an error because the table has wrong columns.
+			wantLen: 0,
+		},
+		{
 			name: "empty RepoRoot is skipped",
 			setup: func(t *testing.T, dir string) {
 				path := filepath.Join(dir, "emptyroot.claims.db")
