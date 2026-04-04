@@ -26,6 +26,8 @@ const (
 	staleCacheTTL = 10 * time.Second
 	// staleCacheMaxEntries is the maximum number of cached staleness results.
 	staleCacheMaxEntries = 10000
+	// reExtractDebounce is the minimum interval between re-extractions of the same file.
+	reExtractDebounce = 5 * time.Second
 )
 
 // cacheEntry holds a cached staleness check result.
@@ -109,10 +111,12 @@ func (c *stalenessCache) put(key string, staleFiles []StaleFile) {
 // content hashes and can trigger single-file re-extraction. It is safe for
 // concurrent use.
 type StalenessChecker struct {
-	repoRoots map[string]string   // repo name -> absolute path to repo root
-	registry  *extractor.Registry // extractor registry for re-extraction
-	mu        sync.RWMutex        // protects repoRoots
-	cache     *stalenessCache     // bounded LRU cache for staleness results
+	repoRoots     map[string]string    // repo name -> absolute path to repo root
+	registry      *extractor.Registry  // extractor registry for re-extraction
+	mu            sync.RWMutex         // protects repoRoots and lastExtracted
+	cache         *stalenessCache      // bounded LRU cache for staleness results
+	lastExtracted map[string]time.Time // relPath -> last successful re-extraction time
+	clockFn       func() time.Time     // injectable clock for testability
 }
 
 // NewStalenessChecker creates a StalenessChecker with the given repo root mappings
@@ -124,9 +128,11 @@ func NewStalenessChecker(repoRoots map[string]string, registry *extractor.Regist
 	}
 	nowFn := time.Now
 	return &StalenessChecker{
-		repoRoots: roots,
-		registry:  registry,
-		cache:     newStalenessCache(nowFn),
+		repoRoots:     roots,
+		registry:      registry,
+		cache:         newStalenessCache(nowFn),
+		lastExtracted: make(map[string]time.Time),
+		clockFn:       nowFn,
 	}
 }
 
@@ -242,8 +248,14 @@ func (sc *StalenessChecker) RefreshStaleFiles(ctx context.Context, cdb *db.Claim
 
 		sc.mu.RLock()
 		repoRoot, ok := sc.repoRoots[sf.RepoName]
+		lastExt := sc.lastExtracted[sf.RelativePath]
 		sc.mu.RUnlock()
 		if !ok {
+			continue
+		}
+
+		// Debounce: skip files re-extracted within the last 5 seconds.
+		if !lastExt.IsZero() && sc.clockFn().Sub(lastExt) < reExtractDebounce {
 			continue
 		}
 
@@ -257,6 +269,11 @@ func (sc *StalenessChecker) RefreshStaleFiles(ctx context.Context, cdb *db.Claim
 			errs = append(errs, fmt.Errorf("re-extract %s: %w", sf.RelativePath, err))
 			continue
 		}
+
+		// Record successful re-extraction time for debounce.
+		sc.mu.Lock()
+		sc.lastExtracted[sf.RelativePath] = sc.clockFn()
+		sc.mu.Unlock()
 		refreshed++
 	}
 

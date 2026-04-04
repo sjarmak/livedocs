@@ -369,6 +369,89 @@ func TestRefreshStaleFiles_ContextTimeout(t *testing.T) {
 	}
 }
 
+func TestRefreshStaleFiles_Debounce(t *testing.T) {
+	t.Parallel()
+
+	repoDir := t.TempDir()
+	relPath := "pkg/debounce.go"
+
+	// Create the file on disk.
+	absPath := filepath.Join(repoDir, relPath)
+	if err := os.MkdirAll(filepath.Dir(absPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(absPath, []byte("package pkg\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	extractCount := 0
+	reg := makeRegistryWithMock(func(_ context.Context, _, _ string) ([]extractor.Claim, error) {
+		extractCount++
+		return []extractor.Claim{
+			{
+				SubjectName: "Foo",
+				Kind:        "function",
+				Visibility:  "public",
+				Predicate:   "defines",
+				ObjectText:  "a function",
+				SourceFile:  relPath,
+				SourceLine:  1,
+				Confidence:  1.0,
+				ClaimTier:   "structural",
+				Extractor:   "mock-extractor",
+			},
+		}, nil
+	})
+
+	cdb, _ := setupStalenessTestDB(t, "myrepo", "example.com/pkg", relPath, "old content\n")
+
+	clock := newMockClock()
+	sc := NewStalenessChecker(map[string]string{"myrepo": repoDir}, reg)
+	sc.clockFn = clock.Now
+
+	staleFiles := []StaleFile{
+		{RelativePath: relPath, RepoName: "myrepo"},
+	}
+
+	// First call — file should be re-extracted.
+	refreshed, errs := sc.RefreshStaleFiles(context.Background(), cdb, staleFiles)
+	if refreshed != 1 {
+		t.Fatalf("first call: expected 1 refreshed, got %d (errs: %v)", refreshed, errs)
+	}
+	if extractCount != 1 {
+		t.Fatalf("first call: expected extractCount=1, got %d", extractCount)
+	}
+
+	// Modify the file again so it would appear stale.
+	if err := os.WriteFile(absPath, []byte("package pkg\n\nfunc New() {}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Advance clock by 3s (within 5s debounce window).
+	clock.Advance(3 * time.Second)
+
+	// Second call — should be skipped due to debounce.
+	refreshed2, _ := sc.RefreshStaleFiles(context.Background(), cdb, staleFiles)
+	if refreshed2 != 0 {
+		t.Errorf("second call (within debounce): expected 0 refreshed, got %d", refreshed2)
+	}
+	if extractCount != 1 {
+		t.Errorf("second call: expected extractCount still 1, got %d", extractCount)
+	}
+
+	// Advance clock past the debounce window (total 3+3 = 6s > 5s).
+	clock.Advance(3 * time.Second)
+
+	// Third call — debounce expired, should re-extract.
+	refreshed3, errs3 := sc.RefreshStaleFiles(context.Background(), cdb, staleFiles)
+	if refreshed3 != 1 {
+		t.Errorf("third call (after debounce): expected 1 refreshed, got %d (errs: %v)", refreshed3, errs3)
+	}
+	if extractCount != 2 {
+		t.Errorf("third call: expected extractCount=2, got %d", extractCount)
+	}
+}
+
 func TestRefreshStaleFiles_PanicRecovery(t *testing.T) {
 	t.Parallel()
 
