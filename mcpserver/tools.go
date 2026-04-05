@@ -267,6 +267,10 @@ func DescribePackageHandler(pool *DBPool, sc *StalenessChecker) ToolHandler {
 			md += "\n" + semanticMD
 		}
 
+		// Enrichment status line.
+		enrichStatus := enrichmentStatus(cdb, importPath, time.Now())
+		md += "\n> **Enrichment:** " + enrichStatus + "\n"
+
 		// Staleness check and freshness metadata.
 		ts, _ := cdb.GetLatestLastIndexed()
 		meta, _ := cdb.GetExtractionMeta()
@@ -383,4 +387,98 @@ func isStale(ts string) bool {
 		return false
 	}
 	return time.Since(t) > stalenessThreshold
+}
+
+// enrichmentStatus computes the enrichment freshness line for a package.
+// It returns one of:
+//   - "Enriched at <date> (<age>)" when semantic claims exist and are fresh
+//   - "Not yet enriched" when no semantic claims exist
+//   - "Enrichment stale: source changed since <date>" when the source file
+//     content hash has changed since the enrichment was produced
+func enrichmentStatus(cdb *db.ClaimsDB, importPath string, now time.Time) string {
+	symbols, err := cdb.ListSymbolsByImportPath(importPath)
+	if err != nil || len(symbols) == 0 {
+		return "Not yet enriched"
+	}
+
+	// Collect semantic claims and find the latest last_verified timestamp.
+	var latestEnriched time.Time
+	var latestEnrichedStr string
+	var hasSemanticClaims bool
+
+	for _, sym := range symbols {
+		claims, err := cdb.GetClaimsBySubject(sym.ID)
+		if err != nil {
+			continue
+		}
+		for _, cl := range claims {
+			if cl.ClaimTier != "semantic" {
+				continue
+			}
+			hasSemanticClaims = true
+			t, err := time.Parse(time.RFC3339, cl.LastVerified)
+			if err != nil {
+				continue
+			}
+			if t.After(latestEnriched) {
+				latestEnriched = t
+				latestEnrichedStr = cl.LastVerified
+			}
+		}
+	}
+
+	if !hasSemanticClaims {
+		return "Not yet enriched"
+	}
+
+	// Check for staleness: compare source_files.last_indexed with the enrichment
+	// timestamp. If any source file was re-indexed after the enrichment, the
+	// enrichment is stale (content hash diverged).
+	sourceFiles, err := cdb.GetSourceFilesByImportPath(importPath)
+	if err == nil {
+		for _, sf := range sourceFiles {
+			sfTime, err := time.Parse(time.RFC3339, sf.LastIndexed)
+			if err != nil {
+				continue
+			}
+			if sfTime.After(latestEnriched) {
+				dateStr := latestEnriched.Format("2006-01-02")
+				return fmt.Sprintf("Enrichment stale: source changed since %s", dateStr)
+			}
+		}
+	}
+
+	dateStr := latestEnriched.Format("2006-01-02")
+	age := formatAge(now.Sub(latestEnriched))
+	_ = latestEnrichedStr // used for time parsing above
+	return fmt.Sprintf("Enriched at %s (%s)", dateStr, age)
+}
+
+// formatAge renders a duration as a human-readable age string.
+func formatAge(d time.Duration) string {
+	if d < 0 {
+		d = 0
+	}
+	days := int(d.Hours() / 24)
+	if days == 0 {
+		hours := int(d.Hours())
+		if hours == 0 {
+			return "just now"
+		}
+		if hours == 1 {
+			return "1 hour ago"
+		}
+		return fmt.Sprintf("%d hours ago", hours)
+	}
+	if days == 1 {
+		return "1 day ago"
+	}
+	if days < 30 {
+		return fmt.Sprintf("%d days ago", days)
+	}
+	months := days / 30
+	if months == 1 {
+		return "1 month ago"
+	}
+	return fmt.Sprintf("%d months ago", months)
 }
