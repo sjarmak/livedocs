@@ -59,28 +59,43 @@ func (e *UniversalExtractor) Extract(ctx context.Context, path string, language 
 		return nil, err
 	}
 
-	grammar, ok := LookupGrammar(cfg.GrammarName)
-	if !ok {
-		return nil, fmt.Errorf("treesitter: no grammar for %q", cfg.GrammarName)
-	}
-
 	src, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("treesitter: reading %s: %w", path, err)
 	}
 
+	return e.extractFromBytes(ctx, src, path, cfg)
+}
+
+// ExtractBytes parses the provided source bytes as if they came from relPath.
+// If lang is empty, it is inferred from the relPath extension.
+func (e *UniversalExtractor) ExtractBytes(ctx context.Context, src []byte, relPath string, lang string) ([]extractor.Claim, error) {
+	cfg, err := e.resolveConfig(relPath, lang)
+	if err != nil {
+		return nil, err
+	}
+
+	return e.extractFromBytes(ctx, src, relPath, cfg)
+}
+
+// extractFromBytes is the shared implementation for Extract and ExtractBytes.
+func (e *UniversalExtractor) extractFromBytes(ctx context.Context, src []byte, relPath string, cfg lang.Config) ([]extractor.Claim, error) {
+	grammar, ok := LookupGrammar(cfg.GrammarName)
+	if !ok {
+		return nil, fmt.Errorf("treesitter: no grammar for %q", cfg.GrammarName)
+	}
+
 	root, err := sitter.ParseCtx(ctx, src, grammar)
 	if err != nil {
-		return nil, fmt.Errorf("treesitter: parsing %s: %w", path, err)
+		return nil, fmt.Errorf("treesitter: parsing %s: %w", relPath, err)
 	}
 
 	now := time.Now()
-	relPath := path // caller may normalize to repo-relative later
 
 	var claims []extractor.Claim
 
 	// Check is_test via file path patterns.
-	isTest := matchesAnyPattern(path, cfg.TestPatterns)
+	isTest := matchesAnyPattern(relPath, cfg.TestPatterns)
 
 	// Check is_generated via first comment.
 	isGenerated := checkGenerated(root, src, cfg.GeneratedPatterns)
@@ -115,7 +130,7 @@ func (e *UniversalExtractor) Extract(ctx context.Context, path string, language 
 		claims = append(claims, extractor.Claim{
 			SubjectRepo:       "", // caller fills
 			SubjectImportPath: "", // caller fills
-			SubjectName:       filepath.Base(path),
+			SubjectName:       filepath.Base(relPath),
 			Language:          cfg.Language,
 			Kind:              extractor.KindModule,
 			Visibility:        extractor.VisibilityPublic,
@@ -134,7 +149,7 @@ func (e *UniversalExtractor) Extract(ctx context.Context, path string, language 
 		claims = append(claims, extractor.Claim{
 			SubjectRepo:       "", // caller fills
 			SubjectImportPath: "", // caller fills
-			SubjectName:       filepath.Base(path),
+			SubjectName:       filepath.Base(relPath),
 			Language:          cfg.Language,
 			Kind:              extractor.KindModule,
 			Visibility:        extractor.VisibilityPublic,

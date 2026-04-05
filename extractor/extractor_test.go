@@ -17,6 +17,9 @@ type mockExtractor struct {
 func (m *mockExtractor) Extract(_ context.Context, _ string, _ string) ([]Claim, error) {
 	return m.claims, m.err
 }
+func (m *mockExtractor) ExtractBytes(_ context.Context, _ []byte, _ string, _ string) ([]Claim, error) {
+	return m.claims, m.err
+}
 func (m *mockExtractor) Name() string    { return m.name }
 func (m *mockExtractor) Version() string { return m.version }
 

@@ -50,6 +50,12 @@ func (e *GoDeepExtractor) Name() string { return extractorName }
 // Version returns the extractor version string.
 func (e *GoDeepExtractor) Version() string { return extractorVersion }
 
+// ExtractBytes returns ErrRequiresLocalFS because the Go deep extractor
+// requires local filesystem access (go/packages.Load).
+func (e *GoDeepExtractor) ExtractBytes(_ context.Context, _ []byte, _ string, _ string) ([]extractor.Claim, error) {
+	return nil, extractor.ErrRequiresLocalFS
+}
+
 // Extract loads Go packages at the given directory path and returns claims for
 // all symbols found. The lang parameter must be "go".
 func (e *GoDeepExtractor) Extract(ctx context.Context, path string, lang string) ([]extractor.Claim, error) {

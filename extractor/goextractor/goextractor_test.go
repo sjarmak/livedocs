@@ -484,6 +484,14 @@ func TestExtractorInterface(t *testing.T) {
 	}
 }
 
+func TestExtractBytes_ReturnsErrRequiresLocalFS(t *testing.T) {
+	ext := &GoDeepExtractor{Repo: "test/repo"}
+	_, err := ext.ExtractBytes(context.Background(), []byte("package main"), "main.go", "go")
+	if err != extractor.ErrRequiresLocalFS {
+		t.Errorf("ExtractBytes() error = %v, want ErrRequiresLocalFS", err)
+	}
+}
+
 func TestExtract_RealKubernetesPackage(t *testing.T) {
 	// Test against a real k8s package if available.
 	schemaDir := filepath.Join(os.Getenv("HOME"), "kubernetes", "kubernetes",

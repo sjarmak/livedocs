@@ -162,3 +162,42 @@ func (r *Registry) ExtractFile(ctx context.Context, path string) ([]Claim, error
 
 	return claims, nil
 }
+
+// ExtractFileBytes determines the language from the relPath extension,
+// selects the best available extractor, and calls ExtractBytes with the
+// provided source bytes. Returns LanguageNotRegisteredError if no extractor
+// is registered for the file's extension.
+func (r *Registry) ExtractFileBytes(ctx context.Context, src []byte, relPath string) ([]Claim, error) {
+	if IsGenerated(relPath) {
+		return nil, nil
+	}
+
+	ext := strings.ToLower(filepath.Ext(relPath))
+	cfg := r.LookupByExtension(ext)
+	if cfg == nil {
+		return nil, &LanguageNotRegisteredError{Key: ext}
+	}
+
+	// Prefer deep extractor when available.
+	ex := cfg.DeepExtractor
+	if ex == nil {
+		ex = cfg.FastExtractor
+	}
+	if ex == nil {
+		return nil, &LanguageNotRegisteredError{Key: cfg.Language}
+	}
+
+	claims, err := ex.ExtractBytes(ctx, src, relPath, cfg.Language)
+	if err != nil {
+		return nil, err
+	}
+
+	// Enforce tree-sitter predicate boundary if this is a fast extractor.
+	if _, ok := ex.(TreeSitterExtractor); ok {
+		if err := ValidateTreeSitterClaims(claims); err != nil {
+			return nil, err
+		}
+	}
+
+	return claims, nil
+}

@@ -322,6 +322,10 @@ func (m *mockExtractor) Extract(ctx context.Context, path, lang string) ([]extra
 	return m.extractFn(ctx, path, lang)
 }
 
+func (m *mockExtractor) ExtractBytes(_ context.Context, _ []byte, _ string, _ string) ([]extractor.Claim, error) {
+	return nil, extractor.ErrRequiresLocalFS
+}
+
 func (m *mockExtractor) Name() string    { return "mock-extractor" }
 func (m *mockExtractor) Version() string { return "1.0" }
 

@@ -2,6 +2,7 @@ package treesitter_test
 
 import (
 	"context"
+	"os"
 	"path/filepath"
 	"testing"
 
@@ -440,6 +441,74 @@ func TestAllClaimsHaveRequiredFields(t *testing.T) {
 				}
 				if c.Confidence < 0 || c.Confidence > 1 {
 					t.Errorf("claim[%d] Confidence out of range: %f", i, c.Confidence)
+				}
+			}
+		})
+	}
+}
+
+// --- ExtractBytes ---
+
+func TestExtractBytes_MatchesExtract(t *testing.T) {
+	t.Parallel()
+	e := newExtractor()
+	ctx := context.Background()
+
+	files := []struct {
+		path string
+		lang string
+	}{
+		{testdataPath("sample.go"), "go"},
+		{testdataPath("sample.py"), "python"},
+	}
+
+	for _, f := range files {
+		t.Run(f.lang, func(t *testing.T) {
+			t.Parallel()
+
+			fileClaims, err := e.Extract(ctx, f.path, f.lang)
+			if err != nil {
+				t.Fatalf("Extract() error: %v", err)
+			}
+
+			src, err := os.ReadFile(f.path)
+			if err != nil {
+				t.Fatalf("ReadFile() error: %v", err)
+			}
+
+			bytesClaims, err := e.ExtractBytes(ctx, src, f.path, f.lang)
+			if err != nil {
+				t.Fatalf("ExtractBytes() error: %v", err)
+			}
+
+			if len(fileClaims) != len(bytesClaims) {
+				t.Fatalf("claim count mismatch: Extract=%d, ExtractBytes=%d", len(fileClaims), len(bytesClaims))
+			}
+
+			for i := range fileClaims {
+				fc := fileClaims[i]
+				bc := bytesClaims[i]
+				// Compare all fields except LastVerified (timestamp differs).
+				if fc.SubjectName != bc.SubjectName {
+					t.Errorf("claim[%d] SubjectName: Extract=%q, ExtractBytes=%q", i, fc.SubjectName, bc.SubjectName)
+				}
+				if fc.Predicate != bc.Predicate {
+					t.Errorf("claim[%d] Predicate: Extract=%q, ExtractBytes=%q", i, fc.Predicate, bc.Predicate)
+				}
+				if fc.Language != bc.Language {
+					t.Errorf("claim[%d] Language: Extract=%q, ExtractBytes=%q", i, fc.Language, bc.Language)
+				}
+				if fc.Kind != bc.Kind {
+					t.Errorf("claim[%d] Kind: Extract=%q, ExtractBytes=%q", i, fc.Kind, bc.Kind)
+				}
+				if fc.SourceFile != bc.SourceFile {
+					t.Errorf("claim[%d] SourceFile: Extract=%q, ExtractBytes=%q", i, fc.SourceFile, bc.SourceFile)
+				}
+				if fc.SourceLine != bc.SourceLine {
+					t.Errorf("claim[%d] SourceLine: Extract=%d, ExtractBytes=%d", i, fc.SourceLine, bc.SourceLine)
+				}
+				if fc.ObjectName != bc.ObjectName {
+					t.Errorf("claim[%d] ObjectName: Extract=%q, ExtractBytes=%q", i, fc.ObjectName, bc.ObjectName)
 				}
 			}
 		})

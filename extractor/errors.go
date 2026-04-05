@@ -1,6 +1,13 @@
 package extractor
 
-import "fmt"
+import (
+	"errors"
+	"fmt"
+)
+
+// ErrRequiresLocalFS is returned by extractors that cannot operate on raw
+// bytes and require local filesystem access (e.g. go/packages).
+var ErrRequiresLocalFS = errors.New("extractor requires local filesystem access")
 
 // PredicateBoundaryError is returned when a tree-sitter extractor emits a
 // predicate that is restricted to deep extractors.

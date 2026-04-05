@@ -13,6 +13,11 @@ type Extractor interface {
 	// zero or more claims. Implementations should respect context cancellation.
 	Extract(ctx context.Context, path string, lang string) ([]Claim, error)
 
+	// ExtractBytes analyses the provided source bytes as if they came from
+	// relPath in the given language. Extractors that require local filesystem
+	// access (e.g. go/packages) return ErrRequiresLocalFS.
+	ExtractBytes(ctx context.Context, src []byte, relPath string, lang string) ([]Claim, error)
+
 	// Name returns a stable identifier for this extractor, e.g. "go-deep"
 	// or "tree-sitter-go".
 	Name() string
