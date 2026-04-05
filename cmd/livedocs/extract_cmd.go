@@ -440,8 +440,9 @@ func runExtract(ctx context.Context, cmd *cobra.Command, repoDir, repoName, outp
 }
 
 // sgToolLister satisfies pipeline.ToolLister for the Sourcegraph MCP server.
-// The standard Sourcegraph MCP server always provides these tools; the
-// SourcegraphFileSource constructor validates their presence.
+// This returns a hardcoded list because the MCP subprocess does not support
+// tool enumeration via the current client. Actual tool availability is
+// validated on first use — if a tool is missing, CallTool returns an error.
 type sgToolLister struct{}
 
 func (sgToolLister) ListTools(_ context.Context) ([]string, error) {
@@ -608,6 +609,19 @@ func runExtractSourcegraph(cmd *cobra.Command) error {
 		FileSource: fileSource,
 	})
 
+	// For full extraction, wrap the FileSource so DiffBetween returns the
+	// pre-fetched file list instead of making a second compare_revisions call.
+	if !isIncremental {
+		p = pipeline.New(pipeline.Config{
+			Repo:       extractRepo,
+			RepoDir:    "",
+			Cache:      cacheStore,
+			ClaimsDB:   claimsDB,
+			Registry:   registry,
+			FileSource: &prefetchedDiffSource{inner: fileSource, changes: changes},
+		})
+	}
+
 	var result pipeline.Result
 	if isIncremental {
 		fromRev := extractFromRev
@@ -619,9 +633,7 @@ func runExtractSourcegraph(cmd *cobra.Command) error {
 		result, err = p.Run(ctx, fromRev, toRev)
 	} else {
 		fmt.Fprintf(out, "\nRunning full extraction (%d files)...\n", len(changes))
-		// For full extraction, we already have changes; use the pipeline with
-		// empty fromCommit so DiffBetween returns all files.
-		result, err = p.Run(ctx, "", "HEAD")
+		result, err = p.Run(ctx, "", "")
 	}
 	if err != nil {
 		return fmt.Errorf("pipeline run: %w", err)
@@ -720,6 +732,26 @@ func storeClaims(claimsDB *db.ClaimsDB, repoName string, claims []extractor.Clai
 		stored++
 	}
 	return stored, nil
+}
+
+// prefetchedDiffSource wraps a FileSource and overrides DiffBetween to return
+// a pre-fetched list of file changes. This avoids a redundant compare_revisions
+// call when the file list has already been fetched via ListFiles for cost estimation.
+type prefetchedDiffSource struct {
+	inner   pipeline.FileSource
+	changes []gitdiff.FileChange
+}
+
+func (p *prefetchedDiffSource) ReadFile(ctx context.Context, repo, revision, path string) ([]byte, error) {
+	return p.inner.ReadFile(ctx, repo, revision, path)
+}
+
+func (p *prefetchedDiffSource) ListFiles(ctx context.Context, repo, revision, pattern string) ([]string, error) {
+	return p.inner.ListFiles(ctx, repo, revision, pattern)
+}
+
+func (p *prefetchedDiffSource) DiffBetween(_ context.Context, _, _, _ string) ([]gitdiff.FileChange, error) {
+	return p.changes, nil
 }
 
 // countSymbols returns the total number of symbols in the database.
