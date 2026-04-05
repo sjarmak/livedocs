@@ -26,15 +26,21 @@ type Config struct {
 	Cache    cache.Store         // content-hash cache
 	ClaimsDB *db.ClaimsDB        // claims database
 	Registry *extractor.Registry // extractor registry
+
+	// FileSource, when non-nil, replaces local filesystem access and git diff
+	// with the provided implementation. This enables extraction from remote
+	// sources (e.g. GitHub API) without cloning.
+	FileSource FileSource
 }
 
 // Pipeline orchestrates incremental extraction triggered by git diffs.
 type Pipeline struct {
-	repo     string
-	repoDir  string
-	cache    cache.Store
-	claimsDB *db.ClaimsDB
-	registry *extractor.Registry
+	repo       string
+	repoDir    string
+	cache      cache.Store
+	claimsDB   *db.ClaimsDB
+	registry   *extractor.Registry
+	fileSource FileSource
 }
 
 // Result summarises a single pipeline run.
@@ -59,11 +65,12 @@ type FileError struct {
 // New creates a Pipeline from the given Config.
 func New(cfg Config) *Pipeline {
 	return &Pipeline{
-		repo:     cfg.Repo,
-		repoDir:  cfg.RepoDir,
-		cache:    cfg.Cache,
-		claimsDB: cfg.ClaimsDB,
-		registry: cfg.Registry,
+		repo:       cfg.Repo,
+		repoDir:    cfg.RepoDir,
+		cache:      cfg.Cache,
+		claimsDB:   cfg.ClaimsDB,
+		registry:   cfg.Registry,
+		fileSource: cfg.FileSource,
 	}
 }
 
@@ -74,7 +81,15 @@ func (p *Pipeline) Run(ctx context.Context, fromCommit, toCommit string) (Result
 	var result Result
 
 	// 1. Get the diff.
-	changes, err := gitdiff.DiffBetween(p.repoDir, fromCommit, toCommit)
+	var (
+		changes []gitdiff.FileChange
+		err     error
+	)
+	if p.fileSource != nil {
+		changes, err = p.fileSource.DiffBetween(ctx, p.repo, fromCommit, toCommit)
+	} else {
+		changes, err = gitdiff.DiffBetween(p.repoDir, fromCommit, toCommit)
+	}
 	if err != nil {
 		return result, fmt.Errorf("pipeline: diff: %w", err)
 	}
@@ -113,6 +128,11 @@ func (p *Pipeline) Run(ctx context.Context, fromCommit, toCommit string) (Result
 				result.FilesSkipped++
 				continue
 			}
+			// Extractor requires local filesystem (e.g. go/packages) — skip with warning.
+			if errors.Is(err, extractor.ErrRequiresLocalFS) {
+				result.FilesSkipped++
+				continue
+			}
 			result.Errors = append(result.Errors, FileError{Path: relPath, Err: err})
 			continue
 		}
@@ -133,10 +153,15 @@ func (p *Pipeline) Run(ctx context.Context, fromCommit, toCommit string) (Result
 // processFile handles a single changed file: hash, cache check, extract, store.
 // Returns (true, claimCount, nil) if extraction happened, (false, 0, nil) on cache hit.
 func (p *Pipeline) processFile(ctx context.Context, relPath string) (bool, int, error) {
-	absPath := filepath.Join(p.repoDir, relPath)
-
 	// Read file and compute content hash.
-	content, err := os.ReadFile(absPath)
+	var content []byte
+	var err error
+	if p.fileSource != nil {
+		content, err = p.fileSource.ReadFile(ctx, p.repo, "", relPath)
+	} else {
+		absPath := filepath.Join(p.repoDir, relPath)
+		content, err = os.ReadFile(absPath)
+	}
 	if err != nil {
 		return false, 0, fmt.Errorf("read %s: %w", relPath, err)
 	}
@@ -170,7 +195,13 @@ func (p *Pipeline) processFile(ctx context.Context, relPath string) (bool, int, 
 	}
 
 	// Extract claims.
-	claims, err := p.registry.ExtractFile(ctx, absPath)
+	var claims []extractor.Claim
+	if p.fileSource != nil {
+		claims, err = p.registry.ExtractFileBytes(ctx, content, relPath)
+	} else {
+		absPath := filepath.Join(p.repoDir, relPath)
+		claims, err = p.registry.ExtractFile(ctx, absPath)
+	}
 	if err != nil {
 		return false, 0, fmt.Errorf("extract %s: %w", relPath, err)
 	}

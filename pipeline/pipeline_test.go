@@ -13,6 +13,7 @@ import (
 	"github.com/live-docs/live_docs/cache"
 	"github.com/live-docs/live_docs/db"
 	"github.com/live-docs/live_docs/extractor"
+	"github.com/live-docs/live_docs/gitdiff"
 )
 
 // stubExtractor is a test extractor that returns predictable claims.
