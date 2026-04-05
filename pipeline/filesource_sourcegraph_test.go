@@ -4,7 +4,10 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/live-docs/live_docs/gitdiff"
 )
@@ -383,4 +386,242 @@ func TestReadFile_NoRevision(t *testing.T) {
 	if _, ok := call.Args["revision"]; ok {
 		t.Error("revision should not be set when empty")
 	}
+}
+
+// slowMCPCaller adds artificial latency to each CallTool invocation and
+// tracks the maximum number of concurrent in-flight calls.
+type slowMCPCaller struct {
+	latency     time.Duration
+	response    string
+	maxInFlight atomic.Int32
+	curInFlight atomic.Int32
+}
+
+func (m *slowMCPCaller) CallTool(_ context.Context, _ string, _ map[string]any) (string, error) {
+	cur := m.curInFlight.Add(1)
+	defer m.curInFlight.Add(-1)
+
+	// Track peak concurrency.
+	for {
+		old := m.maxInFlight.Load()
+		if cur <= old || m.maxInFlight.CompareAndSwap(old, cur) {
+			break
+		}
+	}
+
+	time.Sleep(m.latency)
+	return m.response, nil
+}
+
+func TestWithConcurrency_DefaultIs10(t *testing.T) {
+	caller := &mockMCPCaller{responses: map[string]string{}}
+	lister := &mockToolLister{tools: []string{"read_file", "list_files"}}
+
+	src, err := NewSourcegraphFileSource(caller, lister)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if src.Concurrency() != 10 {
+		t.Errorf("default concurrency = %d, want 10", src.Concurrency())
+	}
+}
+
+func TestWithConcurrency_Custom(t *testing.T) {
+	caller := &mockMCPCaller{responses: map[string]string{}}
+	lister := &mockToolLister{tools: []string{"read_file", "list_files"}}
+
+	src, err := NewSourcegraphFileSource(caller, lister, WithConcurrency(5))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if src.Concurrency() != 5 {
+		t.Errorf("concurrency = %d, want 5", src.Concurrency())
+	}
+}
+
+func TestWithConcurrency_MinimumIs1(t *testing.T) {
+	caller := &mockMCPCaller{responses: map[string]string{}}
+	lister := &mockToolLister{tools: []string{"read_file", "list_files"}}
+
+	src, err := NewSourcegraphFileSource(caller, lister, WithConcurrency(0))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if src.Concurrency() != 1 {
+		t.Errorf("concurrency = %d, want 1 (minimum)", src.Concurrency())
+	}
+}
+
+func TestBatchReadFiles_ConcurrentSpeedup(t *testing.T) {
+	const (
+		fileCount   = 20
+		concurrency = 10
+		latency     = 50 * time.Millisecond
+	)
+
+	slow := &slowMCPCaller{latency: latency, response: "content"}
+	lister := &mockToolLister{tools: []string{"read_file", "list_files"}}
+
+	src, err := NewSourcegraphFileSource(slow, lister, WithConcurrency(concurrency))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	paths := make([]string, fileCount)
+	for i := range paths {
+		paths[i] = fmt.Sprintf("file%d.go", i)
+	}
+
+	start := time.Now()
+	results := src.BatchReadFiles(context.Background(), "org/repo", "", paths)
+	elapsed := time.Since(start)
+
+	// Verify all results returned.
+	if len(results) != fileCount {
+		t.Fatalf("got %d results, want %d", len(results), fileCount)
+	}
+	for i, r := range results {
+		if r.Err != nil {
+			t.Errorf("file %d: unexpected error: %v", i, r.Err)
+		}
+		if string(r.Content) != "content" {
+			t.Errorf("file %d: content = %q, want %q", i, string(r.Content), "content")
+		}
+	}
+
+	// Serial time would be fileCount * latency = 1000ms.
+	// Concurrent time should be ~fileCount/concurrency * latency = ~100ms.
+	// Allow generous margin: should complete in less than half of serial time.
+	serialTime := time.Duration(fileCount) * latency
+	maxExpected := serialTime / 2
+	if elapsed > maxExpected {
+		t.Errorf("batch took %v, expected < %v (serial would be %v)", elapsed, maxExpected, serialTime)
+	}
+}
+
+func TestBatchReadFiles_ConcurrencyLimitRespected(t *testing.T) {
+	const (
+		fileCount   = 30
+		concurrency = 5
+		latency     = 30 * time.Millisecond
+	)
+
+	slow := &slowMCPCaller{latency: latency, response: "data"}
+	lister := &mockToolLister{tools: []string{"read_file", "list_files"}}
+
+	src, err := NewSourcegraphFileSource(slow, lister, WithConcurrency(concurrency))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	paths := make([]string, fileCount)
+	for i := range paths {
+		paths[i] = fmt.Sprintf("file%d.go", i)
+	}
+
+	src.BatchReadFiles(context.Background(), "org/repo", "", paths)
+
+	// Verify the maximum number of concurrent calls never exceeded the limit.
+	maxSeen := slow.maxInFlight.Load()
+	if maxSeen > int32(concurrency) {
+		t.Errorf("max concurrent calls = %d, want <= %d", maxSeen, concurrency)
+	}
+	if maxSeen < 2 {
+		t.Errorf("max concurrent calls = %d, expected at least 2 (concurrency not working)", maxSeen)
+	}
+}
+
+func TestReadFile_SemaphoreLimitsConcurrency(t *testing.T) {
+	// Verify that even direct ReadFile calls respect the semaphore.
+	const (
+		concurrency = 3
+		callers     = 10
+		latency     = 30 * time.Millisecond
+	)
+
+	slow := &slowMCPCaller{latency: latency, response: "data"}
+	lister := &mockToolLister{tools: []string{"read_file", "list_files"}}
+
+	src, err := NewSourcegraphFileSource(slow, lister, WithConcurrency(concurrency))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var wg sync.WaitGroup
+	for i := 0; i < callers; i++ {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			_, _ = src.ReadFile(context.Background(), "org/repo", "", fmt.Sprintf("file%d.go", idx))
+		}(i)
+	}
+	wg.Wait()
+
+	maxSeen := slow.maxInFlight.Load()
+	if maxSeen > int32(concurrency) {
+		t.Errorf("max concurrent ReadFile calls = %d, want <= %d", maxSeen, concurrency)
+	}
+}
+
+func TestBatchReadFiles_ErrorHandling(t *testing.T) {
+	// Mock that returns errors for specific paths.
+	caller := &mockMCPCaller{
+		responses: map[string]string{"read_file": "ok"},
+		errors:    map[string]error{"read_file": fmt.Errorf("not found")},
+	}
+	lister := &mockToolLister{tools: []string{"read_file", "list_files"}}
+
+	src, err := NewSourcegraphFileSource(caller, lister, WithConcurrency(5))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	paths := []string{"a.go", "b.go", "c.go"}
+	results := src.BatchReadFiles(context.Background(), "org/repo", "", paths)
+
+	if len(results) != 3 {
+		t.Fatalf("got %d results, want 3", len(results))
+	}
+	// All should have errors since the mock always returns errors for read_file.
+	for _, r := range results {
+		if r.Err == nil {
+			t.Errorf("expected error for %s", r.Path)
+		}
+	}
+}
+
+func TestReadFile_ContextCancellation(t *testing.T) {
+	slow := &slowMCPCaller{latency: time.Second, response: "data"}
+	lister := &mockToolLister{tools: []string{"read_file", "list_files"}}
+
+	// Concurrency of 1, so second call blocks on semaphore.
+	src, err := NewSourcegraphFileSource(slow, lister, WithConcurrency(1))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Start a call that holds the semaphore.
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		_, _ = src.ReadFile(context.Background(), "org/repo", "", "holder.go")
+	}()
+
+	// Give the first goroutine time to acquire the semaphore.
+	time.Sleep(10 * time.Millisecond)
+
+	// Try a second call with a cancelled context.
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // Cancel immediately.
+
+	_, err = src.ReadFile(ctx, "org/repo", "", "blocked.go")
+	if err == nil {
+		t.Fatal("expected error from cancelled context")
+	}
+	if err != context.Canceled {
+		t.Errorf("expected context.Canceled, got: %v", err)
+	}
+
+	wg.Wait()
 }

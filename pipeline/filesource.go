@@ -19,3 +19,12 @@ type FileSource interface {
 	// DiffBetween returns the set of file changes between two revisions.
 	DiffBetween(ctx context.Context, repo, fromRev, toRev string) ([]gitdiff.FileChange, error)
 }
+
+// BatchReader is an optional interface that a FileSource may implement to
+// support concurrent file reads. When the Pipeline detects that its FileSource
+// implements BatchReader, it pre-reads all files concurrently before processing
+// them sequentially (DB writes are single-writer in SQLite).
+type BatchReader interface {
+	// BatchReadFiles reads multiple files concurrently and returns per-file results.
+	BatchReadFiles(ctx context.Context, repo, revision string, paths []string) []BatchReadFile
+}

@@ -130,6 +130,32 @@ func (p *Pipeline) Run(ctx context.Context, fromCommit, toCommit string) (Result
 	result.FilesChanged = len(changedPaths)
 	result.ChangedPaths = changedPaths
 
+	// When the FileSource supports batch reading, pre-read all eligible
+	// files concurrently to avoid serial network round-trips.
+	var preRead map[string][]byte
+	if br, ok := p.fileSource.(BatchReader); ok && len(changedPaths) > 0 {
+		var toRead []string
+		for _, rp := range changedPaths {
+			if extractor.IsGenerated(rp) {
+				continue
+			}
+			ext := strings.ToLower(filepath.Ext(rp))
+			if p.registry.LookupByExtension(ext) != nil {
+				toRead = append(toRead, rp)
+			}
+		}
+		if len(toRead) > 0 {
+			log.Printf("batch-reading %d files concurrently", len(toRead))
+			batchResults := br.BatchReadFiles(ctx, p.repo, "", toRead)
+			preRead = make(map[string][]byte, len(batchResults))
+			for _, r := range batchResults {
+				if r.Err == nil {
+					preRead[r.Path] = r.Content
+				}
+			}
+		}
+	}
+
 	for _, relPath := range changedPaths {
 		select {
 		case <-ctx.Done():
@@ -143,7 +169,7 @@ func (p *Pipeline) Run(ctx context.Context, fromCommit, toCommit string) (Result
 			continue
 		}
 
-		extracted, claims, err := p.processFile(ctx, relPath)
+		extracted, claims, err := p.processFileWithContent(ctx, relPath, preRead)
 		if err != nil {
 			// Check if it's a "no extractor" error — that's a skip, not an error.
 			var langErr *extractor.LanguageNotRegisteredError
@@ -176,17 +202,31 @@ func (p *Pipeline) Run(ctx context.Context, fromCommit, toCommit string) (Result
 // processFile handles a single changed file: hash, cache check, extract, store.
 // Returns (true, claimCount, nil) if extraction happened, (false, 0, nil) on cache hit.
 func (p *Pipeline) processFile(ctx context.Context, relPath string) (bool, int, error) {
+	return p.processFileWithContent(ctx, relPath, nil)
+}
+
+// processFileWithContent is like processFile but accepts an optional pre-read
+// content map. If the file's content is found in preRead, it is used directly;
+// otherwise the file is read from the FileSource or local filesystem.
+func (p *Pipeline) processFileWithContent(ctx context.Context, relPath string, preRead map[string][]byte) (bool, int, error) {
 	// Read file and compute content hash.
 	var content []byte
 	var err error
-	if p.fileSource != nil {
-		content, err = p.fileSource.ReadFile(ctx, p.repo, "", relPath)
-	} else {
-		absPath := filepath.Join(p.repoDir, relPath)
-		content, err = os.ReadFile(absPath)
+	if preRead != nil {
+		if c, ok := preRead[relPath]; ok {
+			content = c
+		}
 	}
-	if err != nil {
-		return false, 0, fmt.Errorf("read %s: %w", relPath, err)
+	if content == nil {
+		if p.fileSource != nil {
+			content, err = p.fileSource.ReadFile(ctx, p.repo, "", relPath)
+		} else {
+			absPath := filepath.Join(p.repoDir, relPath)
+			content, err = os.ReadFile(absPath)
+		}
+		if err != nil {
+			return false, 0, fmt.Errorf("read %s: %w", relPath, err)
+		}
 	}
 	contentHash := fmt.Sprintf("%x", sha256.Sum256(content))
 

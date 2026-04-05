@@ -4,9 +4,27 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"sync"
 
 	"github.com/live-docs/live_docs/gitdiff"
 )
+
+// defaultConcurrency is the default number of concurrent MCP calls.
+const defaultConcurrency = 10
+
+// SourcegraphOption configures a SourcegraphFileSource.
+type SourcegraphOption func(*SourcegraphFileSource)
+
+// WithConcurrency sets the maximum number of concurrent MCP calls.
+// Values less than 1 are treated as 1.
+func WithConcurrency(n int) SourcegraphOption {
+	return func(s *SourcegraphFileSource) {
+		if n < 1 {
+			n = 1
+		}
+		s.concurrency = n
+	}
+}
 
 // ToolLister abstracts MCP tool discovery so the constructor can verify that
 // required tools are available without depending on the full MCP client.
@@ -15,9 +33,12 @@ type ToolLister interface {
 }
 
 // SourcegraphFileSource implements FileSource by delegating to Sourcegraph MCP
-// tools: read_file, list_files, and compare_revisions.
+// tools: read_file, list_files, and compare_revisions. Concurrent ReadFile calls
+// are bounded by an internal semaphore (default 10, configurable via WithConcurrency).
 type SourcegraphFileSource struct {
-	caller MCPCaller
+	caller      MCPCaller
+	concurrency int
+	sem         chan struct{}
 }
 
 // MCPCaller abstracts the MCP client's CallTool method. It matches the
@@ -32,7 +53,9 @@ var requiredTools = []string{"read_file", "list_files"}
 
 // NewSourcegraphFileSource creates a SourcegraphFileSource after verifying that
 // required MCP tools (read_file, list_files) are available via the ToolLister.
-func NewSourcegraphFileSource(caller MCPCaller, lister ToolLister) (*SourcegraphFileSource, error) {
+// Use WithConcurrency to control the maximum number of concurrent MCP calls
+// (default 10).
+func NewSourcegraphFileSource(caller MCPCaller, lister ToolLister, opts ...SourcegraphOption) (*SourcegraphFileSource, error) {
 	ctx := context.Background()
 	tools, err := lister.ListTools(ctx)
 	if err != nil {
@@ -50,11 +73,30 @@ func NewSourcegraphFileSource(caller MCPCaller, lister ToolLister) (*Sourcegraph
 		}
 	}
 
-	return &SourcegraphFileSource{caller: caller}, nil
+	s := &SourcegraphFileSource{
+		caller:      caller,
+		concurrency: defaultConcurrency,
+	}
+	for _, opt := range opts {
+		opt(s)
+	}
+	s.sem = make(chan struct{}, s.concurrency)
+
+	return s, nil
 }
 
 // ReadFile calls the Sourcegraph MCP read_file tool and returns the content.
+// It acquires a semaphore slot before making the call, ensuring that no more
+// than the configured concurrency limit of calls are in flight at once.
 func (s *SourcegraphFileSource) ReadFile(ctx context.Context, repo, revision, path string) ([]byte, error) {
+	// Acquire semaphore.
+	select {
+	case s.sem <- struct{}{}:
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+	defer func() { <-s.sem }()
+
 	args := map[string]any{
 		"repo": repo,
 		"path": path,
@@ -68,6 +110,37 @@ func (s *SourcegraphFileSource) ReadFile(ctx context.Context, repo, revision, pa
 		return nil, fmt.Errorf("sourcegraph read_file %s: %w", path, err)
 	}
 	return []byte(result), nil
+}
+
+// Concurrency returns the configured concurrency limit.
+func (s *SourcegraphFileSource) Concurrency() int {
+	return s.concurrency
+}
+
+// BatchReadFile holds the result of a single file read in a batch operation.
+type BatchReadFile struct {
+	Path    string
+	Content []byte
+	Err     error
+}
+
+// BatchReadFiles reads multiple files concurrently, bounded by the semaphore.
+// It returns results for all paths; individual errors are captured per-file.
+func (s *SourcegraphFileSource) BatchReadFiles(ctx context.Context, repo, revision string, paths []string) []BatchReadFile {
+	results := make([]BatchReadFile, len(paths))
+	var wg sync.WaitGroup
+
+	for i, path := range paths {
+		wg.Add(1)
+		go func(idx int, p string) {
+			defer wg.Done()
+			content, err := s.ReadFile(ctx, repo, revision, p)
+			results[idx] = BatchReadFile{Path: p, Content: content, Err: err}
+		}(i, path)
+	}
+
+	wg.Wait()
+	return results
 }
 
 // ListFiles calls the Sourcegraph MCP list_files tool and returns matching paths.

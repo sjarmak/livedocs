@@ -25,14 +25,15 @@ import (
 )
 
 var (
-	extractSource  string
-	extractRepo    string
-	extractOutput  string
-	extractTier2   bool
-	extractDataDir string
-	extractFromRev string
-	extractToRev   string
-	extractConfirm bool
+	extractSource      string
+	extractRepo        string
+	extractOutput      string
+	extractTier2       bool
+	extractDataDir     string
+	extractFromRev     string
+	extractToRev       string
+	extractConfirm     bool
+	extractConcurrency int
 )
 
 // newLLMClient creates the LLM client for semantic extraction.
@@ -147,6 +148,7 @@ func init() {
 	extractCmd.Flags().StringVar(&extractFromRev, "from-rev", "", "start revision for incremental extraction (used with --source sourcegraph)")
 	extractCmd.Flags().StringVar(&extractToRev, "to-rev", "", "end revision for incremental extraction (used with --source sourcegraph)")
 	extractCmd.Flags().BoolVar(&extractConfirm, "confirm", false, "confirm full extraction after cost estimate (used with --source sourcegraph)")
+	extractCmd.Flags().IntVar(&extractConcurrency, "concurrency", 10, "max concurrent MCP calls (used with --source sourcegraph)")
 }
 
 // skipDirs contains directory names to skip during file walking.
@@ -483,8 +485,8 @@ func runExtractSourcegraph(cmd *cobra.Command) error {
 	}
 	defer sgClient.Close()
 
-	// Create SourcegraphFileSource.
-	fileSource, err := pipeline.NewSourcegraphFileSource(sgClient, sgToolLister{})
+	// Create SourcegraphFileSource with concurrency control.
+	fileSource, err := pipeline.NewSourcegraphFileSource(sgClient, sgToolLister{}, pipeline.WithConcurrency(extractConcurrency))
 	if err != nil {
 		return fmt.Errorf("create sourcegraph file source: %w", err)
 	}
@@ -505,13 +507,14 @@ func runExtractSourcegraph(cmd *cobra.Command) error {
 		fileCount := len(files)
 		estimatedCalls := fileCount // 1 read_file call per file
 		estimatedCost := float64(estimatedCalls) * sgCostPerCall
-		estimatedTime := float64(estimatedCalls) * sgSecondsPerCall
+		estimatedTime := float64(estimatedCalls) * sgSecondsPerCall / float64(extractConcurrency)
 
 		fmt.Fprintf(out, "\nFull Extraction Cost Estimate\n")
 		fmt.Fprintf(out, "============================\n")
 		fmt.Fprintf(out, "  Repository:      %s\n", extractRepo)
 		fmt.Fprintf(out, "  Files:           %d\n", fileCount)
 		fmt.Fprintf(out, "  MCP calls:       %d\n", estimatedCalls)
+		fmt.Fprintf(out, "  Concurrency:     %d\n", extractConcurrency)
 		fmt.Fprintf(out, "  Estimated cost:  $%.2f\n", estimatedCost)
 		fmt.Fprintf(out, "  Estimated time:  %.0fs\n", estimatedTime)
 
