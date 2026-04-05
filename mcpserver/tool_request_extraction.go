@@ -124,6 +124,11 @@ func RequestExtractionHandler(pool *DBPool, tracker *ExtractionTracker) ToolHand
 			})
 		}
 
+		// Validate repo name to prevent path traversal.
+		if err := validateRepoName(repo); err != nil {
+			return NewErrorResult(err.Error()), nil
+		}
+
 		// Check if a claims DB exists for this repo.
 		dbPath := filepath.Join(pool.DataDir(), repo+claimsDBSuffix)
 		_, statErr := os.Stat(dbPath)

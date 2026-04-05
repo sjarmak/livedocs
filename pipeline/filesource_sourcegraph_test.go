@@ -13,10 +13,13 @@ import (
 )
 
 // mockMCPCaller is a test double that returns canned responses keyed by tool name.
+// It is safe for concurrent use.
 type mockMCPCaller struct {
 	responses map[string]string
 	errors    map[string]error
-	calls     []mockCall
+
+	mu    sync.Mutex
+	calls []mockCall
 }
 
 type mockCall struct {
@@ -25,7 +28,9 @@ type mockCall struct {
 }
 
 func (m *mockMCPCaller) CallTool(_ context.Context, toolName string, args map[string]any) (string, error) {
+	m.mu.Lock()
 	m.calls = append(m.calls, mockCall{ToolName: toolName, Args: args})
+	m.mu.Unlock()
 	if err, ok := m.errors[toolName]; ok {
 		return "", err
 	}
