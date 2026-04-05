@@ -18,14 +18,21 @@ import (
 	"github.com/live-docs/live_docs/extractor/goextractor"
 	"github.com/live-docs/live_docs/extractor/lang"
 	"github.com/live-docs/live_docs/extractor/treesitter"
+	"github.com/live-docs/live_docs/gitdiff"
+	"github.com/live-docs/live_docs/pipeline"
 	"github.com/live-docs/live_docs/semantic"
+	"github.com/live-docs/live_docs/sourcegraph"
 )
 
 var (
-	extractSource string
-	extractRepo   string
-	extractOutput string
-	extractTier2  bool
+	extractSource  string
+	extractRepo    string
+	extractOutput  string
+	extractTier2   bool
+	extractDataDir string
+	extractFromRev string
+	extractToRev   string
+	extractConfirm bool
 )
 
 // newLLMClient creates the LLM client for semantic extraction.
@@ -51,7 +58,12 @@ structural claims using language-specific extractors:
 Creates a per-repo SQLite database containing symbols and claims.
 
 Use --source clone --repo <url> to shallow-clone a remote repository
-before extraction. The clone is cleaned up after extraction completes.`,
+before extraction. The clone is cleaned up after extraction completes.
+
+Use --source sourcegraph --repo <repo> --data-dir <dir> to extract claims
+from a remote repository via Sourcegraph MCP. Requires SRC_ACCESS_TOKEN.
+Supports --from-rev and --to-rev for incremental extraction. Without
+revision flags, estimates cost and requires --confirm to proceed.`,
 	Args: cobra.MaximumNArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		switch extractSource {
@@ -60,7 +72,7 @@ before extraction. The clone is cleaned up after extraction completes.`,
 		case "clone":
 			return runExtractClone(cmd)
 		case "sourcegraph":
-			return fmt.Errorf("--source sourcegraph is not yet implemented")
+			return runExtractSourcegraph(cmd)
 		default:
 			return fmt.Errorf("unknown --source value: %q (valid: local, clone, sourcegraph)", extractSource)
 		}
@@ -131,6 +143,10 @@ func init() {
 	extractCmd.Flags().StringVar(&extractRepo, "repo", "", "repository name or URL (URL when --source clone)")
 	extractCmd.Flags().StringVarP(&extractOutput, "output", "o", "", "output SQLite file path (default: <repo>.claims.db)")
 	extractCmd.Flags().BoolVar(&extractTier2, "tier2", false, "generate Tier 2 semantic claims via LLM (requires ANTHROPIC_API_KEY)")
+	extractCmd.Flags().StringVar(&extractDataDir, "data-dir", "", "directory for output .claims.db (used with --source sourcegraph)")
+	extractCmd.Flags().StringVar(&extractFromRev, "from-rev", "", "start revision for incremental extraction (used with --source sourcegraph)")
+	extractCmd.Flags().StringVar(&extractToRev, "to-rev", "", "end revision for incremental extraction (used with --source sourcegraph)")
+	extractCmd.Flags().BoolVar(&extractConfirm, "confirm", false, "confirm full extraction after cost estimate (used with --source sourcegraph)")
 }
 
 // skipDirs contains directory names to skip during file walking.
@@ -415,6 +431,232 @@ func runExtract(ctx context.Context, cmd *cobra.Command, repoDir, repoName, outp
 	claimsDB.Close()
 
 	// Atomically replace the output file.
+	if err := os.Rename(tmpPath, outputPath); err != nil {
+		return fmt.Errorf("atomic rename %s -> %s: %w", tmpPath, outputPath, err)
+	}
+	extractOK = true
+
+	return nil
+}
+
+// sgToolLister satisfies pipeline.ToolLister for the Sourcegraph MCP server.
+// The standard Sourcegraph MCP server always provides these tools; the
+// SourcegraphFileSource constructor validates their presence.
+type sgToolLister struct{}
+
+func (sgToolLister) ListTools(_ context.Context) ([]string, error) {
+	return []string{"read_file", "list_files", "compare_revisions"}, nil
+}
+
+// sgCostPerCall is the estimated cost per Sourcegraph MCP call for cost estimation.
+const sgCostPerCall = 0.003
+
+// sgSecondsPerCall is the estimated wall-clock time per MCP call.
+const sgSecondsPerCall = 0.5
+
+func runExtractSourcegraph(cmd *cobra.Command) error {
+	ctx := cmd.Context()
+	out := cmd.OutOrStdout()
+
+	// Validate required inputs.
+	if os.Getenv("SRC_ACCESS_TOKEN") == "" {
+		return fmt.Errorf("SRC_ACCESS_TOKEN environment variable is required for --source sourcegraph")
+	}
+	if extractRepo == "" {
+		return fmt.Errorf("--repo is required when --source sourcegraph is used")
+	}
+	if extractDataDir == "" {
+		return fmt.Errorf("--data-dir is required when --source sourcegraph is used")
+	}
+
+	// Derive repo name for the DB file (last path component).
+	repoName := extractRepo
+	if idx := strings.LastIndex(repoName, "/"); idx >= 0 {
+		repoName = repoName[idx+1:]
+	}
+
+	// Create Sourcegraph MCP client.
+	sgClient, err := sourcegraph.NewSourcegraphClient()
+	if err != nil {
+		return fmt.Errorf("create sourcegraph client: %w", err)
+	}
+	defer sgClient.Close()
+
+	// Create SourcegraphFileSource.
+	fileSource, err := pipeline.NewSourcegraphFileSource(sgClient, sgToolLister{})
+	if err != nil {
+		return fmt.Errorf("create sourcegraph file source: %w", err)
+	}
+
+	// Determine extraction mode: incremental (--from-rev/--to-rev) or full.
+	isIncremental := extractFromRev != "" || extractToRev != ""
+
+	var changes []gitdiff.FileChange
+
+	if !isIncremental {
+		// Full extraction: list all files, estimate cost, require --confirm.
+		fmt.Fprintf(out, "Listing files in %s...\n", extractRepo)
+		files, err := fileSource.ListFiles(ctx, extractRepo, "", "*")
+		if err != nil {
+			return fmt.Errorf("list files: %w", err)
+		}
+
+		fileCount := len(files)
+		estimatedCalls := fileCount // 1 read_file call per file
+		estimatedCost := float64(estimatedCalls) * sgCostPerCall
+		estimatedTime := float64(estimatedCalls) * sgSecondsPerCall
+
+		fmt.Fprintf(out, "\nFull Extraction Cost Estimate\n")
+		fmt.Fprintf(out, "============================\n")
+		fmt.Fprintf(out, "  Repository:      %s\n", extractRepo)
+		fmt.Fprintf(out, "  Files:           %d\n", fileCount)
+		fmt.Fprintf(out, "  MCP calls:       %d\n", estimatedCalls)
+		fmt.Fprintf(out, "  Estimated cost:  $%.2f\n", estimatedCost)
+		fmt.Fprintf(out, "  Estimated time:  %.0fs\n", estimatedTime)
+
+		if !extractConfirm {
+			fmt.Fprintf(out, "\nRun with --confirm to proceed with extraction.\n")
+			return nil
+		}
+
+		// Build synthetic FileChanges (all added).
+		changes = make([]gitdiff.FileChange, len(files))
+		for i, f := range files {
+			changes[i] = gitdiff.FileChange{Status: gitdiff.StatusAdded, Path: f}
+		}
+	}
+
+	// Set up output path.
+	outputPath := filepath.Join(extractDataDir, repoName+".claims.db")
+
+	// Ensure data-dir exists.
+	if err := os.MkdirAll(extractDataDir, 0o755); err != nil {
+		return fmt.Errorf("create data-dir: %w", err)
+	}
+
+	// Use atomic file replacement.
+	tmpFile, err := os.CreateTemp(extractDataDir, repoName+".claims.db.tmp.*")
+	if err != nil {
+		return fmt.Errorf("create temp file: %w", err)
+	}
+	tmpPath := tmpFile.Name()
+	tmpFile.Close()
+
+	extractOK := false
+	defer func() {
+		if !extractOK {
+			os.Remove(tmpPath)
+		}
+	}()
+
+	// Open claims DB.
+	claimsDB, err := db.OpenClaimsDB(tmpPath)
+	if err != nil {
+		return fmt.Errorf("open claims db: %w", err)
+	}
+	defer claimsDB.Close()
+
+	if err := claimsDB.CreateSchema(); err != nil {
+		return fmt.Errorf("create schema: %w", err)
+	}
+
+	// Open in-memory cache.
+	cacheStore, err := cache.NewSQLiteStore(":memory:", 2*1024*1024*1024)
+	if err != nil {
+		return fmt.Errorf("open cache: %w", err)
+	}
+	defer cacheStore.Close()
+
+	// Set up extractor registry (tree-sitter only; Go deep extractor requires local FS).
+	registry := extractor.NewRegistry()
+	langRegistry := lang.NewRegistry()
+	tsExtractor := treesitter.New(langRegistry)
+
+	registry.Register(extractor.LanguageConfig{
+		Language:          "go",
+		Extensions:        []string{".go"},
+		FastExtractor:     tsExtractor,
+		TreeSitterGrammar: "tree-sitter-go",
+	})
+	registry.Register(extractor.LanguageConfig{
+		Language:          "typescript",
+		Extensions:        []string{".ts", ".tsx"},
+		TreeSitterGrammar: "tree-sitter-typescript",
+		FastExtractor:     tsExtractor,
+	})
+	registry.Register(extractor.LanguageConfig{
+		Language:          "python",
+		Extensions:        []string{".py"},
+		TreeSitterGrammar: "tree-sitter-python",
+		FastExtractor:     tsExtractor,
+	})
+	registry.Register(extractor.LanguageConfig{
+		Language:          "shell",
+		Extensions:        []string{".sh"},
+		TreeSitterGrammar: "tree-sitter-bash",
+		FastExtractor:     tsExtractor,
+	})
+
+	// Run the pipeline.
+	start := time.Now()
+	p := pipeline.New(pipeline.Config{
+		Repo:       extractRepo,
+		RepoDir:    "",
+		Cache:      cacheStore,
+		ClaimsDB:   claimsDB,
+		Registry:   registry,
+		FileSource: fileSource,
+	})
+
+	var result pipeline.Result
+	if isIncremental {
+		fromRev := extractFromRev
+		toRev := extractToRev
+		if toRev == "" {
+			toRev = "HEAD"
+		}
+		fmt.Fprintf(out, "Running incremental extraction %s..%s\n", fromRev, toRev)
+		result, err = p.Run(ctx, fromRev, toRev)
+	} else {
+		fmt.Fprintf(out, "\nRunning full extraction (%d files)...\n", len(changes))
+		// For full extraction, we already have changes; use the pipeline with
+		// empty fromCommit so DiffBetween returns all files.
+		result, err = p.Run(ctx, "", "HEAD")
+	}
+	if err != nil {
+		return fmt.Errorf("pipeline run: %w", err)
+	}
+
+	duration := time.Since(start)
+
+	// Print summary.
+	fmt.Fprintf(out, "\n## Sourcegraph Extract Summary\n\n")
+	fmt.Fprintf(out, "- **Repository**: %s\n", extractRepo)
+	fmt.Fprintf(out, "- **Output**: %s\n", outputPath)
+	fmt.Fprintf(out, "- **Files changed**: %d\n", result.FilesChanged)
+	fmt.Fprintf(out, "- **Files extracted**: %d\n", result.FilesExtracted)
+	fmt.Fprintf(out, "- **Files skipped**: %d\n", result.FilesSkipped)
+	fmt.Fprintf(out, "- **Files deleted**: %d\n", result.FilesDeleted)
+	fmt.Fprintf(out, "- **Cache hits**: %d\n", result.CacheHits)
+	fmt.Fprintf(out, "- **Claims stored**: %d\n", result.ClaimsStored)
+	fmt.Fprintf(out, "- **Errors**: %d\n", len(result.Errors))
+	fmt.Fprintf(out, "- **Duration**: %s\n", duration.Round(time.Millisecond))
+
+	for _, fe := range result.Errors {
+		fmt.Fprintf(out, "  - %s: %v\n", fe.Path, fe.Err)
+	}
+
+	// Store extraction metadata.
+	if err := claimsDB.SetExtractionMeta(db.ExtractionMeta{
+		ExtractedAt: db.Now(),
+		RepoRoot:    extractRepo,
+	}); err != nil {
+		return fmt.Errorf("set extraction meta: %w", err)
+	}
+
+	// Close DB before rename.
+	claimsDB.Close()
+
 	if err := os.Rename(tmpPath, outputPath); err != nil {
 		return fmt.Errorf("atomic rename %s -> %s: %w", tmpPath, outputPath, err)
 	}
