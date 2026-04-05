@@ -45,6 +45,7 @@ type Result struct {
 	FilesSkipped   int           // files with no registered extractor
 	CacheHits      int           // files skipped due to cache hit
 	ClaimsStored   int           // total claims inserted
+	ChangedPaths   []string      // relative paths of all non-deleted changed files
 	Duration       time.Duration // wall-clock time
 	Errors         []FileError   // non-fatal per-file errors
 }
@@ -89,6 +90,7 @@ func (p *Pipeline) Run(ctx context.Context, fromCommit, toCommit string) (Result
 	// 3. Process changed files (added, modified, renamed, copied).
 	changedPaths := gitdiff.ChangedPaths(changes)
 	result.FilesChanged = len(changedPaths)
+	result.ChangedPaths = changedPaths
 
 	for _, relPath := range changedPaths {
 		select {

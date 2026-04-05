@@ -563,6 +563,114 @@ func TestGeneratedFilesSkipped(t *testing.T) {
 	}
 }
 
+func TestRun_ChangedPathsPopulated(t *testing.T) {
+	// Verify that ChangedPaths contains the relative paths of changed files.
+	repoDir, sha1 := setupTestRepo(t, map[string]string{
+		"a.go": "package a",
+	})
+
+	// Add two new files, modify existing one.
+	if err := os.WriteFile(filepath.Join(repoDir, "a.go"), []byte("package a // v2"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(repoDir, "b.go"), []byte("package b"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(repoDir, "c.go"), []byte("package c"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	gitRun(t, repoDir, "git", "add", ".")
+	gitRun(t, repoDir, "git", "commit", "-m", "add and modify files")
+	sha2 := getHEAD(t, repoDir)
+
+	cacheStore, claimsDB := openTestDBs(t)
+	stub := &stubExtractor{name: "test-ext", version: "0.1.0"}
+	reg := extractor.NewRegistry()
+	reg.Register(extractor.LanguageConfig{
+		Language:      "go",
+		Extensions:    []string{".go"},
+		FastExtractor: stub,
+	})
+
+	p := New(Config{
+		Repo:     "test/repo",
+		RepoDir:  repoDir,
+		Cache:    cacheStore,
+		ClaimsDB: claimsDB,
+		Registry: reg,
+	})
+
+	result, err := p.Run(context.Background(), sha1, sha2)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	if len(result.ChangedPaths) != 3 {
+		t.Errorf("ChangedPaths length: got %d, want 3", len(result.ChangedPaths))
+	}
+
+	// Build a set for easy lookup.
+	pathSet := make(map[string]bool, len(result.ChangedPaths))
+	for _, p := range result.ChangedPaths {
+		pathSet[p] = true
+	}
+
+	for _, want := range []string{"a.go", "b.go", "c.go"} {
+		if !pathSet[want] {
+			t.Errorf("ChangedPaths missing %q; got %v", want, result.ChangedPaths)
+		}
+	}
+}
+
+func TestRun_ChangedPathsExcludesDeleted(t *testing.T) {
+	// Deleted files should NOT appear in ChangedPaths.
+	repoDir, sha1 := setupTestRepo(t, map[string]string{
+		"keep.go":   "package keep",
+		"remove.go": "package remove",
+	})
+
+	// Modify keep.go and delete remove.go.
+	if err := os.WriteFile(filepath.Join(repoDir, "keep.go"), []byte("package keep // v2"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	gitRun(t, repoDir, "git", "rm", "remove.go")
+	gitRun(t, repoDir, "git", "add", ".")
+	gitRun(t, repoDir, "git", "commit", "-m", "modify and delete")
+	sha2 := getHEAD(t, repoDir)
+
+	cacheStore, claimsDB := openTestDBs(t)
+	stub := &stubExtractor{name: "test-ext", version: "0.1.0"}
+	reg := extractor.NewRegistry()
+	reg.Register(extractor.LanguageConfig{
+		Language:      "go",
+		Extensions:    []string{".go"},
+		FastExtractor: stub,
+	})
+
+	p := New(Config{
+		Repo:     "test/repo",
+		RepoDir:  repoDir,
+		Cache:    cacheStore,
+		ClaimsDB: claimsDB,
+		Registry: reg,
+	})
+
+	result, err := p.Run(context.Background(), sha1, sha2)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	if len(result.ChangedPaths) != 1 {
+		t.Errorf("ChangedPaths length: got %d, want 1", len(result.ChangedPaths))
+	}
+	if len(result.ChangedPaths) > 0 && result.ChangedPaths[0] != "keep.go" {
+		t.Errorf("ChangedPaths[0]: got %q, want %q", result.ChangedPaths[0], "keep.go")
+	}
+	if result.FilesDeleted != 1 {
+		t.Errorf("FilesDeleted: got %d, want 1", result.FilesDeleted)
+	}
+}
+
 func TestRun_FileReadError(t *testing.T) {
 	// Create repo where a file exists in git but is missing from disk
 	// at pipeline run time (simulating race condition).
