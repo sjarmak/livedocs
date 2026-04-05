@@ -216,7 +216,7 @@ CREATE TABLE IF NOT EXISTS claims (
     source_file     TEXT NOT NULL,
     source_line     INTEGER,
     confidence      REAL NOT NULL DEFAULT 1.0,
-    claim_tier      TEXT NOT NULL CHECK(claim_tier IN ('structural', 'semantic')),
+    claim_tier      TEXT NOT NULL CHECK(claim_tier IN ('structural', 'semantic', 'meta')),
     extractor       TEXT NOT NULL,
     extractor_version TEXT NOT NULL,
     last_verified   TEXT NOT NULL

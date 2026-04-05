@@ -563,6 +563,310 @@ func TestExtractClaimFromContext_NullHandling(t *testing.T) {
 	}
 }
 
+func TestSymbolIDs_FilterExact(t *testing.T) {
+	cdb := setupTestDB(t)
+
+	// Insert 3 symbols, but only pass 2 IDs.
+	id1 := insertSymbol(t, cdb, "r", "pkg/a", "SymA", "go", "type", "public")
+	_ = insertSymbol(t, cdb, "r", "pkg/a", "SymB", "go", "func", "public")
+	id3 := insertSymbol(t, cdb, "r", "pkg/a", "SymC", "go", "interface", "public")
+
+	// Set up source files for all.
+	insertSourceFile(t, cdb, "r", "a.go", "hashA")
+	insertClaim(t, cdb, id1, "defines", "SymA", "a.go", "structural", "test", "1.0", 1.0)
+	insertSourceFile(t, cdb, "r", "c.go", "hashC")
+	insertClaim(t, cdb, id3, "defines", "SymC", "c.go", "structural", "test", "1.0", 1.0)
+
+	router := &mockRouter{results: map[string]string{}}
+	enricher, err := NewEnricher(cdb, router)
+	if err != nil {
+		t.Fatalf("new enricher: %v", err)
+	}
+
+	summary, err := enricher.Run(context.Background(), EnrichOpts{
+		SymbolIDs: []int64{id1, id3},
+	})
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+
+	// Should enrich exactly 2 symbols (SymA and SymC), not SymB.
+	if summary.SymbolsEnriched != 2 {
+		t.Errorf("expected 2 enriched, got %d", summary.SymbolsEnriched)
+	}
+
+	// Verify router was only called for SymA and SymC.
+	calledNames := map[string]bool{}
+	for _, call := range router.calls {
+		calledNames[call.sym.Name] = true
+	}
+	if calledNames["SymB"] {
+		t.Error("SymB should not have been called (not in SymbolIDs)")
+	}
+	if !calledNames["SymA"] {
+		t.Error("SymA should have been called")
+	}
+	if !calledNames["SymC"] {
+		t.Error("SymC should have been called")
+	}
+}
+
+func TestSymbolIDs_Empty_UnchangedBehavior(t *testing.T) {
+	cdb := setupTestDB(t)
+
+	insertSymbol(t, cdb, "r", "pkg/a", "TypeX", "go", "type", "public")
+
+	router := &mockRouter{results: map[string]string{}}
+	enricher, err := NewEnricher(cdb, router)
+	if err != nil {
+		t.Fatalf("new enricher: %v", err)
+	}
+
+	// Empty SymbolIDs: should use normal selectSymbols path.
+	summary, err := enricher.Run(context.Background(), EnrichOpts{
+		SymbolIDs: nil,
+	})
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+
+	// TypeX has no source file, so it won't have content hash; still gets enriched.
+	if summary.CallsMade != 4 {
+		t.Errorf("expected 4 calls (normal path), got %d", summary.CallsMade)
+	}
+}
+
+func TestTombstone_CreationAndRetry(t *testing.T) {
+	cdb := setupTestDB(t)
+
+	id := insertSymbol(t, cdb, "r", "pkg/a", "FailSym", "go", "type", "public")
+	insertSourceFile(t, cdb, "r", "a.go", "hash1")
+	insertClaim(t, cdb, id, "defines", "FailSym", "a.go", "structural", "test", "1.0", 1.0)
+
+	// Router always returns error.
+	router := &mockRouter{err: fmt.Errorf("sourcegraph unavailable")}
+	enricher, err := NewEnricher(cdb, router)
+	if err != nil {
+		t.Fatalf("new enricher: %v", err)
+	}
+
+	// First run: should create tombstone.
+	_, err = enricher.Run(context.Background(), EnrichOpts{})
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+
+	// Verify tombstone was created.
+	claims, err := cdb.GetClaimsBySubject(id)
+	if err != nil {
+		t.Fatalf("get claims: %v", err)
+	}
+	tombstoneCount := 0
+	for _, cl := range claims {
+		if cl.Extractor == enrichExtractorName && cl.Predicate == "enrichment_failed" {
+			tombstoneCount++
+			if cl.ClaimTier != "meta" {
+				t.Errorf("expected claim_tier=meta, got %s", cl.ClaimTier)
+			}
+		}
+	}
+	if tombstoneCount != 1 {
+		t.Errorf("expected 1 tombstone, got %d", tombstoneCount)
+	}
+
+	// Second run: tombstone should not prevent retry (isCacheHit returns false).
+	router2 := &mockRouter{err: fmt.Errorf("still unavailable")}
+	enricher2, _ := NewEnricher(cdb, router2)
+	summary2, err := enricher2.Run(context.Background(), EnrichOpts{})
+	if err != nil {
+		t.Fatalf("run 2: %v", err)
+	}
+	// Should have made calls (retried), not skipped.
+	if summary2.CallsMade == 0 {
+		t.Error("expected retry (calls > 0), but got 0 calls")
+	}
+}
+
+func TestTombstone_ReplacementOnSuccess(t *testing.T) {
+	cdb := setupTestDB(t)
+
+	id := insertSymbol(t, cdb, "r", "pkg/a", "RecoverSym", "go", "type", "public")
+	insertSourceFile(t, cdb, "r", "a.go", "hash1")
+	insertClaim(t, cdb, id, "defines", "RecoverSym", "a.go", "structural", "test", "1.0", 1.0)
+
+	// First run: router fails, creating a tombstone.
+	router1 := &mockRouter{err: fmt.Errorf("fail")}
+	enricher1, _ := NewEnricher(cdb, router1)
+	enricher1.Run(context.Background(), EnrichOpts{})
+
+	// Verify tombstone exists.
+	claims, _ := cdb.GetClaimsBySubject(id)
+	hasTombstone := false
+	for _, cl := range claims {
+		if cl.Predicate == "enrichment_failed" {
+			hasTombstone = true
+		}
+	}
+	if !hasTombstone {
+		t.Fatal("expected tombstone after failure")
+	}
+
+	// Second run: router succeeds.
+	router2 := &mockRouter{results: map[string]string{
+		"purpose:RecoverSym":       "RecoverSym is a recovered type",
+		"usage_pattern:RecoverSym": "RecoverSym usage pattern",
+		"complexity:RecoverSym":    "RecoverSym complexity",
+		"stability:RecoverSym":     "RecoverSym stability",
+	}}
+	enricher2, _ := NewEnricher(cdb, router2)
+	summary, err := enricher2.Run(context.Background(), EnrichOpts{})
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if summary.SymbolsEnriched != 1 {
+		t.Errorf("expected 1 enriched, got %d", summary.SymbolsEnriched)
+	}
+
+	// Verify tombstone was removed.
+	claims, _ = cdb.GetClaimsBySubject(id)
+	for _, cl := range claims {
+		if cl.Predicate == "enrichment_failed" || cl.Predicate == "enrichment_permanently_failed" {
+			t.Errorf("tombstone should have been removed, found predicate=%s", cl.Predicate)
+		}
+	}
+}
+
+func TestTombstone_PermanentAfterThreeFailures(t *testing.T) {
+	cdb := setupTestDB(t)
+
+	id := insertSymbol(t, cdb, "r", "pkg/a", "PermanentFail", "go", "type", "public")
+	insertSourceFile(t, cdb, "r", "a.go", "hash1")
+	insertClaim(t, cdb, id, "defines", "PermanentFail", "a.go", "structural", "test", "1.0", 1.0)
+
+	// Fail 3 times consecutively.
+	for i := 0; i < 3; i++ {
+		router := &mockRouter{err: fmt.Errorf("fail %d", i)}
+		enricher, _ := NewEnricher(cdb, router)
+		enricher.Run(context.Background(), EnrichOpts{})
+	}
+
+	// Verify permanently failed tombstone.
+	claims, _ := cdb.GetClaimsBySubject(id)
+	hasPermanent := false
+	hasNonPermanent := false
+	for _, cl := range claims {
+		if cl.Extractor == enrichExtractorName {
+			if cl.Predicate == "enrichment_permanently_failed" {
+				hasPermanent = true
+			}
+			if cl.Predicate == "enrichment_failed" {
+				hasNonPermanent = true
+			}
+		}
+	}
+	if !hasPermanent {
+		t.Error("expected enrichment_permanently_failed tombstone after 3 failures")
+	}
+	if hasNonPermanent {
+		t.Error("non-permanent tombstones should have been cleaned up on escalation")
+	}
+}
+
+func TestTombstone_PermanentSkippedUntilSourceChange(t *testing.T) {
+	cdb := setupTestDB(t)
+
+	id := insertSymbol(t, cdb, "r", "pkg/a", "PermSkip", "go", "type", "public")
+	insertSourceFile(t, cdb, "r", "a.go", "hash1")
+	insertClaim(t, cdb, id, "defines", "PermSkip", "a.go", "structural", "test", "1.0", 1.0)
+
+	// Create permanent tombstone manually (simulating 3 failures).
+	_, err := cdb.InsertClaim(db.Claim{
+		SubjectID:        id,
+		Predicate:        "enrichment_permanently_failed",
+		ObjectText:       "enrichment failed (attempt 3)",
+		SourceFile:       "a.go",
+		Confidence:       0,
+		ClaimTier:        "meta",
+		Extractor:        enrichExtractorName,
+		ExtractorVersion: enrichExtractorVersion + "@hash1",
+		LastVerified:     db.Now(),
+	})
+	if err != nil {
+		t.Fatalf("insert permanent tombstone: %v", err)
+	}
+
+	// Run with same hash: should skip (cache hit).
+	router := &mockRouter{results: map[string]string{}}
+	enricher, _ := NewEnricher(cdb, router)
+	summary, err := enricher.Run(context.Background(), EnrichOpts{})
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if summary.SymbolsSkipped != 1 {
+		t.Errorf("expected 1 skipped (permanent tombstone), got %d", summary.SymbolsSkipped)
+	}
+	if summary.CallsMade != 0 {
+		t.Errorf("expected 0 calls (skipped), got %d", summary.CallsMade)
+	}
+
+	// Change the source hash.
+	insertSourceFile(t, cdb, "r", "a.go", "hash2")
+
+	// Run again: should retry now (hash changed).
+	router2 := &mockRouter{results: map[string]string{
+		"purpose:PermSkip":       "PermSkip purpose after fix",
+		"usage_pattern:PermSkip": "PermSkip usage",
+		"complexity:PermSkip":    "PermSkip complexity",
+		"stability:PermSkip":     "PermSkip stability",
+	}}
+	enricher2, _ := NewEnricher(cdb, router2)
+	summary2, err := enricher2.Run(context.Background(), EnrichOpts{})
+	if err != nil {
+		t.Fatalf("run after hash change: %v", err)
+	}
+	if summary2.SymbolsEnriched != 1 {
+		t.Errorf("expected 1 enriched after hash change, got %d", summary2.SymbolsEnriched)
+	}
+}
+
+func TestBatchSizeCap(t *testing.T) {
+	cdb := setupTestDB(t)
+
+	// Insert 60 symbols (exceeds maxBatchSize of 50).
+	for i := 0; i < 60; i++ {
+		name := fmt.Sprintf("BatchSym%03d", i)
+		id := insertSymbol(t, cdb, "r", "pkg/a", name, "go", "type", "public")
+		fname := fmt.Sprintf("batch%d.go", i)
+		insertSourceFile(t, cdb, "r", fname, fmt.Sprintf("hash%d", i))
+		insertClaim(t, cdb, id, "defines", name, fname, "structural", "test", "1.0", 1.0)
+	}
+
+	router := &mockRouter{results: map[string]string{}}
+	enricher, _ := NewEnricher(cdb, router)
+
+	// No budget/max-symbols limit, batch cap should kick in.
+	summary, err := enricher.Run(context.Background(), EnrichOpts{})
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+
+	// At most 50 symbols should be enriched (batch cap).
+	if summary.SymbolsEnriched > 50 {
+		t.Errorf("expected at most 50 enriched (batch cap), got %d", summary.SymbolsEnriched)
+	}
+	// Verify calls are bounded: 50 symbols * 4 predicates = 200 max.
+	if summary.CallsMade > 200 {
+		t.Errorf("expected at most 200 calls (50*4), got %d", summary.CallsMade)
+	}
+}
+
+func TestDefaultPredicates(t *testing.T) {
+	preds := DefaultPredicates()
+	if len(preds) != 4 {
+		t.Errorf("expected 4 default predicates, got %d", len(preds))
+	}
+}
+
 func TestEnrichmentSummary_ElapsedTime(t *testing.T) {
 	cdb := setupTestDB(t)
 	router := &mockRouter{results: map[string]string{}}

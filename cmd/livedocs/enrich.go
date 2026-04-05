@@ -15,6 +15,10 @@ import (
 	"github.com/live-docs/live_docs/sourcegraph"
 )
 
+// estimatedCostPerCall is the assumed cost per Sourcegraph router call
+// for cold-cache cost estimation in --initial mode.
+const estimatedCostPerCall = 0.003
+
 var (
 	enrichDataDir         string
 	enrichBudget          int
@@ -23,6 +27,8 @@ var (
 	enrichForce           bool
 	enrichDryRun          bool
 	enrichVerify          bool
+	enrichInitial         bool
+	enrichConfirm         bool
 )
 
 var enrichCmd = &cobra.Command{
@@ -38,7 +44,11 @@ Requires SRC_ACCESS_TOKEN environment variable. Without it the command
 prints an informational message and exits successfully.
 
 Use --dry-run to preview which symbols would be enriched and the estimated
-number of router calls without contacting Sourcegraph.`,
+number of router calls without contacting Sourcegraph.
+
+Use --initial for full-corpus enrichment (sets budget and max-symbols to
+unlimited). Requires --confirm to proceed; without it, prints a cost
+estimate and exits.`,
 	RunE: runEnrich,
 }
 
@@ -50,14 +60,23 @@ func init() {
 	enrichCmd.Flags().BoolVar(&enrichForce, "force", false, "re-enrich all symbols, ignoring content-hash cache")
 	enrichCmd.Flags().BoolVar(&enrichDryRun, "dry-run", false, "list symbols and estimated cost without calling Sourcegraph")
 	enrichCmd.Flags().BoolVar(&enrichVerify, "verify", false, "verify enriched claims after completion")
+	enrichCmd.Flags().BoolVar(&enrichInitial, "initial", false, "full-corpus enrichment (unlimited budget and max-symbols)")
+	enrichCmd.Flags().BoolVar(&enrichConfirm, "confirm", false, "confirm cold-cache enrichment (required with --initial)")
 	_ = enrichCmd.MarkFlagRequired("data-dir")
 }
 
 func runEnrich(cmd *cobra.Command, args []string) error {
 	out := cmd.OutOrStdout()
 
-	// Check for SRC_ACCESS_TOKEN unless dry-run.
-	if !enrichDryRun && os.Getenv("SRC_ACCESS_TOKEN") == "" {
+	// --initial overrides budget and max-symbols to unlimited.
+	if enrichInitial {
+		enrichBudget = 0
+		enrichMaxSymbols = 0
+	}
+
+	// Check for SRC_ACCESS_TOKEN unless dry-run or initial-without-confirm.
+	needsToken := !enrichDryRun && !(enrichInitial && !enrichConfirm)
+	if needsToken && os.Getenv("SRC_ACCESS_TOKEN") == "" {
 		fmt.Fprintln(out, "SRC_ACCESS_TOKEN is not set. Set it to a Sourcegraph access token to enable enrichment.")
 		return nil
 	}
@@ -71,6 +90,11 @@ func runEnrich(cmd *cobra.Command, args []string) error {
 	if len(matches) == 0 {
 		fmt.Fprintf(out, "No .claims.db files found in %s\n", enrichDataDir)
 		return nil
+	}
+
+	// --initial without --confirm: print cost estimate and exit.
+	if enrichInitial && !enrichConfirm {
+		return runInitialCostEstimate(cmd, matches)
 	}
 
 	// For non-dry-run, create the Sourcegraph client once.
@@ -152,6 +176,51 @@ func runEnrich(cmd *cobra.Command, args []string) error {
 		fmt.Fprintf(out, "  Calls made:       %d\n", totalSummary.CallsMade)
 	}
 	fmt.Fprintf(out, "  Elapsed time:     %s\n", totalSummary.ElapsedTime.Round(time.Millisecond))
+
+	return nil
+}
+
+// runInitialCostEstimate counts symbols across all DBs and prints
+// a cost/time estimate for --initial mode, then exits without enriching.
+func runInitialCostEstimate(cmd *cobra.Command, matches []string) error {
+	out := cmd.OutOrStdout()
+	totalSymbols := 0
+
+	for _, match := range matches {
+		base := filepath.Base(match)
+		cdb, err := db.OpenClaimsDB(match)
+		if err != nil {
+			fmt.Fprintf(out, "warning: open %s: %v (skipping)\n", base, err)
+			continue
+		}
+
+		enricher, err := sourcegraph.NewEnricher(cdb, &dryRunRouter{})
+		if err != nil {
+			cdb.Close()
+			continue
+		}
+
+		symbols, err := enricher.SelectSymbols(enrichIncludeInternal, 0)
+		cdb.Close()
+		if err != nil {
+			continue
+		}
+		totalSymbols += len(symbols)
+	}
+
+	estimatedCalls := totalSymbols * len(sourcegraph.DefaultPredicates())
+	estimatedCost := float64(estimatedCalls) * estimatedCostPerCall
+	estimatedMinutes := float64(estimatedCalls) * 2.0 / 60.0 // ~2s per call
+
+	fmt.Fprintln(out, "")
+	fmt.Fprintln(out, "Initial Enrichment Cost Estimate")
+	fmt.Fprintln(out, "================================")
+	fmt.Fprintf(out, "  Total symbols:     %d\n", totalSymbols)
+	fmt.Fprintf(out, "  Estimated calls:   %d\n", estimatedCalls)
+	fmt.Fprintf(out, "  Estimated cost:    $%.2f\n", estimatedCost)
+	fmt.Fprintf(out, "  Estimated time:    %.0f minutes\n", estimatedMinutes)
+	fmt.Fprintln(out, "")
+	fmt.Fprintln(out, "Run with --confirm to proceed with enrichment.")
 
 	return nil
 }
