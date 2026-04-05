@@ -39,6 +39,10 @@ type PackageData struct {
 
 	// TestFiles lists test file names.
 	TestFiles []string
+
+	// SemanticEnrichmentDate holds the most recent LastVerified timestamp
+	// from semantic-tier claims for this package. Empty if no semantic claims exist.
+	SemanticEnrichmentDate string
 }
 
 // InterfaceInfo describes an exported interface.

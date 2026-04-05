@@ -3,6 +3,7 @@ package renderer
 import (
 	"fmt"
 	"strings"
+	"time"
 )
 
 // RenderMarkdown produces Tier 1 Markdown documentation from a PackageData.
@@ -20,6 +21,7 @@ func RenderMarkdown(pd *PackageData) string {
 	renderFunctionCategories(&b, pd)
 	renderTypeCategories(&b, pd)
 	renderTestCoverage(&b, pd)
+	renderSemanticEnrichment(&b, pd)
 
 	return b.String()
 }
@@ -156,4 +158,22 @@ func renderTestCoverage(b *strings.Builder, pd *PackageData) {
 		names[i] = f
 	}
 	fmt.Fprintf(b, "%d test files: %s\n", len(names), strings.Join(names, ", "))
+}
+
+func renderSemanticEnrichment(b *strings.Builder, pd *PackageData) {
+	if pd.SemanticEnrichmentDate == "" {
+		return
+	}
+
+	b.WriteString("\n---\n\n")
+	b.WriteString("## Semantic Enrichment\n\n")
+
+	// Format the timestamp for display. Fall back to raw string if parsing fails.
+	display := pd.SemanticEnrichmentDate
+	if t, err := time.Parse(time.RFC3339, pd.SemanticEnrichmentDate); err == nil {
+		display = t.Format("2006-01-02 15:04 UTC")
+	}
+	fmt.Fprintf(b, "> *Last enriched: %s*\n", display)
+	fmt.Fprintf(b, ">\n")
+	fmt.Fprintf(b, "> Semantic claims below are AI-generated snapshots and may be stale.\n")
 }
