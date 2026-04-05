@@ -746,6 +746,119 @@ func (m *mockFileSource) DiffBetween(_ context.Context, _, _, _ string) ([]gitdi
 	return m.diff, nil
 }
 
+func TestRun_StalenessWarning_DifferentCommitsZeroChanges(t *testing.T) {
+	// When fromCommit != toCommit but diff returns zero changes,
+	// StalenessWarning should be true.
+	cacheStore, claimsDB := openTestDBs(t)
+
+	reg := extractor.NewRegistry()
+	reg.Register(extractor.LanguageConfig{
+		Language:      "go",
+		Extensions:    []string{".go"},
+		FastExtractor: &stubExtractor{name: "test-ext", version: "0.1.0"},
+	})
+
+	fs := &mockFileSource{
+		files: map[string][]byte{},
+		diff:  []gitdiff.FileChange{}, // empty diff
+	}
+
+	p := New(Config{
+		Repo:       "test/repo",
+		RepoDir:    "/nonexistent",
+		Cache:      cacheStore,
+		ClaimsDB:   claimsDB,
+		Registry:   reg,
+		FileSource: fs,
+	})
+
+	result, err := p.Run(context.Background(), "aaa111", "bbb222")
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	if !result.StalenessWarning {
+		t.Error("expected StalenessWarning=true when commits differ but diff is empty")
+	}
+}
+
+func TestRun_NoStalenessWarning_SameCommits(t *testing.T) {
+	// When fromCommit == toCommit and diff returns zero changes,
+	// StalenessWarning should be false (this is normal).
+	cacheStore, claimsDB := openTestDBs(t)
+
+	reg := extractor.NewRegistry()
+	reg.Register(extractor.LanguageConfig{
+		Language:      "go",
+		Extensions:    []string{".go"},
+		FastExtractor: &stubExtractor{name: "test-ext", version: "0.1.0"},
+	})
+
+	fs := &mockFileSource{
+		files: map[string][]byte{},
+		diff:  []gitdiff.FileChange{},
+	}
+
+	p := New(Config{
+		Repo:       "test/repo",
+		RepoDir:    "/nonexistent",
+		Cache:      cacheStore,
+		ClaimsDB:   claimsDB,
+		Registry:   reg,
+		FileSource: fs,
+	})
+
+	result, err := p.Run(context.Background(), "same-sha", "same-sha")
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	if result.StalenessWarning {
+		t.Error("expected StalenessWarning=false when commits are the same")
+	}
+}
+
+func TestRun_NoStalenessWarning_DifferentCommitsWithChanges(t *testing.T) {
+	// When fromCommit != toCommit and diff returns actual changes,
+	// StalenessWarning should be false (this is the normal case).
+	cacheStore, claimsDB := openTestDBs(t)
+
+	stub := &stubExtractor{name: "test-ext", version: "0.1.0"}
+	reg := extractor.NewRegistry()
+	reg.Register(extractor.LanguageConfig{
+		Language:      "go",
+		Extensions:    []string{".go"},
+		FastExtractor: stub,
+	})
+
+	fs := &mockFileSource{
+		files: map[string][]byte{
+			"hello.go": []byte("package hello"),
+		},
+		diff: []gitdiff.FileChange{
+			{Status: gitdiff.StatusAdded, Path: "hello.go"},
+		},
+	}
+
+	p := New(Config{
+		Repo:       "test/repo",
+		RepoDir:    "/nonexistent",
+		Cache:      cacheStore,
+		ClaimsDB:   claimsDB,
+		Registry:   reg,
+		FileSource: fs,
+	})
+
+	result, err := p.Run(context.Background(), "aaa111", "bbb222")
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	if result.StalenessWarning {
+		t.Error("expected StalenessWarning=false when diff has changes")
+	}
+}
+
 func TestRun_WithFileSource(t *testing.T) {
 	// Verify that the pipeline produces claims via a mock FileSource
 	// without touching the local filesystem.

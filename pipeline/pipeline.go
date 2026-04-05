@@ -8,6 +8,7 @@ import (
 	"crypto/sha256"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -45,15 +46,16 @@ type Pipeline struct {
 
 // Result summarises a single pipeline run.
 type Result struct {
-	FilesChanged   int           // total non-deleted files in the diff
-	FilesExtracted int           // files that were actually extracted (cache misses)
-	FilesDeleted   int           // files tombstoned
-	FilesSkipped   int           // files with no registered extractor
-	CacheHits      int           // files skipped due to cache hit
-	ClaimsStored   int           // total claims inserted
-	ChangedPaths   []string      // relative paths of all non-deleted changed files
-	Duration       time.Duration // wall-clock time
-	Errors         []FileError   // non-fatal per-file errors
+	FilesChanged     int           // total non-deleted files in the diff
+	FilesExtracted   int           // files that were actually extracted (cache misses)
+	FilesDeleted     int           // files tombstoned
+	FilesSkipped     int           // files with no registered extractor
+	CacheHits        int           // files skipped due to cache hit
+	ClaimsStored     int           // total claims inserted
+	ChangedPaths     []string      // relative paths of all non-deleted changed files
+	Duration         time.Duration // wall-clock time
+	Errors           []FileError   // non-fatal per-file errors
+	StalenessWarning bool          // true when HEAD changed but diff returned zero files
 }
 
 // FileError records a non-fatal error for a single file.
@@ -92,6 +94,13 @@ func (p *Pipeline) Run(ctx context.Context, fromCommit, toCommit string) (Result
 	}
 	if err != nil {
 		return result, fmt.Errorf("pipeline: diff: %w", err)
+	}
+
+	// Staleness check: if revisions differ but diff returned nothing,
+	// the compare may have returned incomplete data.
+	if len(changes) == 0 && fromCommit != toCommit && fromCommit != "" && toCommit != "" {
+		log.Printf("WARNING: repo %s HEAD changed (%s..%s) but diff returned zero files — possible incomplete compare data", p.repo, fromCommit, toCommit)
+		result.StalenessWarning = true
 	}
 
 	// 2. Handle deleted files.
