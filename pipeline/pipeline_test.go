@@ -720,3 +720,133 @@ func TestRun_FileReadError(t *testing.T) {
 		t.Errorf("expected 1 error, got %d: %+v", len(result.Errors), result.Errors)
 	}
 }
+
+// mockFileSource implements FileSource for testing remote extraction.
+type mockFileSource struct {
+	files map[string][]byte    // relPath -> content
+	diff  []gitdiff.FileChange // canned diff result
+}
+
+func (m *mockFileSource) ReadFile(_ context.Context, _, _, path string) ([]byte, error) {
+	if content, ok := m.files[path]; ok {
+		return content, nil
+	}
+	return nil, fmt.Errorf("file not found: %s", path)
+}
+
+func (m *mockFileSource) ListFiles(_ context.Context, _, _, _ string) ([]string, error) {
+	var paths []string
+	for p := range m.files {
+		paths = append(paths, p)
+	}
+	return paths, nil
+}
+
+func (m *mockFileSource) DiffBetween(_ context.Context, _, _, _ string) ([]gitdiff.FileChange, error) {
+	return m.diff, nil
+}
+
+func TestRun_WithFileSource(t *testing.T) {
+	// Verify that the pipeline produces claims via a mock FileSource
+	// without touching the local filesystem.
+	cacheStore, claimsDB := openTestDBs(t)
+
+	stub := &stubExtractor{name: "test-ext", version: "0.1.0"}
+	reg := extractor.NewRegistry()
+	reg.Register(extractor.LanguageConfig{
+		Language:      "go",
+		Extensions:    []string{".go"},
+		FastExtractor: stub,
+	})
+
+	fs := &mockFileSource{
+		files: map[string][]byte{
+			"hello.go": []byte("package hello"),
+		},
+		diff: []gitdiff.FileChange{
+			{Status: gitdiff.StatusAdded, Path: "hello.go"},
+		},
+	}
+
+	p := New(Config{
+		Repo:       "test/repo",
+		RepoDir:    "/nonexistent", // proves we don't touch local FS
+		Cache:      cacheStore,
+		ClaimsDB:   claimsDB,
+		Registry:   reg,
+		FileSource: fs,
+	})
+
+	result, err := p.Run(context.Background(), "aaa", "bbb")
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	if result.FilesChanged != 1 {
+		t.Errorf("FilesChanged: got %d, want 1", result.FilesChanged)
+	}
+	if result.FilesExtracted != 1 {
+		t.Errorf("FilesExtracted: got %d, want 1", result.FilesExtracted)
+	}
+	if result.ClaimsStored < 1 {
+		t.Errorf("ClaimsStored: got %d, want >= 1", result.ClaimsStored)
+	}
+}
+
+// requiresLocalFSExtractor is a stub that returns ErrRequiresLocalFS from ExtractBytes.
+type requiresLocalFSExtractor struct {
+	stubExtractor
+}
+
+func (r *requiresLocalFSExtractor) ExtractBytes(_ context.Context, _ []byte, _ string, _ string) ([]extractor.Claim, error) {
+	return nil, extractor.ErrRequiresLocalFS
+}
+
+func TestRun_FileSource_ErrRequiresLocalFS(t *testing.T) {
+	// When an extractor returns ErrRequiresLocalFS via FileSource path,
+	// the file should be skipped (not an error).
+	cacheStore, claimsDB := openTestDBs(t)
+
+	stub := &requiresLocalFSExtractor{
+		stubExtractor: stubExtractor{name: "test-ext", version: "0.1.0"},
+	}
+	reg := extractor.NewRegistry()
+	reg.Register(extractor.LanguageConfig{
+		Language:      "go",
+		Extensions:    []string{".go"},
+		FastExtractor: stub,
+	})
+
+	fs := &mockFileSource{
+		files: map[string][]byte{
+			"main.go": []byte("package main"),
+		},
+		diff: []gitdiff.FileChange{
+			{Status: gitdiff.StatusAdded, Path: "main.go"},
+		},
+	}
+
+	p := New(Config{
+		Repo:       "test/repo",
+		RepoDir:    "/nonexistent",
+		Cache:      cacheStore,
+		ClaimsDB:   claimsDB,
+		Registry:   reg,
+		FileSource: fs,
+	})
+
+	result, err := p.Run(context.Background(), "aaa", "bbb")
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	if result.FilesSkipped != 1 {
+		t.Errorf("FilesSkipped: got %d, want 1", result.FilesSkipped)
+	}
+	if result.FilesExtracted != 0 {
+		t.Errorf("FilesExtracted: got %d, want 0", result.FilesExtracted)
+	}
+	if len(result.Errors) != 0 {
+		t.Errorf("expected 0 errors, got %d: %+v", len(result.Errors), result.Errors)
+	}
+}
