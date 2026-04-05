@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
@@ -21,6 +22,7 @@ import (
 )
 
 var (
+	extractSource string
 	extractRepo   string
 	extractOutput string
 	extractTier2  bool
@@ -36,7 +38,7 @@ var newLLMClient = func(apiKey string) (semantic.LLMClient, error) {
 const confidenceThreshold = 0.7
 
 var extractCmd = &cobra.Command{
-	Use:   "extract <path>",
+	Use:   "extract [path]",
 	Short: "Extract claims from a repository into a SQLite database",
 	Long: `Walks all source files in the given repository path and extracts
 structural claims using language-specific extractors:
@@ -46,25 +48,87 @@ structural claims using language-specific extractors:
   - Python files (.py): tree-sitter extractor
   - Shell files (.sh): tree-sitter extractor
 
-Creates a per-repo SQLite database containing symbols and claims.`,
-	Args: cobra.ExactArgs(1),
+Creates a per-repo SQLite database containing symbols and claims.
+
+Use --source clone --repo <url> to shallow-clone a remote repository
+before extraction. The clone is cleaned up after extraction completes.`,
+	Args: cobra.MaximumNArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
-		repoPath := args[0]
-		absRepo, err := filepath.Abs(repoPath)
-		if err != nil {
-			return fmt.Errorf("resolve repo path: %w", err)
+		switch extractSource {
+		case "", "local":
+			return runExtractLocal(cmd, args)
+		case "clone":
+			return runExtractClone(cmd)
+		case "sourcegraph":
+			return fmt.Errorf("--source sourcegraph is not yet implemented")
+		default:
+			return fmt.Errorf("unknown --source value: %q (valid: local, clone, sourcegraph)", extractSource)
 		}
-
-		if extractRepo == "" {
-			extractRepo = filepath.Base(absRepo)
-		}
-
-		return runExtract(cmd.Context(), cmd, absRepo, extractRepo, extractOutput)
 	},
 }
 
+func runExtractLocal(cmd *cobra.Command, args []string) error {
+	if len(args) < 1 {
+		return fmt.Errorf("local extraction requires a path argument")
+	}
+	repoPath := args[0]
+	absRepo, err := filepath.Abs(repoPath)
+	if err != nil {
+		return fmt.Errorf("resolve repo path: %w", err)
+	}
+
+	repoName := extractRepo
+	if repoName == "" {
+		repoName = filepath.Base(absRepo)
+	}
+
+	return runExtract(cmd.Context(), cmd, absRepo, repoName, extractOutput)
+}
+
+func runExtractClone(cmd *cobra.Command) error {
+	if extractRepo == "" {
+		return fmt.Errorf("--repo is required when --source clone is used")
+	}
+
+	repoURL := extractRepo
+	repoName := repoNameFromURL(repoURL)
+
+	tmpDir, err := os.MkdirTemp("", "livedocs-clone-*")
+	if err != nil {
+		return fmt.Errorf("create temp directory: %w", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	fmt.Fprintf(cmd.OutOrStdout(), "Cloning %s (depth=1) into temp directory...\n", repoURL)
+
+	gitCmd := exec.CommandContext(cmd.Context(), "git", "clone", "--depth=1", repoURL, tmpDir)
+	gitCmd.Stdout = cmd.OutOrStdout()
+	gitCmd.Stderr = cmd.ErrOrStderr()
+	if err := gitCmd.Run(); err != nil {
+		return fmt.Errorf("git clone --depth=1 %s: %w", repoURL, err)
+	}
+
+	return runExtract(cmd.Context(), cmd, tmpDir, repoName, extractOutput)
+}
+
+// repoNameFromURL extracts a repository name from a URL.
+// e.g. "https://github.com/org/repo.git" -> "repo"
+func repoNameFromURL(rawURL string) string {
+	// Strip trailing slashes and .git suffix.
+	name := strings.TrimRight(rawURL, "/")
+	if idx := strings.LastIndex(name, "/"); idx >= 0 {
+		name = name[idx+1:]
+	}
+	name = strings.TrimSuffix(name, ".git")
+	if name == "" {
+		return "unknown"
+	}
+	return name
+}
+
 func init() {
-	extractCmd.Flags().StringVar(&extractRepo, "repo", "", "repository name (default: directory basename)")
+	extractCmd.Flags().StringVar(&extractSource, "source", "", "extraction source: local (default), clone, sourcegraph")
+	extractCmd.Flags().StringVar(&extractRepo, "repo", "", "repository name or URL (URL when --source clone)")
 	extractCmd.Flags().StringVarP(&extractOutput, "output", "o", "", "output SQLite file path (default: <repo>.claims.db)")
 	extractCmd.Flags().BoolVar(&extractTier2, "tier2", false, "generate Tier 2 semantic claims via LLM (requires ANTHROPIC_API_KEY)")
 }
