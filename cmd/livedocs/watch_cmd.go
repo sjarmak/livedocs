@@ -17,17 +17,20 @@ import (
 	"github.com/live-docs/live_docs/extractor/defaults"
 	"github.com/live-docs/live_docs/extractor/goextractor"
 	"github.com/live-docs/live_docs/pipeline"
+	"github.com/live-docs/live_docs/sourcegraph"
 	"github.com/live-docs/live_docs/watch"
 )
 
 var (
-	watchInterval     time.Duration
-	watchDeepInterval time.Duration
-	watchRepo         string
-	watchOutput       string
-	watchStateFile    string
-	watchConfig       string
-	watchReposDir     string
+	watchInterval       time.Duration
+	watchDeepInterval   time.Duration
+	watchRepo           string
+	watchOutput         string
+	watchStateFile      string
+	watchConfig         string
+	watchReposDir       string
+	watchEnrich         bool
+	watchEnrichDebounce time.Duration
 )
 
 var watchCmd = &cobra.Command{
@@ -116,7 +119,7 @@ is no longer an ancestor of the current HEAD.`,
 			}
 		}
 
-		return runWatchMulti(cmd, entries, stateFile, watchInterval, watchDeepInterval)
+		return runWatchMulti(cmd, entries, stateFile, watchInterval, watchDeepInterval, watchEnrich, watchEnrichDebounce)
 	},
 }
 
@@ -128,11 +131,13 @@ func init() {
 	watchCmd.Flags().StringVar(&watchStateFile, "state-file", "", "state file path (default: .livedocs-watch-state.json next to output)")
 	watchCmd.Flags().StringVar(&watchConfig, "config", "", "JSON config file listing repos to watch")
 	watchCmd.Flags().StringVar(&watchReposDir, "repos-dir", "", "directory of git repos to watch")
+	watchCmd.Flags().BoolVar(&watchEnrich, "enrich", false, "enable semantic enrichment via Sourcegraph after each extraction")
+	watchCmd.Flags().DurationVar(&watchEnrichDebounce, "enrich-debounce", 5*time.Second, "debounce interval for enrichment queue (e.g. 5s, 10s)")
 }
 
 // runWatchMulti launches one watcher per repo entry, all sharing the same
 // state file and polling interval. Blocks until ctx is cancelled.
-func runWatchMulti(cmd *cobra.Command, entries []watch.RepoEntry, stateFile string, interval, deepInterval time.Duration) error {
+func runWatchMulti(cmd *cobra.Command, entries []watch.RepoEntry, stateFile string, interval, deepInterval time.Duration, enrich bool, enrichDebounce time.Duration) error {
 	out := cmd.OutOrStdout()
 
 	// Set up signal handling for clean shutdown.
@@ -169,6 +174,18 @@ func runWatchMulti(cmd *cobra.Command, entries []watch.RepoEntry, stateFile stri
 			r.claimsDB.Close()
 		}
 	}()
+
+	// Set up Sourcegraph enrichment client if --enrich is enabled.
+	var sgClient *sourcegraph.SourcegraphClient
+	if enrich {
+		var err error
+		sgClient, err = sourcegraph.NewSourcegraphClient()
+		if err != nil {
+			return fmt.Errorf("create sourcegraph client: %w", err)
+		}
+		defer sgClient.Close()
+		fmt.Fprintf(out, "watch: enrichment enabled (debounce=%s)\n", enrichDebounce)
+	}
 
 	var wg sync.WaitGroup
 	errCh := make(chan error, len(entries))
@@ -230,6 +247,26 @@ func runWatchMulti(cmd *cobra.Command, entries []watch.RepoEntry, stateFile stri
 			}
 		}
 
+		// Build enrichment callback if --enrich is enabled.
+		var onExtractFn watch.OnExtractFn
+		if enrich && sgClient != nil {
+			router := sourcegraph.NewDefaultRouter(sgClient)
+			enricher, enrichErr := sourcegraph.NewEnricher(claimsDB, router)
+			if enrichErr != nil {
+				return fmt.Errorf("create enricher for %s: %w", entry.Name, enrichErr)
+			}
+			queue := sourcegraph.NewEnrichmentQueue(sourcegraph.QueueConfig{
+				DebounceDuration: enrichDebounce,
+				Repo:             entry.Name,
+			}, enricher, claimsDB)
+			queue.Start(ctx)
+			onExtractFn = func(result pipeline.Result) {
+				if len(result.ChangedPaths) > 0 {
+					queue.Send(result.ChangedPaths)
+				}
+			}
+		}
+
 		w := watch.New(watch.Config{
 			RepoDir:      entry.Path,
 			RepoName:     entry.Name,
@@ -238,6 +275,7 @@ func runWatchMulti(cmd *cobra.Command, entries []watch.RepoEntry, stateFile stri
 			StateFile:    stateFile,
 			Pipeline:     p,
 			DeepExtract:  deepFn,
+			OnExtract:    onExtractFn,
 			Out:          out,
 			State:        sharedState,
 		})

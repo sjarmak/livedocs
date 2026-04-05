@@ -65,6 +65,11 @@ type DeepExtractFn func(ctx context.Context) error
 // If the repo has never been queried, it returns the zero time and false.
 type AccessTimeFunc func(repoName string) (time.Time, bool)
 
+// OnExtractFn is a callback invoked after each successful pipeline extraction.
+// It receives the pipeline result including ChangedPaths. Implementations must
+// not block — the watch poll cycle continues immediately after the call.
+type OnExtractFn func(result pipeline.Result)
+
 // Config holds the configuration for a Watcher.
 type Config struct {
 	RepoDir      string         // absolute path to the git repo root
@@ -74,6 +79,7 @@ type Config struct {
 	StateFile    string         // path to the state JSON file
 	Pipeline     PipelineRunner // pipeline to run on changes
 	DeepExtract  DeepExtractFn  // deep extraction callback (nil = disabled)
+	OnExtract    OnExtractFn    // callback after each extraction (nil = disabled)
 	Out          io.Writer      // output writer for log messages
 	Git          GitOps         // git operations (nil = use real git)
 	State        *State         // shared state (nil = load from StateFile)
@@ -95,6 +101,7 @@ type Watcher struct {
 	stateFile    string
 	pipeline     PipelineRunner
 	deepExtract  DeepExtractFn
+	onExtract    OnExtractFn
 	out          io.Writer
 	git          GitOps
 	state        *State // shared state, may be nil (loaded on Run)
@@ -124,6 +131,7 @@ func New(cfg Config) *Watcher {
 		stateFile:      cfg.StateFile,
 		pipeline:       cfg.Pipeline,
 		deepExtract:    cfg.DeepExtract,
+		onExtract:      cfg.OnExtract,
 		out:            cfg.Out,
 		git:            git,
 		state:          cfg.State,
@@ -262,6 +270,11 @@ func (w *Watcher) check(ctx context.Context, state *State, lastSHA *string) erro
 
 	fmt.Fprintf(w.out, "watch: extraction complete — %d files changed, %d extracted, %d claims, %s\n",
 		result.FilesChanged, result.FilesExtracted, result.ClaimsStored, result.Duration.Round(time.Millisecond))
+
+	// Notify the OnExtract callback if configured.
+	if w.onExtract != nil {
+		w.onExtract(result)
+	}
 
 	// Update state and persist.
 	*lastSHA = headSHA

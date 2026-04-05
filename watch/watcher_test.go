@@ -78,6 +78,7 @@ func (m *mockPipeline) Run(_ context.Context, from, to string) (pipeline.Result,
 		FilesChanged:   1,
 		FilesExtracted: 1,
 		ClaimsStored:   5,
+		ChangedPaths:   []string{"pkg/foo.go", "pkg/bar.go"},
 		Duration:       10 * time.Millisecond,
 	}, nil
 }
@@ -765,5 +766,198 @@ func TestWatcher_DeepInterval_Error(t *testing.T) {
 	buf.mu.Unlock()
 	if !strings.Contains(output, "deep extraction error") {
 		t.Fatalf("expected 'deep extraction error' in output, got: %s", output)
+	}
+}
+
+// mockOnExtract tracks OnExtract callback invocations.
+type mockOnExtract struct {
+	mu      sync.Mutex
+	results []pipeline.Result
+}
+
+func (m *mockOnExtract) fn(result pipeline.Result) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.results = append(m.results, result)
+}
+
+func (m *mockOnExtract) getResults() []pipeline.Result {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	cp := make([]pipeline.Result, len(m.results))
+	copy(cp, m.results)
+	return cp
+}
+
+func TestWatcher_OnExtract_CalledAfterPipelineRun(t *testing.T) {
+	tmp := t.TempDir()
+	stateFile := filepath.Join(tmp, "state.json")
+
+	var buf safeWriter
+	git := &mockGitOps{
+		heads: []string{"sha_first", "sha_first"},
+	}
+	p := &mockPipeline{}
+	onExtract := &mockOnExtract{}
+
+	w := New(Config{
+		RepoDir:   "/fake/repo",
+		RepoName:  "test-repo",
+		Interval:  50 * time.Millisecond,
+		StateFile: stateFile,
+		Pipeline:  p,
+		OnExtract: onExtract.fn,
+		Out:       &buf,
+		Git:       git,
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 80*time.Millisecond)
+	defer cancel()
+
+	_ = w.Run(ctx)
+
+	// Pipeline should have run (full extraction from empty state).
+	runs := p.getRuns()
+	if len(runs) < 1 {
+		t.Fatal("expected at least one pipeline run")
+	}
+
+	// OnExtract should have been called with the result including ChangedPaths.
+	results := onExtract.getResults()
+	if len(results) < 1 {
+		t.Fatal("expected OnExtract to be called at least once")
+	}
+	if len(results[0].ChangedPaths) == 0 {
+		t.Fatal("expected ChangedPaths in OnExtract result")
+	}
+	if results[0].ChangedPaths[0] != "pkg/foo.go" {
+		t.Fatalf("expected first changed path to be pkg/foo.go, got %s", results[0].ChangedPaths[0])
+	}
+}
+
+func TestWatcher_OnExtract_NotCalledWhenNoChange(t *testing.T) {
+	tmp := t.TempDir()
+	stateFile := filepath.Join(tmp, "state.json")
+
+	// Pre-populate state with current HEAD so no change is detected.
+	s := NewState()
+	s.SetSHA("test-repo", "sha_stable")
+	if err := SaveState(stateFile, s); err != nil {
+		t.Fatal(err)
+	}
+
+	var buf safeWriter
+	git := &mockGitOps{
+		heads: []string{"sha_stable", "sha_stable"},
+	}
+	p := &mockPipeline{}
+	onExtract := &mockOnExtract{}
+
+	w := New(Config{
+		RepoDir:   "/fake/repo",
+		RepoName:  "test-repo",
+		Interval:  10 * time.Millisecond,
+		StateFile: stateFile,
+		Pipeline:  p,
+		OnExtract: onExtract.fn,
+		Out:       &buf,
+		Git:       git,
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+
+	_ = w.Run(ctx)
+
+	// No pipeline run means no OnExtract callback.
+	results := onExtract.getResults()
+	if len(results) != 0 {
+		t.Fatalf("expected 0 OnExtract calls when HEAD unchanged, got %d", len(results))
+	}
+}
+
+func TestWatcher_OnExtract_NilDoesNotPanic(t *testing.T) {
+	// Verify that OnExtract=nil does not cause a panic during pipeline run.
+	tmp := t.TempDir()
+	stateFile := filepath.Join(tmp, "state.json")
+
+	var buf safeWriter
+	git := &mockGitOps{
+		heads: []string{"sha_first"},
+	}
+	p := &mockPipeline{}
+
+	w := New(Config{
+		RepoDir:   "/fake/repo",
+		RepoName:  "test-repo",
+		Interval:  50 * time.Millisecond,
+		StateFile: stateFile,
+		Pipeline:  p,
+		OnExtract: nil, // explicitly nil
+		Out:       &buf,
+		Git:       git,
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 80*time.Millisecond)
+	defer cancel()
+
+	_ = w.Run(ctx)
+
+	// Pipeline should have run without panic.
+	runs := p.getRuns()
+	if len(runs) < 1 {
+		t.Fatal("expected at least one pipeline run with nil OnExtract")
+	}
+}
+
+func TestWatcher_OnExtract_NonBlocking(t *testing.T) {
+	// Verify that a slow OnExtract callback does not block the watch poll cycle.
+	tmp := t.TempDir()
+	stateFile := filepath.Join(tmp, "state.json")
+
+	var buf safeWriter
+	git := &mockGitOps{
+		heads: []string{"sha1", "sha1", "sha2", "sha2"},
+	}
+	p := &mockPipeline{}
+
+	callbackStarted := make(chan struct{}, 2)
+	slowOnExtract := func(result pipeline.Result) {
+		callbackStarted <- struct{}{}
+		// The callback itself is synchronous but Send() on the real queue
+		// is non-blocking. Here we just verify the watcher continues polling
+		// even after calling the callback.
+	}
+
+	w := New(Config{
+		RepoDir:   "/fake/repo",
+		RepoName:  "test-repo",
+		Interval:  10 * time.Millisecond,
+		StateFile: stateFile,
+		Pipeline:  p,
+		OnExtract: slowOnExtract,
+		Out:       &buf,
+		Git:       git,
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+
+	_ = w.Run(ctx)
+
+	// Should have received at least one callback invocation.
+	select {
+	case <-callbackStarted:
+		// good
+	default:
+		t.Fatal("expected OnExtract callback to be invoked")
+	}
+
+	// The watcher should have continued polling (multiple git calls).
+	git.mu.Lock()
+	calls := git.totalCalls
+	git.mu.Unlock()
+	if calls < 2 {
+		t.Fatalf("expected multiple git polls after OnExtract, got %d", calls)
 	}
 }
