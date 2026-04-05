@@ -270,6 +270,12 @@ func testableClient(factory func(ctx context.Context) (*mockMCPClient, error)) *
 				continue
 			}
 
+			// Validate deepsearch responses have meaningful content.
+			if err := validateDeepSearchResponse(result); err != nil {
+				req.result <- callResult{err: err}
+				continue
+			}
+
 			text := extractText(result)
 
 			symbol := extractSymbol(req.user)
@@ -477,5 +483,94 @@ func TestContextCancellation(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "context cancelled") {
 		t.Fatalf("expected context cancelled error, got: %v", err)
+	}
+}
+
+func TestDefaultArgs_VersionPinned(t *testing.T) {
+	found := false
+	for _, arg := range defaultArgs {
+		if strings.Contains(arg, "@sourcegraph/mcp@0.3") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("defaultArgs should pin @sourcegraph/mcp to @0.3, got: %v", defaultArgs)
+	}
+}
+
+func TestValidateDeepSearchResponse_NilResult(t *testing.T) {
+	err := validateDeepSearchResponse(nil)
+	if err == nil {
+		t.Fatal("expected error for nil result")
+	}
+	if !strings.Contains(err.Error(), "nil result") {
+		t.Fatalf("expected 'nil result' in error, got: %v", err)
+	}
+}
+
+func TestValidateDeepSearchResponse_EmptyContent(t *testing.T) {
+	result := &mcp.CallToolResult{
+		Content: []mcp.Content{},
+	}
+	err := validateDeepSearchResponse(result)
+	if err == nil {
+		t.Fatal("expected error for empty content")
+	}
+	if !strings.Contains(err.Error(), "empty content") {
+		t.Fatalf("expected 'empty content' in error, got: %v", err)
+	}
+}
+
+func TestValidateDeepSearchResponse_WhitespaceOnly(t *testing.T) {
+	result := &mcp.CallToolResult{
+		Content: []mcp.Content{
+			mcp.NewTextContent("   "),
+			mcp.NewTextContent("\n\t"),
+		},
+	}
+	err := validateDeepSearchResponse(result)
+	if err == nil {
+		t.Fatal("expected error for whitespace-only content")
+	}
+	if !strings.Contains(err.Error(), "missing text content") {
+		t.Fatalf("expected 'missing text content' in error, got: %v", err)
+	}
+}
+
+func TestValidateDeepSearchResponse_ValidContent(t *testing.T) {
+	result := &mcp.CallToolResult{
+		Content: []mcp.Content{
+			mcp.NewTextContent("FooBar is a function that does X"),
+		},
+	}
+	err := validateDeepSearchResponse(result)
+	if err != nil {
+		t.Fatalf("expected no error for valid content, got: %v", err)
+	}
+}
+
+func TestMalformedResponse_Integration(t *testing.T) {
+	// Verify that a malformed deepsearch response (empty results) produces
+	// an error rather than silently returning empty claims.
+	c := testableClient(func(ctx context.Context) (*mockMCPClient, error) {
+		return &mockMCPClient{
+			callToolFunc: func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+				// Return a result with no content blocks (malformed).
+				return &mcp.CallToolResult{
+					Content: []mcp.Content{},
+				}, nil
+			},
+		}, nil
+	})
+	defer c.Close()
+
+	ctx := context.Background()
+	_, err := c.Complete(ctx, "system", "What does `FooBar` do?")
+	if err == nil {
+		t.Fatal("expected error for malformed deepsearch response with empty content")
+	}
+	if !strings.Contains(err.Error(), "empty content") {
+		t.Fatalf("expected error about empty content, got: %v", err)
 	}
 }

@@ -67,6 +67,13 @@ var initCmd = &cobra.Command{
 			fmt.Fprintf(out, "  Errors:     %d (non-fatal)\n", len(result.Errors))
 		}
 
+		// Print enrichment guidance when SRC_ACCESS_TOKEN is not set.
+		if os.Getenv("SRC_ACCESS_TOKEN") == "" {
+			fmt.Fprintln(out)
+			fmt.Fprintln(out, "To add semantic context:")
+			fmt.Fprintf(out, "  export SRC_ACCESS_TOKEN=<your-token> && livedocs enrich --data-dir .livedocs/ --initial\n")
+		}
+
 		// Install post-commit hook if requested.
 		if initHook {
 			installed, err := initcmd.InstallPostCommitHook(absPath)

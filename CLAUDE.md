@@ -23,10 +23,6 @@ go test -race ./...     # Run with race detector
 make build              # Build livedocs binary (CGO required for tree-sitter)
 ```
 
-## Ownership
-
-When working in this codebase, always fix issues you discover — broken tests, build errors, stale references, security problems — regardless of whether they relate to the current task. The codebase is the responsibility, not just the ticket.
-
 ## Conventions
 
 - Go module: `github.com/live-docs/live_docs`

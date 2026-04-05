@@ -24,7 +24,7 @@ const LowConfidenceSentinel = "[LOW_CONFIDENCE] Deepsearch response did not refe
 const defaultCommand = "npx"
 
 // defaultArgs are the default arguments for the MCP server command.
-var defaultArgs = []string{"-y", "@sourcegraph/mcp"}
+var defaultArgs = []string{"-y", "@sourcegraph/mcp@0.3"}
 
 // callRequest is an internal message sent from Complete() or CallTool() to the
 // worker goroutine. When toolName is non-empty, the request is dispatched as a
@@ -312,7 +312,40 @@ func (c *SourcegraphClient) handleToolCall(
 		return "", fmt.Errorf("sourcegraph: %s returned error: %s", toolName, text)
 	}
 
+	// Validate deepsearch responses have meaningful content.
+	if toolName == "deepsearch" {
+		if err := validateDeepSearchResponse(result); err != nil {
+			return "", err
+		}
+	}
+
 	return extractText(result), nil
+}
+
+// validateDeepSearchResponse checks that a deepsearch CallToolResult contains
+// meaningful content. It rejects nil results, results with no content blocks,
+// and results where all text content is empty or whitespace-only.
+func validateDeepSearchResponse(result *mcp.CallToolResult) error {
+	if result == nil {
+		return fmt.Errorf("sourcegraph: deepsearch returned nil result")
+	}
+	if len(result.Content) == 0 {
+		return fmt.Errorf("sourcegraph: deepsearch returned empty content (no content blocks)")
+	}
+	// Check that at least one text content block has non-empty text.
+	hasText := false
+	for _, c := range result.Content {
+		if tc, ok := mcp.AsTextContent(c); ok {
+			if strings.TrimSpace(tc.Text) != "" {
+				hasText = true
+				break
+			}
+		}
+	}
+	if !hasText {
+		return fmt.Errorf("sourcegraph: deepsearch response missing text content (all content blocks empty)")
+	}
+	return nil
 }
 
 // extractText concatenates all text content blocks from a CallToolResult.
