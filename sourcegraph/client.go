@@ -26,11 +26,18 @@ const defaultCommand = "npx"
 // defaultArgs are the default arguments for the MCP server command.
 var defaultArgs = []string{"-y", "@sourcegraph/mcp"}
 
-// callRequest is an internal message sent from Complete() to the worker goroutine.
+// callRequest is an internal message sent from Complete() or CallTool() to the
+// worker goroutine. When toolName is non-empty, the request is dispatched as a
+// raw MCP tool call; otherwise it uses the legacy deepsearch path via system/user.
 type callRequest struct {
 	ctx    context.Context
 	system string
 	user   string
+
+	// toolName and toolArgs are set for CallTool requests.
+	toolName string
+	toolArgs map[string]any
+
 	result chan<- callResult
 }
 
@@ -179,7 +186,13 @@ func (c *SourcegraphClient) run() {
 	}()
 
 	for req := range c.reqCh {
-		text, err := c.handleRequest(req.ctx, &mcpClient, req.system, req.user)
+		var text string
+		var err error
+		if req.toolName != "" {
+			text, err = c.handleToolCall(req.ctx, &mcpClient, req.toolName, req.toolArgs)
+		} else {
+			text, err = c.handleRequest(req.ctx, &mcpClient, req.system, req.user)
+		}
 		req.result <- callResult{text: text, err: err}
 	}
 }
@@ -277,6 +290,76 @@ func (c *SourcegraphClient) spawnMCP(ctx context.Context) (client.MCPClient, err
 	}
 
 	return mcpCli, nil
+}
+
+// CallTool implements MCPCaller by dispatching an arbitrary tool call through
+// the MCP subprocess. This enables the DefaultRouter to call any Sourcegraph
+// tool (deepsearch, find_references, commit_search, etc.) via a single client.
+func (c *SourcegraphClient) CallTool(ctx context.Context, toolName string, args map[string]any) (string, error) {
+	if c.accessToken == "" {
+		return "", fmt.Errorf("sourcegraph: SRC_ACCESS_TOKEN is not set; tool calls are unavailable")
+	}
+
+	c.ensureStarted()
+
+	resultCh := make(chan callResult, 1)
+	req := &callRequest{
+		ctx:      ctx,
+		toolName: toolName,
+		toolArgs: args,
+		result:   resultCh,
+	}
+
+	select {
+	case c.reqCh <- req:
+	case <-ctx.Done():
+		return "", fmt.Errorf("sourcegraph: context cancelled before send: %w", ctx.Err())
+	}
+
+	select {
+	case res := <-resultCh:
+		return res.text, res.err
+	case <-ctx.Done():
+		return "", fmt.Errorf("sourcegraph: context cancelled waiting for result: %w", ctx.Err())
+	}
+}
+
+// handleToolCall processes a raw MCP tool call request. It shares the same
+// subprocess lifecycle as handleRequest (spawn on nil, tear down on failure).
+func (c *SourcegraphClient) handleToolCall(
+	ctx context.Context,
+	mcpClient *client.MCPClient,
+	toolName string,
+	toolArgs map[string]any,
+) (string, error) {
+	if *mcpClient == nil {
+		spawned, err := c.spawnMCP(ctx)
+		if err != nil {
+			return "", fmt.Errorf("sourcegraph: failed to spawn MCP server: %w", err)
+		}
+		*mcpClient = spawned
+	}
+
+	toolReq := mcp.CallToolRequest{
+		Params: mcp.CallToolParams{
+			Name:      toolName,
+			Arguments: toolArgs,
+		},
+	}
+
+	result, err := (*mcpClient).CallTool(ctx, toolReq)
+	if err != nil {
+		c.closeMCPClient(mcpClient)
+		return "", fmt.Errorf("sourcegraph: %s call failed: %w", toolName, err)
+	}
+
+	if result.IsError {
+		text := extractText(result)
+		c.closeMCPClient(mcpClient)
+		return "", fmt.Errorf("sourcegraph: %s returned error: %s", toolName, text)
+	}
+
+	return extractText(result), nil
 }
 
 // extractText concatenates all text content blocks from a CallToolResult.

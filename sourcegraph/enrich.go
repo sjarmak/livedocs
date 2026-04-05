@@ -53,6 +53,10 @@ type EnrichOpts struct {
 	Force bool
 	// Budget is the maximum number of router calls. Zero means unlimited.
 	Budget int
+	// MaxSymbols caps how many symbols are selected for enrichment. Zero means unlimited.
+	MaxSymbols int
+	// DryRun skips router calls and returns only the symbol list and estimated cost.
+	DryRun bool
 	// Predicates restricts which semantic predicates to enrich.
 	// Empty means all default predicates.
 	Predicates []extractor.Predicate
@@ -103,7 +107,19 @@ func (e *Enricher) Run(ctx context.Context, opts EnrichOpts) (EnrichmentSummary,
 	// 2. Rank by reverse-dep fan-in.
 	symbols = e.rankByReverseDeps(symbols)
 
-	// 3. Enrich each symbol.
+	// 3. Apply MaxSymbols cap.
+	if opts.MaxSymbols > 0 && len(symbols) > opts.MaxSymbols {
+		symbols = symbols[:opts.MaxSymbols]
+	}
+
+	// 4. Dry-run: return symbol count and estimated cost without calling router.
+	if opts.DryRun {
+		summary.SymbolsSkipped = len(symbols)
+		summary.ElapsedTime = time.Since(start)
+		return summary, nil
+	}
+
+	// 5. Enrich each symbol.
 	for _, sym := range symbols {
 		select {
 		case <-ctx.Done():
@@ -177,6 +193,21 @@ func (e *Enricher) Run(ctx context.Context, opts EnrichOpts) (EnrichmentSummary,
 
 	summary.ElapsedTime = time.Since(start)
 	return summary, nil
+}
+
+// SelectSymbols returns the candidate symbols for enrichment, ranked by
+// reverse-dep fan-in and capped at maxSymbols (0 means unlimited). This is
+// exported so the CLI dry-run can list symbols without calling the router.
+func (e *Enricher) SelectSymbols(includeInternal bool, maxSymbols int) ([]db.Symbol, error) {
+	symbols, err := e.selectSymbols(includeInternal)
+	if err != nil {
+		return nil, err
+	}
+	symbols = e.rankByReverseDeps(symbols)
+	if maxSymbols > 0 && len(symbols) > maxSymbols {
+		symbols = symbols[:maxSymbols]
+	}
+	return symbols, nil
 }
 
 // selectSymbols queries the DB for symbols matching the default kinds and

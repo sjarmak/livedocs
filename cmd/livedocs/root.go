@@ -12,6 +12,7 @@ var rootCmd = &cobra.Command{
 func init() {
 	rootCmd.AddCommand(checkCmd)
 	rootCmd.AddCommand(contextCmd)
+	rootCmd.AddCommand(enrichCmd)
 	rootCmd.AddCommand(diffCmd)
 	rootCmd.AddCommand(exportCmd)
 	rootCmd.AddCommand(extractCmd)
