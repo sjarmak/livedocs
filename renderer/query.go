@@ -44,6 +44,7 @@ func LoadPackageData(cdb *db.ClaimsDB, importPath string) (*PackageData, error) 
 	pd.FunctionCategories = extractFunctionCategories(symbols, claimsBySymbol)
 	pd.TypesByCategory = extractTypeCategories(symbols, claimsBySymbol)
 	pd.SourceFileCount, pd.TestFileCount, pd.TestFiles = extractFileMetadata(symbols, claimsBySymbol)
+	pd.SemanticEnrichmentDate = latestSemanticTimestamp(claimsBySymbol)
 
 	return pd, nil
 }
@@ -286,6 +287,20 @@ func extractFileMetadata(symbols []db.Symbol, claimsBySymbol map[int64][]db.Clai
 	}
 	sort.Strings(testFiles)
 	return sourceCount, testCount, testFiles
+}
+
+// latestSemanticTimestamp returns the most recent LastVerified value among
+// all semantic-tier claims, or "" if none exist.
+func latestSemanticTimestamp(claimsBySymbol map[int64][]db.Claim) string {
+	var latest string
+	for _, claims := range claimsBySymbol {
+		for _, cl := range claims {
+			if cl.ClaimTier == "semantic" && cl.LastVerified > latest {
+				latest = cl.LastVerified
+			}
+		}
+	}
+	return latest
 }
 
 // isTestFunction returns true for Go test, benchmark, and example functions.

@@ -488,6 +488,96 @@ func TestRenderMarkdown_ForwardDepAnnotations(t *testing.T) {
 	}
 }
 
+func newSemanticClaim(subjectID int64, predicate, objectText, sourceFile, lastVerified string) db.Claim {
+	return db.Claim{
+		SubjectID:        subjectID,
+		Predicate:        predicate,
+		ObjectText:       objectText,
+		SourceFile:       sourceFile,
+		Confidence:       0.8,
+		ClaimTier:        "semantic",
+		Extractor:        "llm-enricher",
+		ExtractorVersion: "0.1.0",
+		LastVerified:     lastVerified,
+	}
+}
+
+func TestRenderMarkdown_SemanticEnrichmentTimestamp(t *testing.T) {
+	cdb := tempDB(t)
+	repo := "test/repo"
+	importPath := "test/pkg/semantic"
+	lang := "go"
+
+	// Add a structural symbol and claim so the package loads.
+	symID := mustUpsertSymbol(t, cdb, db.Symbol{
+		Repo: repo, ImportPath: importPath, SymbolName: "Foo",
+		Language: lang, Kind: "func", Visibility: "public",
+	})
+	mustInsertClaim(t, cdb, newStructuralClaim(symID, "has_kind", "constructor", "foo.go"))
+
+	// Add semantic claims with known timestamps.
+	mustInsertClaim(t, cdb, newSemanticClaim(symID, "purpose", "Constructs Foo instances", "foo.go", "2025-03-15T10:30:00Z"))
+	mustInsertClaim(t, cdb, newSemanticClaim(symID, "usage_pattern", "Called during init", "foo.go", "2025-03-20T14:00:00Z"))
+
+	pd, err := LoadPackageData(cdb, importPath)
+	if err != nil {
+		t.Fatalf("LoadPackageData: %v", err)
+	}
+
+	if pd.SemanticEnrichmentDate != "2025-03-20T14:00:00Z" {
+		t.Errorf("SemanticEnrichmentDate = %q, want 2025-03-20T14:00:00Z", pd.SemanticEnrichmentDate)
+	}
+
+	md := RenderMarkdown(pd)
+
+	checks := []struct {
+		name    string
+		content string
+	}{
+		{"semantic section header", "## Semantic Enrichment"},
+		{"enrichment timestamp", "Last enriched: 2025-03-20 14:00 UTC"},
+		{"staleness warning", "Semantic claims below are AI-generated snapshots and may be stale."},
+		{"visual separator", "---"},
+	}
+	for _, check := range checks {
+		if !strings.Contains(md, check.content) {
+			t.Errorf("missing %s: expected output to contain %q\nFull output:\n%s", check.name, check.content, md)
+		}
+	}
+}
+
+func TestRenderMarkdown_NoSemanticEnrichment(t *testing.T) {
+	cdb := tempDB(t)
+	repo := "test/repo"
+	importPath := "test/pkg/structural"
+	lang := "go"
+
+	// Only structural claims — no semantic.
+	symID := mustUpsertSymbol(t, cdb, db.Symbol{
+		Repo: repo, ImportPath: importPath, SymbolName: "Bar",
+		Language: lang, Kind: "func", Visibility: "public",
+	})
+	mustInsertClaim(t, cdb, newStructuralClaim(symID, "has_kind", "utility", "bar.go"))
+
+	pd, err := LoadPackageData(cdb, importPath)
+	if err != nil {
+		t.Fatalf("LoadPackageData: %v", err)
+	}
+
+	if pd.SemanticEnrichmentDate != "" {
+		t.Errorf("SemanticEnrichmentDate = %q, want empty", pd.SemanticEnrichmentDate)
+	}
+
+	md := RenderMarkdown(pd)
+
+	if strings.Contains(md, "Semantic Enrichment") {
+		t.Error("should not render semantic enrichment section when no semantic claims exist")
+	}
+	if strings.Contains(md, "Last enriched") {
+		t.Error("should not render enrichment timestamp when no semantic claims exist")
+	}
+}
+
 func TestRenderMarkdown_MultipleInterfaceSatisfaction(t *testing.T) {
 	pd := &PackageData{
 		ImportPath: "test/pkg",
