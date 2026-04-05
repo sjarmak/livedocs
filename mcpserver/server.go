@@ -43,6 +43,9 @@ type Config struct {
 	// Required when RepoRoots is set and re-extraction is desired. If nil,
 	// staleness is detected but files are not re-extracted (warning only).
 	ExtractorRegistry *extractor.Registry
+	// ExtractionRunner, when set, enables the request_extraction tool in
+	// multi-repo mode. If nil, the tool is not registered.
+	ExtractionRunner ExtractionRunner
 }
 
 // Server wraps the MCP server and its dependencies.
@@ -102,7 +105,7 @@ func New(cfg Config) (*Server, error) {
 			s.staleness = NewStalenessChecker(cfg.RepoRoots, cfg.ExtractorRegistry)
 		}
 
-		s.registerMultiRepoTools(pool)
+		s.registerMultiRepoTools(pool, cfg.ExtractionRunner)
 	}
 
 	s.telemetry = NewCollector(CollectorConfig{
@@ -140,7 +143,8 @@ func (s *Server) buildRegistry() ToolRegistry {
 
 // registerMultiRepoTools registers the multi-repo tools via the adapter layer.
 // Builds a routing index for cross-repo symbol search.
-func (s *Server) registerMultiRepoTools(pool *DBPool) {
+// If runner is non-nil, the request_extraction tool is also registered.
+func (s *Server) registerMultiRepoTools(pool *DBPool, runner ExtractionRunner) {
 	// Build routing index for search_symbols fan-out optimization.
 	index := NewRoutingIndex()
 	// Best-effort: if Build fails, search falls back to all repos.
@@ -152,6 +156,12 @@ func (s *Server) registerMultiRepoTools(pool *DBPool) {
 		DescribePackageToolDef(pool, s.staleness),
 		SearchSymbolsToolDef(pool, index),
 	}
+
+	if runner != nil {
+		tracker := NewExtractionTracker(runner)
+		defs = append(defs, RequestExtractionToolDef(pool, tracker))
+	}
+
 	for _, def := range defs {
 		s.registry.Register(def)
 	}

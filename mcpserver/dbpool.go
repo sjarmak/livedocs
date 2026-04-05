@@ -225,6 +225,11 @@ func (p *DBPool) Len() int {
 	return p.lru.Len()
 }
 
+// DataDir returns the base directory containing claims database files.
+func (p *DBPool) DataDir() string {
+	return p.dataDir
+}
+
 // dbPath constructs the filesystem path for a repo's claims database.
 func (p *DBPool) dbPath(repoName string) string {
 	return filepath.Join(p.dataDir, repoName+claimsDBSuffix)

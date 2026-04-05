@@ -52,6 +52,7 @@ type Result struct {
 	FilesSkipped     int           // files with no registered extractor
 	CacheHits        int           // files skipped due to cache hit
 	ClaimsStored     int           // total claims inserted
+	ReverseDepFiles  int           // files added via reverse-dependency lookup (not in original diff)
 	ChangedPaths     []string      // relative paths of all non-deleted changed files
 	Duration         time.Duration // wall-clock time
 	Errors           []FileError   // non-fatal per-file errors
@@ -113,6 +114,19 @@ func (p *Pipeline) Run(ctx context.Context, fromCommit, toCommit string) (Result
 
 	// 3. Process changed files (added, modified, renamed, copied).
 	changedPaths := gitdiff.ChangedPaths(changes)
+
+	// 3a. Expand extraction set with reverse dependencies — files that import
+	// symbols from the changed files. This prevents incremental drift where
+	// cross-file relationships (imports, implements) become stale.
+	revDeps, err := reverseDepPaths(p.claimsDB, changedPaths)
+	if err != nil {
+		// Non-fatal: log and continue with original changed paths.
+		log.Printf("WARNING: reverse-dep lookup failed: %v", err)
+	} else if len(revDeps) > 0 {
+		result.ReverseDepFiles = len(revDeps)
+		changedPaths = append(changedPaths, revDeps...)
+	}
+
 	result.FilesChanged = len(changedPaths)
 	result.ChangedPaths = changedPaths
 
