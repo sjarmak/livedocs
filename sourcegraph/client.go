@@ -57,10 +57,11 @@ type SourcegraphClient struct {
 	accessToken string
 	endpoint    string
 
-	mu      sync.Mutex
-	started bool
-	reqCh   chan *callRequest
-	done    chan struct{}
+	mu        sync.Mutex
+	started   bool
+	reqCh     chan *callRequest
+	done      chan struct{}
+	closeOnce sync.Once
 }
 
 // Option configures a SourcegraphClient.
@@ -125,13 +126,27 @@ func (c *SourcegraphClient) Complete(ctx context.Context, system, user string) (
 
 	c.ensureStarted()
 
-	resultCh := make(chan callResult, 1)
-	req := &callRequest{
+	return c.send(ctx, &callRequest{
 		ctx:    ctx,
 		system: system,
 		user:   user,
-		result: resultCh,
+	})
+}
+
+// ensureStarted launches the worker goroutine exactly once.
+func (c *SourcegraphClient) ensureStarted() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if !c.started {
+		c.started = true
+		go c.run()
 	}
+}
+
+// send dispatches a request to the worker goroutine and waits for the result.
+func (c *SourcegraphClient) send(ctx context.Context, req *callRequest) (string, error) {
+	resultCh := make(chan callResult, 1)
+	req.result = resultCh
 
 	select {
 	case c.reqCh <- req:
@@ -147,27 +162,20 @@ func (c *SourcegraphClient) Complete(ctx context.Context, system, user string) (
 	}
 }
 
-// ensureStarted launches the worker goroutine exactly once.
-func (c *SourcegraphClient) ensureStarted() {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if !c.started {
-		c.started = true
-		go c.run()
-	}
-}
-
 // Close shuts down the worker goroutine and releases resources. It is safe to
-// call multiple times but not concurrently with Complete().
+// call multiple times. Callers must ensure no in-flight Complete() or CallTool()
+// calls are active when Close is called.
 func (c *SourcegraphClient) Close() error {
-	c.mu.Lock()
-	wasStarted := c.started
-	c.mu.Unlock()
+	c.closeOnce.Do(func() {
+		c.mu.Lock()
+		wasStarted := c.started
+		c.mu.Unlock()
 
-	if wasStarted {
-		close(c.reqCh)
-		<-c.done
-	}
+		if wasStarted {
+			close(c.reqCh)
+			<-c.done
+		}
+	})
 	return nil
 }
 
@@ -186,66 +194,26 @@ func (c *SourcegraphClient) run() {
 	}()
 
 	for req := range c.reqCh {
-		var text string
-		var err error
-		if req.toolName != "" {
-			text, err = c.handleToolCall(req.ctx, &mcpClient, req.toolName, req.toolArgs)
-		} else {
-			text, err = c.handleRequest(req.ctx, &mcpClient, req.system, req.user)
+		toolName := req.toolName
+		toolArgs := req.toolArgs
+		if toolName == "" {
+			// Legacy deepsearch path via Complete().
+			toolName = "deepsearch"
+			toolArgs = map[string]any{"query": req.user}
 		}
+
+		text, err := c.handleToolCall(req.ctx, &mcpClient, toolName, toolArgs)
+
+		// Validation gate for deepsearch Complete() calls.
+		if err == nil && req.toolName == "" {
+			symbol := extractSymbol(req.user)
+			if symbol != "" && !strings.Contains(strings.ToLower(text), strings.ToLower(symbol)) {
+				text = LowConfidenceSentinel
+			}
+		}
+
 		req.result <- callResult{text: text, err: err}
 	}
-}
-
-// handleRequest processes a single request. If the MCP client is nil or has
-// failed, it attempts to spawn a new one. On MCP call failure, it tears down
-// the client so the next request triggers a fresh spawn.
-func (c *SourcegraphClient) handleRequest(
-	ctx context.Context,
-	mcpClient *client.MCPClient,
-	system, user string,
-) (string, error) {
-	// Ensure MCP client is connected.
-	if *mcpClient == nil {
-		spawned, err := c.spawnMCP(ctx)
-		if err != nil {
-			return "", fmt.Errorf("sourcegraph: failed to spawn MCP server: %w", err)
-		}
-		*mcpClient = spawned
-	}
-
-	// Build the deepsearch tool call.
-	toolReq := mcp.CallToolRequest{
-		Params: mcp.CallToolParams{
-			Name: "deepsearch",
-			Arguments: map[string]any{
-				"query": user,
-			},
-		},
-	}
-
-	result, err := (*mcpClient).CallTool(ctx, toolReq)
-	if err != nil {
-		// Process isolation: tear down broken client, return error to caller.
-		c.closeMCPClient(mcpClient)
-		return "", fmt.Errorf("sourcegraph: deepsearch call failed: %w", err)
-	}
-
-	if result.IsError {
-		text := extractText(result)
-		c.closeMCPClient(mcpClient)
-		return "", fmt.Errorf("sourcegraph: deepsearch returned error: %s", text)
-	}
-
-	text := extractText(result)
-
-	// Validation gate: check that the response references the target symbol.
-	symbol := extractSymbol(user)
-	if symbol != "" && !strings.Contains(strings.ToLower(text), strings.ToLower(symbol)) {
-		return LowConfidenceSentinel, nil
-	}
-
-	return text, nil
 }
 
 // closeMCPClient tears down the current MCP client and sets the pointer to nil
@@ -302,30 +270,15 @@ func (c *SourcegraphClient) CallTool(ctx context.Context, toolName string, args 
 
 	c.ensureStarted()
 
-	resultCh := make(chan callResult, 1)
-	req := &callRequest{
+	return c.send(ctx, &callRequest{
 		ctx:      ctx,
 		toolName: toolName,
 		toolArgs: args,
-		result:   resultCh,
-	}
-
-	select {
-	case c.reqCh <- req:
-	case <-ctx.Done():
-		return "", fmt.Errorf("sourcegraph: context cancelled before send: %w", ctx.Err())
-	}
-
-	select {
-	case res := <-resultCh:
-		return res.text, res.err
-	case <-ctx.Done():
-		return "", fmt.Errorf("sourcegraph: context cancelled waiting for result: %w", ctx.Err())
-	}
+	})
 }
 
 // handleToolCall processes a raw MCP tool call request. It shares the same
-// subprocess lifecycle as handleRequest (spawn on nil, tear down on failure).
+// subprocess lifecycle: spawn on nil, tear down on failure.
 func (c *SourcegraphClient) handleToolCall(
 	ctx context.Context,
 	mcpClient *client.MCPClient,

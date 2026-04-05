@@ -21,6 +21,7 @@ type SymbolContext struct {
 	Name       string // e.g. "Pod"
 	Repo       string // e.g. "kubernetes/kubernetes"
 	ImportPath string // e.g. "k8s.io/api/core/v1"
+	SourcePath string // e.g. "staging/src/k8s.io/api/core/v1/types.go" (optional, for find_references)
 }
 
 // PredicateRouter routes a semantic predicate to the appropriate Sourcegraph
@@ -68,11 +69,11 @@ func (r *DefaultRouter) Route(ctx context.Context, predicate extractor.Predicate
 
 // routePurpose calls deepsearch with a purpose-focused query about the symbol.
 func (r *DefaultRouter) routePurpose(ctx context.Context, sym SymbolContext) (string, error) {
-	query := fmt.Sprintf("What is the purpose and responsibility of %s in %s (%s)?",
+	question := fmt.Sprintf("What is the purpose and responsibility of %s in %s (%s)?",
 		sym.Name, sym.ImportPath, sym.Repo)
 
 	result, err := r.Caller.CallTool(ctx, "deepsearch", map[string]any{
-		"query": query,
+		"question": question,
 	})
 	if err != nil {
 		return "", fmt.Errorf("sourcegraph: deepsearch for purpose of %s: %w", sym.Name, err)
@@ -84,10 +85,15 @@ func (r *DefaultRouter) routePurpose(ctx context.Context, sym SymbolContext) (st
 // routeUsagePattern calls find_references to collect usage sites as context
 // text for LLM synthesis.
 func (r *DefaultRouter) routeUsagePattern(ctx context.Context, sym SymbolContext) (string, error) {
-	result, err := r.Caller.CallTool(ctx, "find_references", map[string]any{
-		"symbolDescriptor": sym.Name,
-		"repo":             sym.Repo,
-	})
+	args := map[string]any{
+		"symbol": sym.Name,
+		"repo":   sym.Repo,
+	}
+	if sym.SourcePath != "" {
+		args["path"] = sym.SourcePath
+	}
+
+	result, err := r.Caller.CallTool(ctx, "find_references", args)
 	if err != nil {
 		return "", fmt.Errorf("sourcegraph: find_references for usage_pattern of %s: %w", sym.Name, err)
 	}
@@ -97,11 +103,11 @@ func (r *DefaultRouter) routeUsagePattern(ctx context.Context, sym SymbolContext
 
 // routeComplexity calls deepsearch with a complexity-focused query.
 func (r *DefaultRouter) routeComplexity(ctx context.Context, sym SymbolContext) (string, error) {
-	query := fmt.Sprintf("Analyze the complexity of %s in %s (%s): cyclomatic complexity, dependencies, abstraction layers",
+	question := fmt.Sprintf("Analyze the complexity of %s in %s (%s): cyclomatic complexity, dependencies, abstraction layers",
 		sym.Name, sym.ImportPath, sym.Repo)
 
 	result, err := r.Caller.CallTool(ctx, "deepsearch", map[string]any{
-		"query": query,
+		"question": question,
 	})
 	if err != nil {
 		return "", fmt.Errorf("sourcegraph: deepsearch for complexity of %s: %w", sym.Name, err)
@@ -113,11 +119,10 @@ func (r *DefaultRouter) routeComplexity(ctx context.Context, sym SymbolContext) 
 // routeStability calls commit_search and computes a stability assessment
 // directly from commit count. No LLM needed.
 func (r *DefaultRouter) routeStability(ctx context.Context, sym SymbolContext) (string, error) {
-	query := fmt.Sprintf("%s type:commit after:\"6 months ago\"", sym.Name)
-
 	result, err := r.Caller.CallTool(ctx, "commit_search", map[string]any{
-		"query": query,
-		"repo":  sym.Repo,
+		"repos":        []string{sym.Repo},
+		"contentTerms": []string{sym.Name},
+		"after":        "6 months ago",
 	})
 	if err != nil {
 		return "", fmt.Errorf("sourcegraph: commit_search for stability of %s: %w", sym.Name, err)

@@ -213,7 +213,7 @@ func TestFormatStabilityAssessment(t *testing.T) {
 }
 
 func TestRouteToolArgs(t *testing.T) {
-	t.Run("purpose passes query to deepsearch", func(t *testing.T) {
+	t.Run("purpose passes question to deepsearch", func(t *testing.T) {
 		mock := newMockCaller(map[string]string{"deepsearch": "result"}, nil)
 		router := NewDefaultRouter(mock)
 
@@ -226,16 +226,16 @@ func TestRouteToolArgs(t *testing.T) {
 			t.Fatalf("expected 1 call, got %d", len(mock.callLog))
 		}
 		args := mock.callLog[0].Args
-		query, ok := args["query"].(string)
-		if !ok || query == "" {
-			t.Error("expected non-empty query arg for deepsearch")
+		question, ok := args["question"].(string)
+		if !ok || question == "" {
+			t.Error("expected non-empty question arg for deepsearch")
 		}
-		if !contains(query, "Pod") {
-			t.Errorf("query %q should mention symbol name", query)
+		if !contains(question, "Pod") {
+			t.Errorf("question %q should mention symbol name", question)
 		}
 	})
 
-	t.Run("usage_pattern passes symbolDescriptor and repo", func(t *testing.T) {
+	t.Run("usage_pattern passes symbol and repo", func(t *testing.T) {
 		mock := newMockCaller(map[string]string{"find_references": "result"}, nil)
 		router := NewDefaultRouter(mock)
 
@@ -245,15 +245,15 @@ func TestRouteToolArgs(t *testing.T) {
 		}
 
 		args := mock.callLog[0].Args
-		if args["symbolDescriptor"] != "Pod" {
-			t.Errorf("symbolDescriptor = %v, want Pod", args["symbolDescriptor"])
+		if args["symbol"] != "Pod" {
+			t.Errorf("symbol = %v, want Pod", args["symbol"])
 		}
 		if args["repo"] != "kubernetes/kubernetes" {
 			t.Errorf("repo = %v, want kubernetes/kubernetes", args["repo"])
 		}
 	})
 
-	t.Run("stability passes query and repo to commit_search", func(t *testing.T) {
+	t.Run("stability passes repos and contentTerms to commit_search", func(t *testing.T) {
 		mock := newMockCaller(map[string]string{"commit_search": ""}, nil)
 		router := NewDefaultRouter(mock)
 
@@ -263,12 +263,13 @@ func TestRouteToolArgs(t *testing.T) {
 		}
 
 		args := mock.callLog[0].Args
-		query, ok := args["query"].(string)
-		if !ok || !contains(query, "Pod") {
-			t.Errorf("query should contain symbol name, got %v", args["query"])
+		repos, ok := args["repos"].([]string)
+		if !ok || len(repos) == 0 || repos[0] != "kubernetes/kubernetes" {
+			t.Errorf("repos = %v, want [kubernetes/kubernetes]", args["repos"])
 		}
-		if args["repo"] != "kubernetes/kubernetes" {
-			t.Errorf("repo = %v, want kubernetes/kubernetes", args["repo"])
+		terms, ok := args["contentTerms"].([]string)
+		if !ok || len(terms) == 0 || terms[0] != "Pod" {
+			t.Errorf("contentTerms = %v, want [Pod]", args["contentTerms"])
 		}
 	})
 }

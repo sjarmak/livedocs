@@ -555,7 +555,7 @@ func TestExtractClaimFromContext_NullHandling(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := extractClaimFromContext(tt.context, "Symbol", extractor.PredicatePurpose)
+			got := extractClaimFromContext(tt.context)
 			if got != tt.want {
 				t.Errorf("extractClaimFromContext(%q) = %q, want %q", tt.context, got, tt.want)
 			}

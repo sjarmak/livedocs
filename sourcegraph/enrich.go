@@ -6,7 +6,6 @@ package sourcegraph
 
 import (
 	"context"
-	"database/sql"
 	"fmt"
 	"sort"
 	"strings"
@@ -133,8 +132,12 @@ func (e *Enricher) Run(ctx context.Context, opts EnrichOpts) (EnrichmentSummary,
 			break
 		}
 
+		// Pre-fetch claims and source file metadata once per symbol.
+		existingClaims, _ := e.db.GetClaimsBySubject(sym.ID)
+		sourceFile, contentHash := resolveSourceMeta(e.db, sym.Repo, existingClaims)
+
 		// Cache check.
-		if !opts.Force && e.isCacheHit(sym) {
+		if !opts.Force && isCacheHit(existingClaims, sourceFile, contentHash) {
 			summary.SymbolsSkipped++
 			continue
 		}
@@ -146,7 +149,6 @@ func (e *Enricher) Run(ctx context.Context, opts EnrichOpts) (EnrichmentSummary,
 				break
 			}
 
-			// Route to get context.
 			symCtx := SymbolContext{
 				Name:       sym.SymbolName,
 				Repo:       sym.Repo,
@@ -155,32 +157,25 @@ func (e *Enricher) Run(ctx context.Context, opts EnrichOpts) (EnrichmentSummary,
 			contextText, err := e.router.Route(ctx, pred, symCtx)
 			summary.CallsMade++
 			if err != nil {
-				// Log and continue — don't fail the entire run.
 				continue
 			}
 
-			// Determine confidence based on whether symbol appears in prose.
 			confidence := confidenceSymbolInProse
 			if contextText == LowConfidenceSentinel ||
 				!strings.Contains(strings.ToLower(contextText), strings.ToLower(sym.SymbolName)) {
 				confidence = confidenceSymbolAbsent
 			}
 
-			// If the context is the low-confidence sentinel, skip storing — the
-			// router found no relevant information.
 			if contextText == LowConfidenceSentinel {
 				continue
 			}
 
-			// Build and validate the claim text via the LLM extraction prompt.
-			claimText := extractClaimFromContext(contextText, sym.SymbolName, pred)
+			claimText := extractClaimFromContext(contextText)
 			if claimText == "" {
-				// Null claim — LLM returned null, skip.
 				continue
 			}
 
-			// Store the claim.
-			if err := e.storeClaim(sym, pred, claimText, confidence); err != nil {
+			if err := e.storeClaimWithMeta(sym, pred, claimText, confidence, sourceFile, contentHash); err != nil {
 				continue
 			}
 			enriched = true
@@ -278,7 +273,7 @@ func (e *Enricher) rankByReverseDeps(symbols []db.Symbol) []db.Symbol {
 
 	// Count reverse deps for each import path.
 	pathRank := make(map[string]int)
-	importClaims, err := e.db.GetClaimsByPredicate("imports")
+	importClaims, err := e.db.GetClaimsByPredicate(string(extractor.PredicateImports))
 	if err == nil {
 		for _, cl := range importClaims {
 			if pathSet[cl.ObjectText] {
@@ -300,85 +295,52 @@ func (e *Enricher) rankByReverseDeps(symbols []db.Symbol) []db.Symbol {
 	return symbols
 }
 
-// isCacheHit checks whether a symbol already has semantic claims from our
-// extractor whose source file content hash has not changed since enrichment.
-func (e *Enricher) isCacheHit(sym db.Symbol) bool {
-	// Get existing semantic claims for this symbol from our extractor.
-	claims, err := e.db.GetClaimsBySubject(sym.ID)
-	if err != nil {
-		return false
-	}
-
-	hasSemanticClaim := false
-	var sourceFile string
+// resolveSourceMeta finds the source file path and content hash for a symbol
+// by scanning its existing claims. Called once per symbol to avoid repeated
+// DB lookups.
+func resolveSourceMeta(cdb *db.ClaimsDB, repo string, claims []db.Claim) (sourceFile, contentHash string) {
 	for _, cl := range claims {
-		if cl.ClaimTier == "semantic" && cl.Extractor == enrichExtractorName {
-			hasSemanticClaim = true
+		if cl.SourceFile != "" {
 			sourceFile = cl.SourceFile
 			break
 		}
 	}
-	if !hasSemanticClaim {
-		return false
-	}
-
-	// Look up the source file's current content hash.
 	if sourceFile == "" {
-		// Try to find source file from any claim.
-		for _, cl := range claims {
-			if cl.SourceFile != "" {
-				sourceFile = cl.SourceFile
-				break
-			}
-		}
+		return "", ""
 	}
-	if sourceFile == "" {
-		return false
-	}
-
-	sf, err := e.db.GetSourceFile(sym.Repo, sourceFile)
+	sf, err := cdb.GetSourceFile(repo, sourceFile)
 	if err != nil {
+		return sourceFile, ""
+	}
+	return sourceFile, sf.ContentHash
+}
+
+// isCacheHit checks whether a symbol already has semantic claims from our
+// extractor whose source file content hash has not changed since enrichment.
+func isCacheHit(claims []db.Claim, sourceFile, contentHash string) bool {
+	if contentHash == "" {
 		return false
 	}
-
-	// Check if the stored enrichment version matches the current content hash.
-	// We encode the content hash in the ExtractorVersion field as
-	// "0.1.0@<hash>" to track which content was enriched.
+	expectedVersion := enrichExtractorVersion + "@" + contentHash
 	for _, cl := range claims {
 		if cl.ClaimTier == "semantic" && cl.Extractor == enrichExtractorName {
-			expectedVersion := enrichExtractorVersion + "@" + sf.ContentHash
 			if cl.ExtractorVersion == expectedVersion {
 				return true
 			}
 		}
 	}
-
 	return false
 }
 
-// storeClaim persists a single semantic claim for the given symbol.
-func (e *Enricher) storeClaim(sym db.Symbol, pred extractor.Predicate, text string, confidence float64) error {
-	// Find source file for the symbol to include content hash in version.
+// storeClaimWithMeta persists a single semantic claim, using pre-resolved
+// source file metadata to avoid redundant DB lookups.
+func (e *Enricher) storeClaimWithMeta(sym db.Symbol, pred extractor.Predicate, text string, confidence float64, sourceFile, contentHash string) error {
 	extractorVersion := enrichExtractorVersion
-	sourceFile := ""
-
-	claims, err := e.db.GetClaimsBySubject(sym.ID)
-	if err == nil {
-		for _, cl := range claims {
-			if cl.SourceFile != "" {
-				sourceFile = cl.SourceFile
-				break
-			}
-		}
-	}
-	if sourceFile != "" {
-		sf, err := e.db.GetSourceFile(sym.Repo, sourceFile)
-		if err == nil {
-			extractorVersion = enrichExtractorVersion + "@" + sf.ContentHash
-		}
+	if contentHash != "" {
+		extractorVersion = enrichExtractorVersion + "@" + contentHash
 	}
 
-	_, err = e.db.InsertClaim(db.Claim{
+	_, err := e.db.InsertClaim(db.Claim{
 		SubjectID:        sym.ID,
 		Predicate:        string(pred),
 		ObjectText:       text,
@@ -395,46 +357,12 @@ func (e *Enricher) storeClaim(sym db.Symbol, pred extractor.Predicate, text stri
 	return nil
 }
 
-// enrichmentSystemPrompt instructs the LLM how to extract a claim from context.
-const enrichmentSystemPrompt = `You are a code analysis expert. Extract a concise claim about the given symbol from the provided context.
-
-Return null for any field you cannot support with a direct quote from the provided context. Null claims will not be stored.
-
-Respond with ONLY the claim text (a single sentence), or the word "null" if you cannot make a supported claim.`
-
-// extractClaimFromContext processes the router's context text to produce a
-// claim. For now this is a simple extraction: if the context contains
-// meaningful content about the symbol, return it as-is (trimmed). The LLM
-// extraction step is handled by the router + predicate combination. The
-// router already calls the appropriate Sourcegraph tool which returns
-// LLM-quality context.
-//
-// Returns empty string if the context is empty or null.
-func extractClaimFromContext(contextText, symbolName string, pred extractor.Predicate) string {
+// extractClaimFromContext extracts a claim from the router's context text.
+// Returns empty string if the context is empty or "null".
+func extractClaimFromContext(contextText string) string {
 	text := strings.TrimSpace(contextText)
 	if text == "" || strings.EqualFold(text, "null") {
 		return ""
 	}
 	return text
-}
-
-// ContentHashForSymbol retrieves the current content hash for a symbol's
-// source file. Exported for testing.
-func (e *Enricher) ContentHashForSymbol(sym db.Symbol) (string, error) {
-	claims, err := e.db.GetClaimsBySubject(sym.ID)
-	if err != nil {
-		return "", err
-	}
-	for _, cl := range claims {
-		if cl.SourceFile != "" {
-			sf, err := e.db.GetSourceFile(sym.Repo, cl.SourceFile)
-			if err == nil {
-				return sf.ContentHash, nil
-			}
-			if err != sql.ErrNoRows {
-				return "", err
-			}
-		}
-	}
-	return "", fmt.Errorf("no source file found for symbol %s", sym.SymbolName)
 }
