@@ -24,6 +24,10 @@ type stubExtractor struct {
 
 func (s *stubExtractor) Name() string    { return s.name }
 func (s *stubExtractor) Version() string { return s.version }
+func (s *stubExtractor) ExtractBytes(_ context.Context, src []byte, relPath string, lang string) ([]extractor.Claim, error) {
+	return s.Extract(nil, relPath, lang)
+}
+
 func (s *stubExtractor) Extract(_ context.Context, path string, lang string) ([]extractor.Claim, error) {
 	if claims, ok := s.claims[path]; ok {
 		return claims, nil
