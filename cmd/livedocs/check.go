@@ -3,16 +3,20 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"log"
 
 	"github.com/spf13/cobra"
 
 	"github.com/live-docs/live_docs/check"
+	"github.com/live-docs/live_docs/drift"
+	"github.com/live-docs/live_docs/sourcegraph"
 )
 
 var (
 	checkFormat         string
 	checkUpdateManifest bool
 	checkManifest       bool
+	checkSemantic       bool
 )
 
 var checkCmd = &cobra.Command{
@@ -51,12 +55,18 @@ func init() {
 	checkCmd.Flags().StringVar(&checkFormat, "format", "text", "output format: text or json")
 	checkCmd.Flags().BoolVar(&checkUpdateManifest, "update-manifest", false, "generate or update the .livedocs/manifest file")
 	checkCmd.Flags().BoolVar(&checkManifest, "manifest", false, "use fast manifest-based check (no SQLite)")
+	checkCmd.Flags().BoolVar(&checkSemantic, "semantic", false, "run semantic drift detection via Sourcegraph deepsearch")
 }
 
 func runFullCheck(cmd *cobra.Command, path string) error {
 	result, err := check.Run(cmd.Context(), path)
 	if err != nil {
 		return fmt.Errorf("check failed: %w", err)
+	}
+
+	// Optional semantic pass: validate README descriptions against code intent.
+	if checkSemantic {
+		runSemanticPass(cmd, result, path)
 	}
 
 	out := cmd.OutOrStdout()
@@ -120,4 +130,31 @@ func runUpdateManifest(cmd *cobra.Command, path string) error {
 	fmt.Fprintf(cmd.OutOrStdout(), "Manifest updated: %d entries written to %s\n",
 		len(manifest.Entries), check.ManifestFileName)
 	return nil
+}
+
+// runSemanticPass creates a SourcegraphClient and SemanticChecker, then runs
+// semantic validation on each report's README. Findings are appended to the
+// result. On any setup error the pass is skipped with a warning.
+func runSemanticPass(cmd *cobra.Command, result *check.Result, path string) {
+	sgClient, err := sourcegraph.NewSourcegraphClient()
+	if err != nil {
+		log.Printf("semantic: skipping semantic check: %v", err)
+		return
+	}
+	defer sgClient.Close()
+
+	checker := drift.NewSemanticChecker(sgClient)
+	ctx := cmd.Context()
+
+	for _, report := range result.Reports {
+		findings, err := checker.Check(ctx, report.ReadmePath, report.PackageDir, path)
+		if err != nil {
+			log.Printf("semantic: error checking %s: %v", report.ReadmePath, err)
+			continue
+		}
+		if len(findings) > 0 {
+			report.Findings = append(report.Findings, findings...)
+			result.HasDrift = true
+		}
+	}
 }

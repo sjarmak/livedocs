@@ -45,6 +45,9 @@ const (
 	Undocumented FindingKind = "undocumented"
 	// StalePackageRef means a package path is mentioned in the README but does not exist.
 	StalePackageRef FindingKind = "stale_package"
+	// SemanticDrift means a README section's description does not match
+	// the actual code behavior as assessed by an LLM.
+	SemanticDrift FindingKind = "semantic_drift"
 )
 
 // Report aggregates drift findings for a single README.
