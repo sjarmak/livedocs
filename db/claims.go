@@ -69,14 +69,20 @@ type dbExecutor interface {
 
 // ClaimsDB wraps a per-repo SQLite database.
 type ClaimsDB struct {
-	db   *sql.DB
-	exec dbExecutor // defaults to db; swapped to tx inside RunInTransaction
-	txMu sync.Mutex // serializes RunInTransaction to prevent concurrent c.exec swaps
+	db         *sql.DB
+	exec       dbExecutor // defaults to db; swapped to tx inside RunInTransaction
+	txMu       sync.Mutex // serializes RunInTransaction to prevent concurrent c.exec swaps
+	enrichExec dbExecutor // defaults to db; swapped to tx inside RunEnrichmentTransaction
+	enrichMu   sync.Mutex // serializes RunEnrichmentTransaction independently of txMu
 }
 
 // OpenClaimsDB opens or creates a per-repo claims database at the given path.
 func OpenClaimsDB(path string) (*ClaimsDB, error) {
-	db, err := sql.Open("sqlite", path)
+	// Append busy_timeout and txlock to DSN so every pooled connection inherits
+	// them. _txlock=immediate makes BEGIN acquire a write lock upfront, allowing
+	// the busy_timeout to apply when another writer holds the lock.
+	dsn := path + "?_pragma=busy_timeout%3d5000&_txlock=immediate"
+	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("open claims db %s: %w", path, err)
 	}
@@ -90,7 +96,7 @@ func OpenClaimsDB(path string) (*ClaimsDB, error) {
 		db.Close()
 		return nil, fmt.Errorf("set busy_timeout: %w", err)
 	}
-	return &ClaimsDB{db: db, exec: db}, nil
+	return &ClaimsDB{db: db, exec: db, enrichExec: db}, nil
 }
 
 // DB returns the underlying *sql.DB for direct queries.
@@ -126,6 +132,51 @@ func (c *ClaimsDB) RunInTransaction(fn func() error) error {
 	return tx.Commit()
 }
 
+// RunEnrichmentTransaction executes fn inside a SQL transaction serialized by
+// enrichMu, which is independent of the structural extraction mutex (txMu).
+// This allows enrichment writes and structural extraction writes to proceed
+// concurrently without blocking each other. Enrichment code within fn should
+// call c.EnrichExec() to obtain the transaction-bound executor.
+func (c *ClaimsDB) RunEnrichmentTransaction(fn func() error) error {
+	c.enrichMu.Lock()
+	defer c.enrichMu.Unlock()
+
+	tx, err := c.db.Begin()
+	if err != nil {
+		return fmt.Errorf("begin enrichment transaction: %w", err)
+	}
+
+	prev := c.enrichExec
+	c.enrichExec = tx
+	defer func() { c.enrichExec = prev }()
+
+	if err := fn(); err != nil {
+		tx.Rollback()
+		return err
+	}
+	return tx.Commit()
+}
+
+// EnrichExec returns the current enrichment executor. Outside of
+// RunEnrichmentTransaction this is the raw *sql.DB; inside it is the active
+// *sql.Tx. Enrichment callers use this to issue queries through the enrichment
+// write path independently of the structural extraction path.
+func (c *ClaimsDB) EnrichExec() dbExecutor {
+	return c.enrichExec
+}
+
+// WALCheckpoint forces a WAL checkpoint using TRUNCATE mode, which copies all
+// WAL content back into the main database file and resets the WAL. This is
+// intended to be called periodically (e.g. from a timer in the watch loop) to
+// bound WAL file growth.
+func (c *ClaimsDB) WALCheckpoint() error {
+	_, err := c.db.Exec("PRAGMA wal_checkpoint(TRUNCATE)")
+	if err != nil {
+		return fmt.Errorf("wal checkpoint: %w", err)
+	}
+	return nil
+}
+
 // SetMaxOpenConns sets the maximum number of open connections to the database.
 func (c *ClaimsDB) SetMaxOpenConns(n int) {
 	c.db.SetMaxOpenConns(n)
@@ -157,7 +208,8 @@ CREATE TABLE IF NOT EXISTS claims (
                     CHECK(predicate IN (
                         'defines', 'imports', 'exports', 'has_doc', 'is_generated', 'is_test',
                         'has_kind', 'implements', 'has_signature', 'encloses',
-                        'purpose', 'usage_pattern', 'complexity', 'stability'
+                        'purpose', 'usage_pattern', 'complexity', 'stability',
+                        'enrichment_failed', 'enrichment_permanently_failed'
                     )),
     object_text     TEXT,
     object_id       INTEGER REFERENCES symbols(id),

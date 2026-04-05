@@ -868,3 +868,189 @@ func TestRunInTransaction_ConcurrentNoRace(t *testing.T) {
 		}
 	}
 }
+
+func TestRunEnrichmentTransaction(t *testing.T) {
+	db := tempDB(t)
+
+	// Insert a symbol first (structural path).
+	symID, err := db.UpsertSymbol(Symbol{
+		Repo: "r", ImportPath: "p", SymbolName: "E",
+		Language: "go", Kind: "func", Visibility: "public",
+	})
+	if err != nil {
+		t.Fatalf("upsert symbol: %v", err)
+	}
+
+	// Use RunEnrichmentTransaction to insert a semantic claim via EnrichExec.
+	err = db.RunEnrichmentTransaction(func() error {
+		_, err := db.EnrichExec().Exec(`
+			INSERT INTO claims (subject_id, predicate, object_text, source_file, source_line,
+			                     confidence, claim_tier, extractor, extractor_version, last_verified)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		`, symID, "purpose", "does enrichment things", "e.go", 1,
+			0.9, "semantic", "enrich-test", "1.0", Now())
+		return err
+	})
+	if err != nil {
+		t.Fatalf("enrichment transaction: %v", err)
+	}
+
+	// Verify the claim was committed.
+	claims, err := db.GetClaimsBySubject(symID)
+	if err != nil {
+		t.Fatalf("get claims: %v", err)
+	}
+	if len(claims) != 1 {
+		t.Fatalf("expected 1 claim, got %d", len(claims))
+	}
+	if claims[0].ClaimTier != "semantic" {
+		t.Errorf("expected claim_tier=semantic, got %s", claims[0].ClaimTier)
+	}
+}
+
+func TestRunEnrichmentTransaction_Rollback(t *testing.T) {
+	db := tempDB(t)
+
+	symID, _ := db.UpsertSymbol(Symbol{
+		Repo: "r", ImportPath: "p", SymbolName: "R",
+		Language: "go", Kind: "func", Visibility: "public",
+	})
+
+	// Transaction that returns an error should be rolled back.
+	err := db.RunEnrichmentTransaction(func() error {
+		db.EnrichExec().Exec(`
+			INSERT INTO claims (subject_id, predicate, object_text, source_file, source_line,
+			                     confidence, claim_tier, extractor, extractor_version, last_verified)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		`, symID, "purpose", "should be rolled back", "r.go", 1,
+			0.9, "semantic", "enrich-test", "1.0", Now())
+		return fmt.Errorf("intentional rollback")
+	})
+	if err == nil {
+		t.Fatal("expected error from enrichment transaction")
+	}
+
+	// Verify nothing was committed.
+	claims, _ := db.GetClaimsBySubject(symID)
+	if len(claims) != 0 {
+		t.Errorf("expected 0 claims after rollback, got %d", len(claims))
+	}
+}
+
+func TestConcurrentStructuralAndEnrichment(t *testing.T) {
+	db := tempDB(t)
+
+	// Pre-create symbols for enrichment to reference.
+	for i := 0; i < 5; i++ {
+		db.UpsertSymbol(Symbol{
+			Repo: "r", ImportPath: "enrich", SymbolName: fmt.Sprintf("Sym_%d", i),
+			Language: "go", Kind: "func", Visibility: "public",
+		})
+	}
+
+	var wg sync.WaitGroup
+	errs := make(chan error, 10)
+
+	// Structural extraction goroutine: inserts symbols via RunInTransaction.
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 5; i++ {
+			idx := i
+			if err := db.RunInTransaction(func() error {
+				_, err := db.UpsertSymbol(Symbol{
+					Repo: "r", ImportPath: "structural",
+					SymbolName: fmt.Sprintf("StructSym_%d", idx),
+					Language:   "go", Kind: "type", Visibility: "public",
+				})
+				return err
+			}); err != nil {
+				errs <- fmt.Errorf("structural tx %d: %w", idx, err)
+			}
+		}
+	}()
+
+	// Enrichment goroutine: inserts semantic claims via RunEnrichmentTransaction.
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 5; i++ {
+			idx := i
+			if err := db.RunEnrichmentTransaction(func() error {
+				_, err := db.EnrichExec().Exec(`
+					INSERT INTO claims (subject_id, predicate, object_text, source_file, source_line,
+					                     confidence, claim_tier, extractor, extractor_version, last_verified)
+					VALUES ((SELECT id FROM symbols WHERE symbol_name = ?), ?, ?, ?, ?, ?, ?, ?, ?, ?)
+				`, fmt.Sprintf("Sym_%d", idx), "purpose", "enriched", "e.go", 1,
+					0.85, "semantic", "enrich-concurrent", "1.0", Now())
+				return err
+			}); err != nil {
+				errs <- fmt.Errorf("enrichment tx %d: %w", idx, err)
+			}
+		}
+	}()
+
+	wg.Wait()
+	close(errs)
+
+	for err := range errs {
+		t.Errorf("concurrent error: %v", err)
+	}
+
+	// Verify structural symbols were created.
+	for i := 0; i < 5; i++ {
+		symName := fmt.Sprintf("StructSym_%d", i)
+		_, err := db.GetSymbolByCompositeKey("r", "structural", symName)
+		if err != nil {
+			t.Errorf("missing structural symbol %s: %v", symName, err)
+		}
+	}
+
+	// Verify enrichment claims were created.
+	for i := 0; i < 5; i++ {
+		sym, err := db.GetSymbolByCompositeKey("r", "enrich", fmt.Sprintf("Sym_%d", i))
+		if err != nil {
+			t.Errorf("missing enrich symbol Sym_%d: %v", i, err)
+			continue
+		}
+		claims, err := db.GetClaimsBySubject(sym.ID)
+		if err != nil {
+			t.Errorf("get claims for Sym_%d: %v", i, err)
+			continue
+		}
+		found := false
+		for _, cl := range claims {
+			if cl.Predicate == "purpose" && cl.ClaimTier == "semantic" {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("missing enrichment claim for Sym_%d", i)
+		}
+	}
+}
+
+func TestWALCheckpoint(t *testing.T) {
+	db := tempDB(t)
+
+	// Insert some data to ensure there is WAL content.
+	db.UpsertSymbol(Symbol{
+		Repo: "r", ImportPath: "p", SymbolName: "W",
+		Language: "go", Kind: "func", Visibility: "public",
+	})
+
+	err := db.WALCheckpoint()
+	if err != nil {
+		t.Fatalf("WAL checkpoint: %v", err)
+	}
+
+	// Verify the database is still functional after checkpoint.
+	sym, err := db.GetSymbolByCompositeKey("r", "p", "W")
+	if err != nil {
+		t.Fatalf("get symbol after checkpoint: %v", err)
+	}
+	if sym.SymbolName != "W" {
+		t.Errorf("expected W, got %s", sym.SymbolName)
+	}
+}
