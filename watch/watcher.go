@@ -4,8 +4,6 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"os/exec"
-	"strings"
 	"time"
 
 	"github.com/live-docs/live_docs/pipeline"
@@ -14,42 +12,6 @@ import (
 // emptyTreeSHA is the hash of the empty tree in git, used as the "from"
 // commit when doing a full extraction (no prior state or force-push).
 const emptyTreeSHA = "4b825dc642cb6eb9a060e54bf899d69f82cf7118"
-
-// GitOps defines the git operations the watcher needs. This interface
-// enables testing without real git repos.
-type GitOps interface {
-	// RevParseHEAD returns the current HEAD SHA for the repo.
-	RevParseHEAD(repoDir string) (string, error)
-	// IsAncestor returns true if ancestor is an ancestor of HEAD in the repo.
-	IsAncestor(repoDir, ancestor string) (bool, error)
-}
-
-// realGitOps implements GitOps using actual git commands.
-type realGitOps struct{}
-
-func (realGitOps) RevParseHEAD(repoDir string) (string, error) {
-	cmd := exec.Command("git", "rev-parse", "HEAD")
-	cmd.Dir = repoDir
-	out, err := cmd.Output()
-	if err != nil {
-		return "", fmt.Errorf("watch: git rev-parse HEAD: %w", err)
-	}
-	return strings.TrimSpace(string(out)), nil
-}
-
-func (realGitOps) IsAncestor(repoDir, ancestor string) (bool, error) {
-	cmd := exec.Command("git", "merge-base", "--is-ancestor", ancestor, "HEAD")
-	cmd.Dir = repoDir
-	err := cmd.Run()
-	if err == nil {
-		return true, nil
-	}
-	// Exit code 1 means "not an ancestor" — not a real error.
-	if exitErr, ok := err.(*exec.ExitError); ok && exitErr.ExitCode() == 1 {
-		return false, nil
-	}
-	return false, fmt.Errorf("watch: git merge-base: %w", err)
-}
 
 // PipelineRunner abstracts pipeline execution for testing.
 type PipelineRunner interface {
@@ -117,7 +79,7 @@ type Watcher struct {
 func New(cfg Config) *Watcher {
 	git := cfg.Git
 	if git == nil {
-		git = realGitOps{}
+		git = LocalGitOps{}
 	}
 	nowFunc := cfg.NowFunc
 	if nowFunc == nil {
@@ -233,7 +195,7 @@ func (w *Watcher) runDeepExtract(ctx context.Context) {
 
 // check performs a single poll cycle: get HEAD, compare, run pipeline if changed.
 func (w *Watcher) check(ctx context.Context, state *State, lastSHA *string) error {
-	headSHA, err := w.git.RevParseHEAD(w.repoDir)
+	headSHA, err := w.git.RevParseHEAD(ctx, w.repoDir)
 	if err != nil {
 		return fmt.Errorf("get HEAD: %w", err)
 	}
@@ -249,7 +211,7 @@ func (w *Watcher) check(ctx context.Context, state *State, lastSHA *string) erro
 		fromSHA = emptyTreeSHA
 	} else {
 		// Check if the stored SHA is still an ancestor of HEAD (handles force-push).
-		isAnc, err := w.git.IsAncestor(w.repoDir, fromSHA)
+		isAnc, err := w.git.IsAncestor(ctx, w.repoDir, fromSHA, headSHA)
 		if err != nil {
 			return fmt.Errorf("check ancestor: %w", err)
 		}

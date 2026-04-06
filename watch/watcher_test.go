@@ -34,7 +34,7 @@ type mockGitOps struct {
 	ancestor   map[string]bool // sha -> isAncestor result
 }
 
-func (m *mockGitOps) RevParseHEAD(_ string) (string, error) {
+func (m *mockGitOps) RevParseHEAD(_ context.Context, _ string) (string, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.totalCalls++
@@ -46,7 +46,7 @@ func (m *mockGitOps) RevParseHEAD(_ string) (string, error) {
 	return sha, nil
 }
 
-func (m *mockGitOps) IsAncestor(_ string, ancestor string) (bool, error) {
+func (m *mockGitOps) IsAncestor(_ context.Context, _ string, ancestor string, _ string) (bool, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.ancestor == nil {
