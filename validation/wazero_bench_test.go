@@ -256,6 +256,9 @@ func TestCorrectnessComparison(t *testing.T) {
 // --- Wall-Clock Timing and Memory Report ---
 
 func TestParseTimingReport(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping timing report in short mode (pure-Go parser is slow on large files)")
+	}
 	files := testFiles(t)
 
 	type result struct {
@@ -301,23 +304,27 @@ func TestParseTimingReport(t *testing.T) {
 		r.cgoDur = cgoTotal / time.Duration(runs)
 		r.cgoAlloc = cgoMem / uint64(runs)
 
-		// PureGo timing
-		for i := 0; i < warmup; i++ {
-			parsePureGo(src)
+		// PureGo timing — skip files >100KB to avoid multi-minute hangs.
+		if len(src) <= 100*1024 {
+			for i := 0; i < warmup; i++ {
+				parsePureGo(src)
+			}
+			var pureTotal time.Duration
+			var pureMem uint64
+			for i := 0; i < runs; i++ {
+				var m1, m2 runtime.MemStats
+				runtime.ReadMemStats(&m1)
+				start := time.Now()
+				parsePureGo(src)
+				pureTotal += time.Since(start)
+				runtime.ReadMemStats(&m2)
+				pureMem += m2.TotalAlloc - m1.TotalAlloc
+			}
+			r.pureDur = pureTotal / time.Duration(runs)
+			r.pureAlloc = pureMem / uint64(runs)
+		} else {
+			t.Logf("skipping PureGo timing for %s (%d bytes) — too large", name, len(src))
 		}
-		var pureTotal time.Duration
-		var pureMem uint64
-		for i := 0; i < runs; i++ {
-			var m1, m2 runtime.MemStats
-			runtime.ReadMemStats(&m1)
-			start := time.Now()
-			parsePureGo(src)
-			pureTotal += time.Since(start)
-			runtime.ReadMemStats(&m2)
-			pureMem += m2.TotalAlloc - m1.TotalAlloc
-		}
-		r.pureDur = pureTotal / time.Duration(runs)
-		r.pureAlloc = pureMem / uint64(runs)
 
 		results = append(results, r)
 	}
