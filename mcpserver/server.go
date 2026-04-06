@@ -18,6 +18,9 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
+
+	"github.com/mark3labs/mcp-go/server"
 
 	"github.com/live-docs/live_docs/aicontext"
 	"github.com/live-docs/live_docs/anchor"
@@ -220,6 +223,40 @@ func (s *Server) Serve() error {
 	case <-ctx.Done():
 		// Signal received — clean shutdown.
 		return nil
+	}
+}
+
+// ServeHTTP starts the MCP server over HTTP with Server-Sent Events,
+// allowing multiple concurrent clients. Blocks until the server is stopped
+// via SIGTERM/SIGINT. addr is a host:port string (e.g. ":8080").
+func (s *Server) ServeHTTP(addr string) error {
+	mcpSrv := s.registry.Underlying()
+
+	sseServer := server.NewSSEServer(mcpSrv,
+		server.WithBaseURL("http://localhost"+addr),
+	)
+
+	// Emit ready signal to stderr.
+	fmt.Fprintf(os.Stderr, "{\"status\":\"ready\",\"transport\":\"http\",\"addr\":%q}\n", addr)
+
+	// Set up signal handling for clean shutdown.
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
+	defer stop()
+
+	// Run the HTTP server in a goroutine so we can react to signals.
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- sseServer.Start(addr)
+	}()
+
+	select {
+	case err := <-errCh:
+		return err
+	case <-ctx.Done():
+		// Signal received — graceful shutdown.
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		return sseServer.Shutdown(shutdownCtx)
 	}
 }
 

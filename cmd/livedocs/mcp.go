@@ -12,6 +12,7 @@ import (
 	"github.com/live-docs/live_docs/db"
 	"github.com/live-docs/live_docs/extractor/defaults"
 	"github.com/live-docs/live_docs/mcpserver"
+	"github.com/live-docs/live_docs/sourcegraph"
 )
 
 var (
@@ -19,18 +20,28 @@ var (
 	mcpDataDir         string
 	mcpTelemetry       bool
 	mcpEnableStaleness bool
+	mcpTransport       string
+	mcpPort            int
 )
 
 var mcpCmd = &cobra.Command{
 	Use:   "mcp",
 	Short: "Start MCP server mode",
-	Long: `Run livedocs as a Model Context Protocol (MCP) server over stdio.
+	Long: `Run livedocs as a Model Context Protocol (MCP) server.
 
-Exposes four tools to AI assistants:
+Supports two transport modes:
+  stdio (default)  Communicates over stdin/stdout (single client)
+  http             Serves over HTTP with Server-Sent Events (multi-client)
+
+Exposes tools to AI assistants:
   query_claims     Search documentation claims by symbol name
   check_drift      Detect stale references in README files
   verify_section   Check if claims for a code range are still valid
   check_ai_context Verify AI context files for broken references
+
+Examples:
+  livedocs mcp                              # stdio transport (default)
+  livedocs mcp --transport http --port 8080  # HTTP/SSE on port 8080
 
 Setup: claude mcp add livedocs -- livedocs mcp
 See SETUP.md for Cursor and Windsurf configuration.`,
@@ -59,6 +70,17 @@ See SETUP.md for Cursor and Windsurf configuration.`,
 			}
 		}
 
+		// Wire up ExtractionRunner when data-dir is set and Sourcegraph is configured.
+		if mcpDataDir != "" && os.Getenv("SRC_ACCESS_TOKEN") != "" {
+			sgClient, sgErr := sourcegraph.NewSourcegraphClient()
+			if sgErr != nil {
+				log.Printf("warning: create sourcegraph client for extraction runner: %v (extraction disabled)", sgErr)
+			} else {
+				cfg.ExtractionRunner = newExtractionRunner(sgClient, mcpDataDir, 10)
+				defer sgClient.Close()
+			}
+		}
+
 		cfg.Telemetry = mcpTelemetry || os.Getenv("LIVEDOCS_TELEMETRY") == "1"
 		srv, err := mcpserver.New(cfg)
 		if err != nil {
@@ -66,7 +88,15 @@ See SETUP.md for Cursor and Windsurf configuration.`,
 		}
 		defer srv.Close()
 
-		return srv.Serve()
+		switch mcpTransport {
+		case "stdio":
+			return srv.Serve()
+		case "http":
+			addr := fmt.Sprintf(":%d", mcpPort)
+			return srv.ServeHTTP(addr)
+		default:
+			return fmt.Errorf("unknown transport %q: supported values are \"stdio\" and \"http\"", mcpTransport)
+		}
 	},
 }
 
@@ -75,6 +105,8 @@ func init() {
 	mcpCmd.Flags().StringVar(&mcpDataDir, "data-dir", "", "directory containing per-repo .claims.db files (multi-repo mode)")
 	mcpCmd.Flags().BoolVar(&mcpTelemetry, "telemetry", false, "enable anonymous usage telemetry (writes daily metrics to ~/.livedocs/telemetry/)")
 	mcpCmd.Flags().BoolVar(&mcpEnableStaleness, "enable-staleness", true, "auto-discover repo roots and enable lazy staleness checking")
+	mcpCmd.Flags().StringVar(&mcpTransport, "transport", "stdio", "transport type: \"stdio\" (default) or \"http\" (HTTP/SSE for multi-client access)")
+	mcpCmd.Flags().IntVar(&mcpPort, "port", 8080, "port for HTTP transport (only used with --transport http)")
 }
 
 // discoverRepoRoots scans dataDir for *.claims.db files, opens each to read
