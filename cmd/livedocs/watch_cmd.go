@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -31,6 +32,10 @@ var (
 	watchReposDir       string
 	watchEnrich         bool
 	watchEnrichDebounce time.Duration
+	watchSource         string
+	watchRepos          string
+	watchConcurrency    int
+	watchDataDir        string
 )
 
 var watchCmd = &cobra.Command{
@@ -40,15 +45,23 @@ var watchCmd = &cobra.Command{
 extraction when HEAD changes. Persists last-indexed commit SHA to a state
 file so it resumes correctly after restart.
 
-Supports three modes:
+Supports four modes:
   1. Single repo:  livedocs watch <path>
   2. Config file:  livedocs watch --config repos.json
   3. Directory:    livedocs watch --repos-dir /path/to/repos
+  4. Sourcegraph:  livedocs watch --source sourcegraph --repos 'org/*'
+
+Mode 4 polls Sourcegraph for new commits on remote repos without cloning.
 
 Handles force-push by falling back to full extraction when the stored SHA
 is no longer an ancestor of the current HEAD.`,
 	Args: cobra.MaximumNArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
+		// Sourcegraph remote mode.
+		if watchSource == "sourcegraph" {
+			return runWatchSourcegraph(cmd)
+		}
+
 		// Determine which mode we're in.
 		hasPath := len(args) == 1
 		hasConfig := watchConfig != ""
@@ -133,6 +146,10 @@ func init() {
 	watchCmd.Flags().StringVar(&watchReposDir, "repos-dir", "", "directory of git repos to watch")
 	watchCmd.Flags().BoolVar(&watchEnrich, "enrich", false, "enable semantic enrichment via Sourcegraph after each extraction")
 	watchCmd.Flags().DurationVar(&watchEnrichDebounce, "enrich-debounce", 5*time.Second, "debounce interval for enrichment queue (e.g. 5s, 10s)")
+	watchCmd.Flags().StringVar(&watchSource, "source", "local", "extraction source: 'local' or 'sourcegraph'")
+	watchCmd.Flags().StringVar(&watchRepos, "repos", "", "repo pattern for Sourcegraph discovery (e.g. 'kubernetes/*')")
+	watchCmd.Flags().IntVar(&watchConcurrency, "concurrency", 10, "max concurrent MCP calls per repo (sourcegraph mode)")
+	watchCmd.Flags().StringVar(&watchDataDir, "data-dir", "", "output directory for .claims.db files (sourcegraph mode)")
 }
 
 // runWatchMulti launches one watcher per repo entry, all sharing the same
@@ -298,4 +315,209 @@ func runWatchMulti(cmd *cobra.Command, entries []watch.RepoEntry, stateFile stri
 		return err
 	}
 	return nil
+}
+
+// runWatchSourcegraph launches remote watchers that poll Sourcegraph for new
+// commits on repos matching the --repos pattern. Each repo gets its own Watcher
+// with RemoteGitOps and a SourcegraphFileSource-backed pipeline.
+func runWatchSourcegraph(cmd *cobra.Command) error {
+	ctx := cmd.Context()
+	out := cmd.OutOrStdout()
+
+	// Validate required inputs.
+	if os.Getenv("SRC_ACCESS_TOKEN") == "" {
+		return fmt.Errorf("SRC_ACCESS_TOKEN environment variable is required for --source sourcegraph")
+	}
+	if watchRepos == "" {
+		return fmt.Errorf("--repos is required when --source sourcegraph is used")
+	}
+	// Default interval for remote mode is 5m (local default is 5s).
+	interval := watchInterval
+	if !cmd.Flags().Changed("interval") {
+		interval = 5 * time.Minute
+	}
+
+	dataDir := watchDataDir
+	if dataDir == "" {
+		dataDir = "."
+	}
+	if err := os.MkdirAll(dataDir, 0o755); err != nil {
+		return fmt.Errorf("create data-dir: %w", err)
+	}
+
+	// Create Sourcegraph MCP client.
+	sgClient, err := sourcegraph.NewSourcegraphClient()
+	if err != nil {
+		return fmt.Errorf("create sourcegraph client: %w", err)
+	}
+	defer sgClient.Close()
+
+	// Discover repos matching the pattern.
+	repos, err := discoverSourcegraphRepos(ctx, sgClient, watchRepos)
+	if err != nil {
+		return fmt.Errorf("discover repos: %w", err)
+	}
+	if len(repos) == 0 {
+		return fmt.Errorf("no repos found matching pattern %q", watchRepos)
+	}
+
+	fmt.Fprintf(out, "watch: discovered %d repos matching %q\n", len(repos), watchRepos)
+
+	// Set up signal handling for clean shutdown.
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+	go func() {
+		select {
+		case sig := <-sigCh:
+			fmt.Fprintf(out, "\nwatch: received %s, shutting down...\n", sig)
+			cancel()
+		case <-ctx.Done():
+		}
+	}()
+
+	// Determine state file.
+	stateFile := watchStateFile
+	if stateFile == "" {
+		stateFile = filepath.Join(dataDir, ".livedocs-watch-state.json")
+	}
+
+	// Load shared state.
+	sharedState := watch.LoadState(stateFile)
+
+	// Track resources for cleanup.
+	type remoteResources struct {
+		claimsDB   *db.ClaimsDB
+		cacheStore *cache.SQLiteStore
+	}
+	resources := make([]remoteResources, 0, len(repos))
+	defer func() {
+		for _, r := range resources {
+			r.cacheStore.Close()
+			r.claimsDB.Close()
+		}
+	}()
+
+	// Create a SourcegraphFileSource shared across repos (one MCP client).
+	fileSource, err := pipeline.NewSourcegraphFileSource(sgClient, sgToolLister{}, pipeline.WithConcurrency(watchConcurrency))
+	if err != nil {
+		return fmt.Errorf("create sourcegraph file source: %w", err)
+	}
+
+	var wg sync.WaitGroup
+	errCh := make(chan error, len(repos))
+
+	for _, repo := range repos {
+		repoName := repoBaseName(repo)
+		dbPath := filepath.Join(dataDir, repoName+".claims.db")
+
+		// Open claims DB.
+		claimsDB, err := db.OpenClaimsDB(dbPath)
+		if err != nil {
+			return fmt.Errorf("open claims db for %s: %w", repoName, err)
+		}
+		if err := claimsDB.CreateSchema(); err != nil {
+			claimsDB.Close()
+			return fmt.Errorf("create schema for %s: %w", repoName, err)
+		}
+
+		// Store extraction metadata.
+		if err := claimsDB.SetExtractionMeta(db.ExtractionMeta{
+			ExtractedAt: db.Now(),
+			RepoRoot:    repo,
+		}); err != nil {
+			claimsDB.Close()
+			return fmt.Errorf("set extraction meta for %s: %w", repoName, err)
+		}
+
+		// Open in-memory cache.
+		cacheStore, err := cache.NewSQLiteStore(":memory:", 2*1024*1024*1024)
+		if err != nil {
+			claimsDB.Close()
+			return fmt.Errorf("open cache for %s: %w", repoName, err)
+		}
+
+		resources = append(resources, remoteResources{claimsDB: claimsDB, cacheStore: cacheStore})
+
+		// Build registry (tree-sitter only for remote).
+		registry := buildRemoteRegistry()
+
+		// Build pipeline with SourcegraphFileSource.
+		p := pipeline.New(pipeline.Config{
+			Repo:       repo,
+			RepoDir:    "", // no local dir for remote repos
+			Cache:      cacheStore,
+			ClaimsDB:   claimsDB,
+			Registry:   registry,
+			FileSource: fileSource,
+		})
+
+		// Create watcher with RemoteGitOps.
+		w := watch.New(watch.Config{
+			RepoDir:   repo, // repo identifier used by RemoteGitOps
+			RepoName:  repoName,
+			Interval:  interval,
+			StateFile: stateFile,
+			Pipeline:  p,
+			Out:       out,
+			Git:       &watch.RemoteGitOps{Caller: sgClient},
+			State:     sharedState,
+		})
+
+		fmt.Fprintf(out, "watch: monitoring %s (remote)\n", repo)
+
+		wg.Add(1)
+		go func(name string) {
+			defer wg.Done()
+			if err := w.Run(ctx); err != nil {
+				errCh <- fmt.Errorf("watcher %s: %w", name, err)
+			}
+		}(repoName)
+	}
+
+	// Wait for all watchers to finish.
+	wg.Wait()
+	close(errCh)
+
+	// Return first error if any.
+	for err := range errCh {
+		return err
+	}
+	return nil
+}
+
+// discoverSourcegraphRepos calls the Sourcegraph list_repos MCP tool to find
+// repos matching the given pattern. Returns a slice of fully-qualified repo
+// identifiers (e.g., "github.com/kubernetes/kubernetes").
+func discoverSourcegraphRepos(ctx context.Context, caller pipeline.MCPCaller, pattern string) ([]string, error) {
+	result, err := caller.CallTool(ctx, "list_repos", map[string]any{
+		"query": pattern,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("list_repos for %q: %w", pattern, err)
+	}
+
+	if strings.TrimSpace(result) == "" {
+		return nil, nil
+	}
+
+	var repos []string
+	for _, line := range strings.Split(strings.TrimRight(result, "\n"), "\n") {
+		trimmed := strings.TrimSpace(line)
+		if trimmed != "" {
+			repos = append(repos, trimmed)
+		}
+	}
+	return repos, nil
+}
+
+// repoBaseName extracts the last path component from a repo identifier.
+// e.g., "github.com/kubernetes/kubernetes" -> "kubernetes"
+func repoBaseName(repo string) string {
+	if idx := strings.LastIndex(repo, "/"); idx >= 0 {
+		return repo[idx+1:]
+	}
+	return repo
 }
