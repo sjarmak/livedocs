@@ -1,0 +1,12 @@
+{"prefix":"dr","path":"../gas-city"}
+{"prefix":"co","path":"../CodeScaleBench"}
+{"prefix":"EnterpriseBench","path":"../EnterpriseBench"}
+{"prefix":"codeprobe","path":"../codeprobe"}
+{"prefix":"agent-diagnostics","path":"../agent-diagnostics"}
+{"prefix":"scix_experiments","path":"../scix_experiments"}
+{"prefix":"background-agents","path":"../background-agents"}
+{"prefix":"GEO","path":"../GEO"}
+{"prefix":"mcp-ax","path":"../mcp-ax"}
+{"prefix":"sourcegraph","path":"../sourcegraph"}
+{"prefix":"live_docs","path":"."}
+{"prefix":"gc","path":"../gascity"}
