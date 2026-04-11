@@ -162,39 +162,107 @@ func queryTribalFactsForSymbol(
 			continue
 		}
 
+		// Pass 1: direct symbol-level tribal facts.
+		priorCount := len(resp.Facts)
 		for _, sym := range symbols {
 			facts, err := cdb.GetTribalFactsBySubject(sym.ID)
 			if err != nil {
-				// Skip if tribal tables don't exist in this DB.
 				continue
 			}
-
 			for _, fact := range facts {
-				// Filter by kinds if specified.
-				if len(kindSet) > 0 && !kindSet[fact.Kind] {
-					continue
-				}
-				// Filter by minimum confidence.
-				if fact.Confidence < minConfidence {
-					continue
-				}
-				// Filter to active facts only.
-				if fact.Status != "active" {
-					continue
-				}
-
-				// Validate provenance envelope — reject invalid facts with error.
-				if err := validateProvenanceEnvelope(fact); err != nil {
+				if err := appendFilteredFact(&resp, fact, kindSet, minConfidence); err != nil {
 					return resp, err
 				}
+			}
+		}
 
-				resp.Facts = append(resp.Facts, factToEnvelope(fact))
+		// Pass 2: file-level fallback. If we found symbols in this repo but
+		// no tribal facts from pass 1, resolve the symbol's import_path to a
+		// local directory prefix and find file-level tribal subjects there.
+		if len(symbols) > 0 && len(resp.Facts) == priorCount {
+			importPaths, err := cdb.GetImportPathsForSymbolName(symbolName)
+			if err != nil {
+				continue
+			}
+			for _, ip := range importPaths {
+				dirPrefix := importPathToLocalDir(ip)
+				if dirPrefix == "" {
+					continue
+				}
+				fileSubjects, err := cdb.GetTribalFactSubjectsByPathPrefix(escapeLike(dirPrefix))
+				if err != nil {
+					continue
+				}
+				for _, fsym := range fileSubjects {
+					facts, err := cdb.GetTribalFactsBySubject(fsym.ID)
+					if err != nil {
+						continue
+					}
+					for _, fact := range facts {
+						if err := appendFilteredFact(&resp, fact, kindSet, minConfidence); err != nil {
+							return resp, err
+						}
+					}
+				}
 			}
 		}
 	}
 
 	resp.Total = len(resp.Facts)
 	return resp, nil
+}
+
+// importPathToLocalDir extracts a local directory prefix from a Go import path
+// by stripping known module prefixes. Returns a path with trailing "/".
+// Examples:
+//
+//	"github.com/live-docs/live_docs/db" → "db/"
+//	"github.com/live-docs/live_docs/extractor/tribal" → "extractor/tribal/"
+//	"db" → "db/"
+func importPathToLocalDir(importPath string) string {
+	// Common Go module prefixes: 3-segment (github.com/org/repo).
+	parts := strings.Split(importPath, "/")
+	if len(parts) >= 3 && (parts[0] == "github.com" || parts[0] == "gitlab.com" || parts[0] == "bitbucket.org") {
+		// Strip "github.com/org/repo" prefix.
+		local := strings.Join(parts[3:], "/")
+		if local == "" {
+			// Root package — tribal subjects would be at repo root.
+			return ""
+		}
+		return local + "/"
+	}
+	// For non-standard import paths, use the import_path directly as prefix.
+	if importPath != "" {
+		return importPath + "/"
+	}
+	return ""
+}
+
+// escapeLike escapes SQL LIKE wildcard characters so they match literally.
+func escapeLike(s string) string {
+	s = strings.ReplaceAll(s, `\`, `\\`)
+	s = strings.ReplaceAll(s, `%`, `\%`)
+	s = strings.ReplaceAll(s, `_`, `\_`)
+	return s
+}
+
+// appendFilteredFact applies kind, confidence, and status filters to a tribal
+// fact, validates its provenance envelope, and appends it to the response.
+func appendFilteredFact(resp *tribalResponse, fact db.TribalFact, kindSet map[string]bool, minConfidence float64) error {
+	if len(kindSet) > 0 && !kindSet[fact.Kind] {
+		return nil
+	}
+	if fact.Confidence < minConfidence {
+		return nil
+	}
+	if fact.Status != "active" {
+		return nil
+	}
+	if err := validateProvenanceEnvelope(fact); err != nil {
+		return err
+	}
+	resp.Facts = append(resp.Facts, factToEnvelope(fact))
+	return nil
 }
 
 // ---------------------------------------------------------------------------

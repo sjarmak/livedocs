@@ -337,6 +337,67 @@ func (c *ClaimsDB) ListDistinctSourceFiles() ([]string, error) {
 	return files, rows.Err()
 }
 
+// GetImportPathsForSymbolName returns distinct import_path values from symbols
+// whose symbol_name matches the given pattern (SQL LIKE).
+// This enables resolving a symbol name like "ClaimsDB" to its package path
+// "github.com/live-docs/live_docs/db" so tribal facts keyed by file path
+// in that package directory can be found.
+func (c *ClaimsDB) GetImportPathsForSymbolName(pattern string) ([]string, error) {
+	rows, err := c.exec.Query(`
+		SELECT DISTINCT import_path
+		FROM symbols
+		WHERE symbol_name LIKE ?
+		ORDER BY import_path
+	`, pattern)
+	if err != nil {
+		return nil, fmt.Errorf("get import paths for symbol name: %w", err)
+	}
+	defer rows.Close()
+
+	var paths []string
+	for rows.Next() {
+		var p string
+		if err := rows.Scan(&p); err != nil {
+			return nil, fmt.Errorf("scan import path: %w", err)
+		}
+		paths = append(paths, p)
+	}
+	return paths, rows.Err()
+}
+
+// GetTribalFactSubjectsByPathPrefix returns tribal fact subject symbols
+// whose symbol_name starts with the given prefix. This finds file-level
+// tribal subjects (e.g., "db/claims.go") within a package directory
+// (e.g., "db/").
+func (c *ClaimsDB) GetTribalFactSubjectsByPathPrefix(prefix string) ([]Symbol, error) {
+	rows, err := c.exec.Query(`
+		SELECT DISTINCT s.id, s.repo, s.import_path, s.symbol_name,
+		       s.language, s.kind, s.visibility, s.display_name, s.scip_symbol
+		FROM symbols s
+		JOIN tribal_facts tf ON tf.subject_id = s.id
+		WHERE s.symbol_name LIKE ? ESCAPE '\'
+		ORDER BY s.symbol_name
+	`, prefix+"%")
+	if err != nil {
+		return nil, fmt.Errorf("get tribal fact subjects by path prefix: %w", err)
+	}
+	defer rows.Close()
+
+	var symbols []Symbol
+	for rows.Next() {
+		var s Symbol
+		var displayName, scipSymbol sql.NullString
+		if err := rows.Scan(&s.ID, &s.Repo, &s.ImportPath, &s.SymbolName,
+			&s.Language, &s.Kind, &s.Visibility, &displayName, &scipSymbol); err != nil {
+			return nil, fmt.Errorf("scan symbol: %w", err)
+		}
+		s.DisplayName = displayName.String
+		s.SCIPSymbol = scipSymbol.String
+		symbols = append(symbols, s)
+	}
+	return symbols, rows.Err()
+}
+
 // populateEvidence loads evidence rows for each fact in the slice.
 func (c *ClaimsDB) populateEvidence(facts []TribalFact) error {
 	for i := range facts {
