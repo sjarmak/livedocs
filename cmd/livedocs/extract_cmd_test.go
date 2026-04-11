@@ -19,6 +19,7 @@ func resetExtractFlags() {
 	extractRepo = ""
 	extractOutput = ""
 	extractTier2 = false
+	extractTribal = ""
 }
 
 func TestExtractCommandRegistered(t *testing.T) {

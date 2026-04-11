@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -18,6 +19,7 @@ import (
 	"github.com/live-docs/live_docs/extractor/goextractor"
 	"github.com/live-docs/live_docs/extractor/lang"
 	"github.com/live-docs/live_docs/extractor/treesitter"
+	"github.com/live-docs/live_docs/extractor/tribal"
 	"github.com/live-docs/live_docs/gitdiff"
 	"github.com/live-docs/live_docs/pipeline"
 	"github.com/live-docs/live_docs/semantic"
@@ -29,6 +31,7 @@ var (
 	extractRepo        string
 	extractOutput      string
 	extractTier2       bool
+	extractTribal      string
 	extractDataDir     string
 	extractFromRev     string
 	extractToRev       string
@@ -144,6 +147,8 @@ func init() {
 	extractCmd.Flags().StringVar(&extractRepo, "repo", "", "repository name or URL (URL when --source clone)")
 	extractCmd.Flags().StringVarP(&extractOutput, "output", "o", "", "output SQLite file path (default: <repo>.claims.db)")
 	extractCmd.Flags().BoolVar(&extractTier2, "tier2", false, "generate Tier 2 semantic claims via LLM (requires ANTHROPIC_API_KEY)")
+	tribalFlag := extractCmd.Flags().VarPF(&tribalFlagValue{val: &extractTribal}, "tribal", "", "tribal knowledge extraction mode: deterministic (default when flag present), llm")
+	tribalFlag.NoOptDefVal = "deterministic"
 	extractCmd.Flags().StringVar(&extractDataDir, "data-dir", "", "directory for output .claims.db (used with --source sourcegraph)")
 	extractCmd.Flags().StringVar(&extractFromRev, "from-rev", "", "start revision for incremental extraction (used with --source sourcegraph)")
 	extractCmd.Flags().StringVar(&extractToRev, "to-rev", "", "end revision for incremental extraction (used with --source sourcegraph)")
@@ -398,6 +403,21 @@ func runExtract(ctx context.Context, cmd *cobra.Command, repoDir, repoName, outp
 
 		fmt.Fprintf(out, "Semantic claims: %d stored, %d filtered (confidence < %.1f or sensitive)\n",
 			semanticStored, semanticFiltered, confidenceThreshold)
+	}
+
+	// Phase 4: Tribal knowledge extraction (if requested).
+	if extractTribal != "" {
+		switch extractTribal {
+		case "deterministic":
+			fmt.Fprintf(out, "Running tribal knowledge extraction (deterministic)...\n")
+			if err := runTribalExtraction(ctx, out, claimsDB, repoDir, repoName); err != nil {
+				return fmt.Errorf("tribal extraction: %w", err)
+			}
+		case "llm":
+			return fmt.Errorf("LLM tribal extraction requires explicit config opt-in (Phase 2)")
+		default:
+			return fmt.Errorf("unknown --tribal value: %q (valid: deterministic, llm)", extractTribal)
+		}
 	}
 
 	// Count symbols in DB.
@@ -766,4 +786,158 @@ func countSymbols(claimsDB *db.ClaimsDB) int {
 		return 0
 	}
 	return len(symbols)
+}
+
+// tribalFlagValue implements pflag.Value for the --tribal flag.
+type tribalFlagValue struct {
+	val *string
+}
+
+func (t *tribalFlagValue) String() string {
+	if t.val == nil {
+		return ""
+	}
+	return *t.val
+}
+
+func (t *tribalFlagValue) Set(s string) error {
+	switch s {
+	case "deterministic", "llm":
+		*t.val = s
+		return nil
+	default:
+		return fmt.Errorf("invalid --tribal value: %q (valid: deterministic, llm)", s)
+	}
+}
+
+func (t *tribalFlagValue) Type() string { return "string" }
+
+// runTribalExtraction runs all Phase 1 deterministic tribal extractors on the
+// extracted repository and inserts facts into the claims database.
+func runTribalExtraction(ctx context.Context, out io.Writer, claimsDB *db.ClaimsDB, repoDir, repoName string) error {
+	// Ensure tribal schema exists.
+	if err := claimsDB.CreateTribalSchema(); err != nil {
+		return fmt.Errorf("create tribal schema: %w", err)
+	}
+
+	var ownershipCount, rationaleCount, markerCount, blameCount int
+
+	// 1. Codeowners extraction.
+	n, err := tribal.ExtractCodeowners(claimsDB, repoDir, repoName)
+	if err != nil {
+		fmt.Fprintf(out, "Tribal: codeowners warning: %v\n", err)
+	} else {
+		ownershipCount += n
+	}
+
+	// 2. Walk repo files for blame/rationale/marker extraction.
+	// We walk directly rather than querying DB source_files, because the Go deep
+	// extractor stores absolute paths while non-Go files store relative paths.
+	blameExt := &tribal.BlameExtractor{}
+	rationaleExt := &tribal.CommitRationaleExtractor{RepoDir: repoDir}
+	markerExt := &tribal.MarkerExtractor{}
+
+	walkErr := filepath.WalkDir(repoDir, func(path string, d os.DirEntry, wErr error) error {
+		if wErr != nil {
+			return nil
+		}
+		if d.IsDir() {
+			if skipDirs[d.Name()] {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+
+		// Only process source files that extractors would handle.
+		ext := strings.ToLower(filepath.Ext(path))
+		switch ext {
+		case ".go", ".ts", ".tsx", ".py", ".sh":
+			// supported
+		default:
+			return nil
+		}
+
+		relPath, relErr := filepath.Rel(repoDir, path)
+		if relErr != nil {
+			relPath = path
+		}
+
+		// Upsert a file-level symbol for tribal facts.
+		fileSymID, upErr := claimsDB.UpsertSymbol(db.Symbol{
+			Repo:       repoName,
+			ImportPath: relPath,
+			SymbolName: relPath,
+			Language:   "file",
+			Kind:       "file",
+			Visibility: "public",
+		})
+		if upErr != nil {
+			return nil // skip this file
+		}
+
+		// 3. Blame extraction: use file-level symbol spanning all lines.
+		content, readErr := os.ReadFile(path)
+		if readErr != nil {
+			return nil
+		}
+		lineCount := 1
+		for _, b := range content {
+			if b == '\n' {
+				lineCount++
+			}
+		}
+
+		symRanges := []tribal.SymbolRange{{
+			SymbolID:  fileSymID,
+			StartLine: 1,
+			EndLine:   lineCount,
+		}}
+		blameFacts, blameErr := blameExt.ExtractForFile(ctx, repoDir, relPath, symRanges)
+		if blameErr == nil {
+			for _, fact := range blameFacts {
+				if _, insertErr := claimsDB.InsertTribalFact(fact, fact.Evidence); insertErr == nil {
+					blameCount++
+				}
+			}
+		}
+
+		// 4. Commit rationale extraction.
+		fact, evidence, ratErr := rationaleExt.ExtractForFile(ctx, relPath, fileSymID)
+		if ratErr == nil && fact != nil {
+			if _, insertErr := claimsDB.InsertTribalFact(*fact, evidence); insertErr == nil {
+				rationaleCount++
+			}
+		}
+
+		// 5. Inline marker extraction.
+		markerFacts, markerErr := markerExt.ExtractFromFile(relPath, content)
+		if markerErr == nil {
+			for i := range markerFacts {
+				markerFacts[i].SubjectID = fileSymID
+				if _, insertErr := claimsDB.InsertTribalFact(markerFacts[i], markerFacts[i].Evidence); insertErr == nil {
+					markerCount++
+				}
+			}
+		}
+
+		return nil
+	})
+	if walkErr != nil {
+		return fmt.Errorf("tribal walk: %w", walkErr)
+	}
+
+	fmt.Fprintf(out, "\n## Tribal Knowledge Summary\n\n")
+	fmt.Fprintf(out, "- **Ownership facts (codeowners)**: %d\n", ownershipCount)
+	fmt.Fprintf(out, "- **Ownership facts (blame)**: %d\n", blameCount)
+	fmt.Fprintf(out, "- **Rationale facts**: %d\n", rationaleCount)
+	fmt.Fprintf(out, "- **Marker facts (todo/quirk)**: %d\n", markerCount)
+	fmt.Fprintf(out, "- **Total tribal facts**: %d\n", ownershipCount+blameCount+rationaleCount+markerCount)
+
+	return nil
 }

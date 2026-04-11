@@ -294,6 +294,49 @@ func (c *ClaimsDB) GetTribalFactsByStatuses(statuses ...string) ([]TribalFact, e
 	return facts, nil
 }
 
+// CountTribalFactsByKind returns the number of tribal facts grouped by kind.
+func (c *ClaimsDB) CountTribalFactsByKind() (map[string]int, error) {
+	rows, err := c.exec.Query(`
+		SELECT kind, COUNT(*) FROM tribal_facts
+		WHERE status = 'active'
+		GROUP BY kind ORDER BY kind
+	`)
+	if err != nil {
+		return nil, fmt.Errorf("count tribal facts by kind: %w", err)
+	}
+	defer rows.Close()
+
+	counts := make(map[string]int)
+	for rows.Next() {
+		var kind string
+		var count int
+		if err := rows.Scan(&kind, &count); err != nil {
+			return nil, fmt.Errorf("scan tribal fact count: %w", err)
+		}
+		counts[kind] = count
+	}
+	return counts, rows.Err()
+}
+
+// ListDistinctSourceFiles returns all distinct source_file values from the claims table.
+func (c *ClaimsDB) ListDistinctSourceFiles() ([]string, error) {
+	rows, err := c.exec.Query(`SELECT DISTINCT source_file FROM claims ORDER BY source_file`)
+	if err != nil {
+		return nil, fmt.Errorf("list distinct source files: %w", err)
+	}
+	defer rows.Close()
+
+	var files []string
+	for rows.Next() {
+		var f string
+		if err := rows.Scan(&f); err != nil {
+			return nil, fmt.Errorf("scan source file: %w", err)
+		}
+		files = append(files, f)
+	}
+	return files, rows.Err()
+}
+
 // populateEvidence loads evidence rows for each fact in the slice.
 func (c *ClaimsDB) populateEvidence(facts []TribalFact) error {
 	for i := range facts {

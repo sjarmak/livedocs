@@ -20,6 +20,7 @@ func init() {
 	rootCmd.AddCommand(initCmd)
 	rootCmd.AddCommand(mcpCmd)
 	rootCmd.AddCommand(prbotCmd)
+	rootCmd.AddCommand(tribalCmd)
 	rootCmd.AddCommand(verifyCmd)
 	rootCmd.AddCommand(verifyClaimsCmd)
 	rootCmd.AddCommand(versionCmd)
