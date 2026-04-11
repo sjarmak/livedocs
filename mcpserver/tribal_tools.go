@@ -1,0 +1,338 @@
+// Package mcpserver tribal_tools.go defines three tribal knowledge MCP tools:
+// tribal_context_for_symbol, tribal_owners, and tribal_why_this_way.
+// These handlers use ONLY adapter types — no mcp-go imports.
+package mcpserver
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"strings"
+
+	"github.com/live-docs/live_docs/db"
+)
+
+// ---------------------------------------------------------------------------
+// Provenance envelope types
+// ---------------------------------------------------------------------------
+
+// tribalEvidenceEnvelope is the JSON representation of a single evidence row.
+type tribalEvidenceEnvelope struct {
+	SourceType string `json:"source_type"`
+	SourceRef  string `json:"source_ref"`
+	Author     string `json:"author,omitempty"`
+	AuthoredAt string `json:"authored_at,omitempty"`
+}
+
+// tribalFactEnvelope is the non-negotiable provenance envelope.
+// Every field is required; facts missing any field are rejected.
+type tribalFactEnvelope struct {
+	Body          string                   `json:"body"`
+	SourceQuote   string                   `json:"source_quote"`
+	Kind          string                   `json:"kind"`
+	Confidence    float64                  `json:"confidence"`
+	Corroboration int                      `json:"corroboration"`
+	Status        string                   `json:"status"`
+	Evidence      []tribalEvidenceEnvelope `json:"evidence"`
+	Extractor     string                   `json:"extractor"`
+	Model         string                   `json:"model"`
+	LastVerified  string                   `json:"last_verified"`
+}
+
+// tribalResponse is the JSON response for tribal tools.
+type tribalResponse struct {
+	Symbol string               `json:"symbol"`
+	Facts  []tribalFactEnvelope `json:"facts"`
+	Total  int                  `json:"total"`
+}
+
+// ---------------------------------------------------------------------------
+// Provenance validation
+// ---------------------------------------------------------------------------
+
+// validateProvenanceEnvelope checks that a TribalFact has all required
+// provenance fields. Returns an error describing the first missing field.
+func validateProvenanceEnvelope(fact db.TribalFact) error {
+	if fact.SourceQuote == "" {
+		return fmt.Errorf("fact %d missing required field: source_quote", fact.ID)
+	}
+	if len(fact.Evidence) == 0 {
+		return fmt.Errorf("fact %d missing required field: evidence (no evidence rows)", fact.ID)
+	}
+	if fact.Status == "" {
+		return fmt.Errorf("fact %d missing required field: status", fact.ID)
+	}
+	if fact.Extractor == "" {
+		return fmt.Errorf("fact %d missing required field: extractor", fact.ID)
+	}
+	if fact.LastVerified == "" {
+		return fmt.Errorf("fact %d missing required field: last_verified", fact.ID)
+	}
+	return nil
+}
+
+// factToEnvelope converts a validated TribalFact into a tribalFactEnvelope.
+func factToEnvelope(fact db.TribalFact) tribalFactEnvelope {
+	evidence := make([]tribalEvidenceEnvelope, 0, len(fact.Evidence))
+	for _, ev := range fact.Evidence {
+		evidence = append(evidence, tribalEvidenceEnvelope{
+			SourceType: ev.SourceType,
+			SourceRef:  ev.SourceRef,
+			Author:     ev.Author,
+			AuthoredAt: ev.AuthoredAt,
+		})
+	}
+	extractor := fact.Extractor
+	if fact.ExtractorVersion != "" {
+		extractor = fact.Extractor + "@" + fact.ExtractorVersion
+	}
+	return tribalFactEnvelope{
+		Body:          fact.Body,
+		SourceQuote:   fact.SourceQuote,
+		Kind:          fact.Kind,
+		Confidence:    fact.Confidence,
+		Corroboration: fact.Corroboration,
+		Status:        fact.Status,
+		Evidence:      evidence,
+		Extractor:     extractor,
+		Model:         fact.Model,
+		LastVerified:  fact.LastVerified,
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Shared query logic
+// ---------------------------------------------------------------------------
+
+// parseKinds splits a comma-separated kinds string into a slice.
+// Returns nil if the input is empty.
+func parseKinds(raw string) []string {
+	if raw == "" {
+		return nil
+	}
+	parts := strings.Split(raw, ",")
+	result := make([]string, 0, len(parts))
+	for _, p := range parts {
+		trimmed := strings.TrimSpace(p)
+		if trimmed != "" {
+			result = append(result, trimmed)
+		}
+	}
+	if len(result) == 0 {
+		return nil
+	}
+	return result
+}
+
+// queryTribalFactsForSymbol searches for symbols by name across the pool,
+// retrieves tribal facts, and applies kind/confidence filters. It validates
+// the provenance envelope for every fact and returns an error if any fact
+// fails validation.
+func queryTribalFactsForSymbol(
+	pool *DBPool,
+	symbolName string,
+	kinds []string,
+	minConfidence float64,
+) (tribalResponse, error) {
+	resp := tribalResponse{
+		Symbol: symbolName,
+		Facts:  make([]tribalFactEnvelope, 0),
+	}
+
+	// Build a set for O(1) kind lookups.
+	kindSet := make(map[string]bool, len(kinds))
+	for _, k := range kinds {
+		kindSet[k] = true
+	}
+
+	manifest, err := pool.Manifest()
+	if err != nil {
+		return resp, fmt.Errorf("list repos: %w", err)
+	}
+
+	for _, repoName := range manifest {
+		cdb, err := pool.Open(repoName)
+		if err != nil {
+			return resp, fmt.Errorf("open repo %s: %w", repoName, err)
+		}
+
+		symbols, err := cdb.SearchSymbolsByName(symbolName)
+		if err != nil {
+			// Skip repos that don't have the symbols table or have errors.
+			continue
+		}
+
+		for _, sym := range symbols {
+			facts, err := cdb.GetTribalFactsBySubject(sym.ID)
+			if err != nil {
+				// Skip if tribal tables don't exist in this DB.
+				continue
+			}
+
+			for _, fact := range facts {
+				// Filter by kinds if specified.
+				if len(kindSet) > 0 && !kindSet[fact.Kind] {
+					continue
+				}
+				// Filter by minimum confidence.
+				if fact.Confidence < minConfidence {
+					continue
+				}
+				// Filter to active facts only.
+				if fact.Status != "active" {
+					continue
+				}
+
+				// Validate provenance envelope — reject invalid facts with error.
+				if err := validateProvenanceEnvelope(fact); err != nil {
+					return resp, err
+				}
+
+				resp.Facts = append(resp.Facts, factToEnvelope(fact))
+			}
+		}
+	}
+
+	resp.Total = len(resp.Facts)
+	return resp, nil
+}
+
+// ---------------------------------------------------------------------------
+// Tool handlers
+// ---------------------------------------------------------------------------
+
+// TribalContextForSymbolHandler returns a ToolHandler that queries all active
+// tribal facts for a symbol with full provenance envelopes.
+func TribalContextForSymbolHandler(pool *DBPool) ToolHandler {
+	return func(_ context.Context, req ToolRequest) (ToolResult, error) {
+		symbol, err := req.RequireString("symbol")
+		if err != nil {
+			return NewErrorResult("missing required parameter 'symbol'"), nil
+		}
+		kindsRaw := req.GetString("kinds", "")
+		minConfidence := req.GetFloat("min_confidence", 0.0)
+
+		kinds := parseKinds(kindsRaw)
+		resp, err := queryTribalFactsForSymbol(pool, symbol, kinds, minConfidence)
+		if err != nil {
+			return NewErrorResultf("tribal_context_for_symbol: %v", err), nil
+		}
+
+		if resp.Total == 0 {
+			return NewTextResult(fmt.Sprintf("No tribal knowledge facts found for symbol %q.", symbol)), nil
+		}
+
+		data, err := json.Marshal(resp)
+		if err != nil {
+			return NewErrorResultf("marshal result: %v", err), nil
+		}
+		return NewTextResult(string(data)), nil
+	}
+}
+
+// TribalOwnersHandler returns a ToolHandler that queries ownership-kind
+// tribal facts for a symbol.
+func TribalOwnersHandler(pool *DBPool) ToolHandler {
+	return func(_ context.Context, req ToolRequest) (ToolResult, error) {
+		symbol, err := req.RequireString("symbol")
+		if err != nil {
+			return NewErrorResult("missing required parameter 'symbol'"), nil
+		}
+
+		resp, err := queryTribalFactsForSymbol(pool, symbol, []string{"ownership"}, 0.0)
+		if err != nil {
+			return NewErrorResultf("tribal_owners: %v", err), nil
+		}
+
+		if resp.Total == 0 {
+			return NewTextResult(fmt.Sprintf("No ownership facts found for symbol %q.", symbol)), nil
+		}
+
+		data, err := json.Marshal(resp)
+		if err != nil {
+			return NewErrorResultf("marshal result: %v", err), nil
+		}
+		return NewTextResult(string(data)), nil
+	}
+}
+
+// TribalWhyThisWayHandler returns a ToolHandler that queries rationale and
+// invariant tribal facts for a symbol.
+func TribalWhyThisWayHandler(pool *DBPool) ToolHandler {
+	return func(_ context.Context, req ToolRequest) (ToolResult, error) {
+		symbol, err := req.RequireString("symbol")
+		if err != nil {
+			return NewErrorResult("missing required parameter 'symbol'"), nil
+		}
+
+		resp, err := queryTribalFactsForSymbol(pool, symbol, []string{"rationale", "invariant"}, 0.0)
+		if err != nil {
+			return NewErrorResultf("tribal_why_this_way: %v", err), nil
+		}
+
+		if resp.Total == 0 {
+			return NewTextResult(fmt.Sprintf("No rationale or invariant facts found for symbol %q.", symbol)), nil
+		}
+
+		data, err := json.Marshal(resp)
+		if err != nil {
+			return NewErrorResultf("marshal result: %v", err), nil
+		}
+		return NewTextResult(string(data)), nil
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Tool definitions
+// ---------------------------------------------------------------------------
+
+// TribalContextForSymbolToolDef returns the ToolDef for tribal_context_for_symbol.
+func TribalContextForSymbolToolDef(pool *DBPool) ToolDef {
+	return ToolDef{
+		Name: "tribal_context_for_symbol",
+		Description: `Query all active tribal knowledge facts for a symbol with full provenance.
+
+Returns facts with complete provenance envelopes including body, source_quote, kind,
+confidence, corroboration count, status, evidence array, extractor, model, and last_verified.
+
+Supports filtering by fact kinds (comma-separated) and minimum confidence threshold.
+Only active facts are returned. Every fact is validated for completeness before emission.`,
+		Params: []ParamDef{
+			{Name: "symbol", Type: ParamString, Required: true, Description: "Symbol name to search for. Supports SQL LIKE wildcards (e.g., 'NewServer', '%Handler%')."},
+			{Name: "kinds", Type: ParamString, Required: false, Description: "Comma-separated list of fact kinds to include. Valid kinds: ownership, rationale, invariant, quirk, todo, deprecation. Omit to return all kinds."},
+			{Name: "min_confidence", Type: ParamNumber, Required: false, Description: "Minimum confidence threshold (0.0-1.0). Facts below this threshold are excluded. Default: 0.0 (return all)."},
+		},
+		Handler: TribalContextForSymbolHandler(pool),
+	}
+}
+
+// TribalOwnersToolDef returns the ToolDef for tribal_owners.
+func TribalOwnersToolDef(pool *DBPool) ToolDef {
+	return ToolDef{
+		Name: "tribal_owners",
+		Description: `Fast-path ownership query for a symbol.
+
+Returns only ownership-kind tribal facts with full provenance envelopes.
+Shortcut for tribal_context_for_symbol with kinds=ownership.`,
+		Params: []ParamDef{
+			{Name: "symbol", Type: ParamString, Required: true, Description: "Symbol name to search for. Supports SQL LIKE wildcards."},
+		},
+		Handler: TribalOwnersHandler(pool),
+	}
+}
+
+// TribalWhyThisWayToolDef returns the ToolDef for tribal_why_this_way.
+func TribalWhyThisWayToolDef(pool *DBPool) ToolDef {
+	return ToolDef{
+		Name: "tribal_why_this_way",
+		Description: `Query rationale and invariant facts for a symbol.
+
+Returns only rationale and invariant tribal facts with full provenance envelopes
+and confidence/corroboration labels. Use this to understand why code is structured
+a certain way or what constraints must be maintained.`,
+		Params: []ParamDef{
+			{Name: "symbol", Type: ParamString, Required: true, Description: "Symbol name to search for. Supports SQL LIKE wildcards."},
+		},
+		Handler: TribalWhyThisWayHandler(pool),
+	}
+}
