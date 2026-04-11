@@ -6,10 +6,12 @@ package mcpserver
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 
 	"github.com/live-docs/live_docs/db"
+	"modernc.org/sqlite"
 )
 
 // ---------------------------------------------------------------------------
@@ -158,16 +160,31 @@ func queryTribalFactsForSymbol(
 
 		symbols, err := cdb.SearchSymbolsByName(symbolName)
 		if err != nil {
-			// Skip repos that don't have the symbols table or have errors.
-			continue
+			if isMissingTableErr(err) {
+				continue
+			}
+			return resp, fmt.Errorf("search symbols in repo %s: %w", repoName, err)
 		}
 
 		// Pass 1: direct symbol-level tribal facts.
-		priorCount := len(resp.Facts)
+		// Track whether Pass 1 actually *found* any facts (before filtering)
+		// so the fallback only runs when the symbol has truly no tribal
+		// knowledge attached — not when its facts exist but were filtered
+		// out by kind/confidence/status. This prevents returning unrelated
+		// file-level facts when direct facts exist but are stale/quarantined.
+		pass1QueriedOK := false
+		pass1FoundFacts := false
 		for _, sym := range symbols {
 			facts, err := cdb.GetTribalFactsBySubject(sym.ID)
 			if err != nil {
-				continue
+				if isMissingTableErr(err) {
+					continue
+				}
+				return resp, fmt.Errorf("get tribal facts for symbol %d in repo %s: %w", sym.ID, repoName, err)
+			}
+			pass1QueriedOK = true
+			if len(facts) > 0 {
+				pass1FoundFacts = true
 			}
 			for _, fact := range facts {
 				if err := appendFilteredFact(&resp, fact, kindSet, minConfidence); err != nil {
@@ -176,32 +193,34 @@ func queryTribalFactsForSymbol(
 			}
 		}
 
-		// Pass 2: file-level fallback. If we found symbols in this repo but
-		// no tribal facts from pass 1, resolve the symbol's import_path to a
-		// local directory prefix and find file-level tribal subjects there.
-		if len(symbols) > 0 && len(resp.Facts) == priorCount {
+		// Pass 2: file-level fallback. Runs when Pass 1 successfully queried
+		// at least one symbol and found zero raw facts, meaning the symbol
+		// exists but tribal facts are stored at file-level granularity.
+		// Resolves the symbol's import_path to a local directory prefix and
+		// fetches file-level tribal facts in a single indexed query.
+		if pass1QueriedOK && !pass1FoundFacts {
 			importPaths, err := cdb.GetImportPathsForSymbolName(symbolName)
 			if err != nil {
-				continue
+				if isMissingTableErr(err) {
+					continue
+				}
+				return resp, fmt.Errorf("get import paths in repo %s: %w", repoName, err)
 			}
 			for _, ip := range importPaths {
 				dirPrefix := importPathToLocalDir(ip)
 				if dirPrefix == "" {
 					continue
 				}
-				fileSubjects, err := cdb.GetTribalFactSubjectsByPathPrefix(escapeLike(dirPrefix))
+				facts, err := cdb.GetTribalFactsByPathPrefix(repoName, escapeLike(dirPrefix))
 				if err != nil {
-					continue
-				}
-				for _, fsym := range fileSubjects {
-					facts, err := cdb.GetTribalFactsBySubject(fsym.ID)
-					if err != nil {
+					if isMissingTableErr(err) {
 						continue
 					}
-					for _, fact := range facts {
-						if err := appendFilteredFact(&resp, fact, kindSet, minConfidence); err != nil {
-							return resp, err
-						}
+					return resp, fmt.Errorf("get facts by path prefix in repo %s: %w", repoName, err)
+				}
+				for _, fact := range facts {
+					if err := appendFilteredFact(&resp, fact, kindSet, minConfidence); err != nil {
+						return resp, err
 					}
 				}
 			}
@@ -244,6 +263,28 @@ func escapeLike(s string) string {
 	s = strings.ReplaceAll(s, `%`, `\%`)
 	s = strings.ReplaceAll(s, `_`, `\_`)
 	return s
+}
+
+// isMissingTableErr reports whether err indicates a missing SQLite table —
+// the one error class the tribal query loop is allowed to swallow (repos
+// without the tribal schema are valid, just empty). All other errors must
+// propagate to the caller.
+//
+// Uses errors.As against the modernc sqlite driver's typed error to avoid
+// matching unrelated errors (e.g., an I/O error whose path happens to
+// contain "no such table").
+func isMissingTableErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	var sqliteErr *sqlite.Error
+	if !errors.As(err, &sqliteErr) {
+		return false
+	}
+	// SQLite reports "no such table" with code SQLITE_ERROR (1) and embeds
+	// the phrase in the message. Type assertion above ensures this is
+	// actually a SQLite driver error.
+	return strings.Contains(sqliteErr.Error(), "no such table")
 }
 
 // appendFilteredFact applies kind, confidence, and status filters to a tribal

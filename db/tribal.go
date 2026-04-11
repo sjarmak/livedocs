@@ -365,72 +365,96 @@ func (c *ClaimsDB) GetImportPathsForSymbolName(pattern string) ([]string, error)
 	return paths, rows.Err()
 }
 
-// GetTribalFactSubjectsByPathPrefix returns tribal fact subject symbols
-// whose symbol_name starts with the given prefix. This finds file-level
-// tribal subjects (e.g., "db/claims.go") within a package directory
-// (e.g., "db/").
-func (c *ClaimsDB) GetTribalFactSubjectsByPathPrefix(prefix string) ([]Symbol, error) {
+// GetTribalFactsByPathPrefix returns all tribal facts (with evidence populated)
+// whose subject symbol_name starts with the given path prefix, scoped to the
+// given repo. This is the efficient one-query path used by the MCP fallback:
+// it finds all file-level tribal subjects (e.g., "db/claims.go") in a package
+// directory (e.g., "db/") and returns their facts in a single JOIN, avoiding
+// the N+1 pattern of listing subjects then looking up each one.
+//
+// The prefix is passed to LIKE with ESCAPE '\' — callers must pre-escape any
+// wildcard metacharacters in the prefix before calling.
+func (c *ClaimsDB) GetTribalFactsByPathPrefix(repo, prefix string) ([]TribalFact, error) {
 	rows, err := c.exec.Query(`
-		SELECT DISTINCT s.id, s.repo, s.import_path, s.symbol_name,
-		       s.language, s.kind, s.visibility, s.display_name, s.scip_symbol
-		FROM symbols s
-		JOIN tribal_facts tf ON tf.subject_id = s.id
-		WHERE s.symbol_name LIKE ? ESCAPE '\'
-		ORDER BY s.symbol_name
-	`, prefix+"%")
+		SELECT tf.id, tf.subject_id, tf.kind, tf.body, tf.source_quote,
+		       tf.confidence, tf.corroboration, tf.extractor, tf.extractor_version,
+		       tf.model, tf.staleness_hash, tf.status, tf.created_at, tf.last_verified
+		FROM tribal_facts tf
+		JOIN symbols s ON s.id = tf.subject_id
+		WHERE s.repo = ? AND s.symbol_name LIKE ? ESCAPE '\'
+		ORDER BY tf.id
+	`, repo, prefix+"%")
 	if err != nil {
-		return nil, fmt.Errorf("get tribal fact subjects by path prefix: %w", err)
+		return nil, fmt.Errorf("get tribal facts by path prefix: %w", err)
 	}
 	defer rows.Close()
 
-	var symbols []Symbol
+	var facts []TribalFact
 	for rows.Next() {
-		var s Symbol
-		var displayName, scipSymbol sql.NullString
-		if err := rows.Scan(&s.ID, &s.Repo, &s.ImportPath, &s.SymbolName,
-			&s.Language, &s.Kind, &s.Visibility, &displayName, &scipSymbol); err != nil {
-			return nil, fmt.Errorf("scan symbol: %w", err)
+		var f TribalFact
+		var model sql.NullString
+		if err := rows.Scan(
+			&f.ID, &f.SubjectID, &f.Kind, &f.Body, &f.SourceQuote,
+			&f.Confidence, &f.Corroboration, &f.Extractor, &f.ExtractorVersion,
+			&model, &f.StalenessHash, &f.Status, &f.CreatedAt, &f.LastVerified,
+		); err != nil {
+			return nil, fmt.Errorf("scan tribal fact: %w", err)
 		}
-		s.DisplayName = displayName.String
-		s.SCIPSymbol = scipSymbol.String
-		symbols = append(symbols, s)
+		f.Model = model.String
+		facts = append(facts, f)
 	}
-	return symbols, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("tribal fact rows: %w", err)
+	}
+	if err := c.populateEvidence(facts); err != nil {
+		return nil, err
+	}
+	return facts, nil
 }
 
 // populateEvidence loads evidence rows for each fact in the slice.
 func (c *ClaimsDB) populateEvidence(facts []TribalFact) error {
 	for i := range facts {
-		rows, err := c.exec.Query(`
-			SELECT id, fact_id, source_type, source_ref, author, authored_at, content_hash
-			FROM tribal_evidence WHERE fact_id = ?
-			ORDER BY id
-		`, facts[i].ID)
+		evidence, err := c.loadEvidenceForFact(facts[i].ID)
 		if err != nil {
-			return fmt.Errorf("query tribal evidence for fact %d: %w", facts[i].ID, err)
-		}
-
-		var evidence []TribalEvidence
-		for rows.Next() {
-			var ev TribalEvidence
-			var author, authoredAt sql.NullString
-			err := rows.Scan(
-				&ev.ID, &ev.FactID, &ev.SourceType, &ev.SourceRef,
-				&author, &authoredAt, &ev.ContentHash,
-			)
-			if err != nil {
-				rows.Close()
-				return fmt.Errorf("scan tribal evidence: %w", err)
-			}
-			ev.Author = author.String
-			ev.AuthoredAt = authoredAt.String
-			evidence = append(evidence, ev)
-		}
-		rows.Close()
-		if err := rows.Err(); err != nil {
-			return fmt.Errorf("tribal evidence rows: %w", err)
+			return err
 		}
 		facts[i].Evidence = evidence
 	}
 	return nil
+}
+
+// loadEvidenceForFact fetches all evidence rows for one fact ID. Extracted
+// from populateEvidence so that `defer rows.Close()` scopes correctly per
+// query (deferring inside a loop would leak connections until the outer
+// function returned).
+func (c *ClaimsDB) loadEvidenceForFact(factID int64) ([]TribalEvidence, error) {
+	rows, err := c.exec.Query(`
+		SELECT id, fact_id, source_type, source_ref, author, authored_at, content_hash
+		FROM tribal_evidence WHERE fact_id = ?
+		ORDER BY id
+	`, factID)
+	if err != nil {
+		return nil, fmt.Errorf("query tribal evidence for fact %d: %w", factID, err)
+	}
+	defer rows.Close()
+
+	var evidence []TribalEvidence
+	for rows.Next() {
+		var ev TribalEvidence
+		var author, authoredAt sql.NullString
+		if err := rows.Scan(
+			&ev.ID, &ev.FactID, &ev.SourceType, &ev.SourceRef,
+			&author, &authoredAt, &ev.ContentHash,
+		); err != nil {
+			return nil, fmt.Errorf("scan tribal evidence: %w", err)
+		}
+		ev.Author = author.String
+		ev.AuthoredAt = authoredAt.String
+		evidence = append(evidence, ev)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("tribal evidence rows: %w", err)
+	}
+	return evidence, nil
 }
