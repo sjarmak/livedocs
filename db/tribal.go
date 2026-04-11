@@ -259,6 +259,41 @@ func (c *ClaimsDB) queryTribalFacts(where string, args ...interface{}) ([]Tribal
 	return facts, rows.Err()
 }
 
+// SymbolExistsByID returns true if a symbol with the given ID exists.
+func (c *ClaimsDB) SymbolExistsByID(id int64) (bool, error) {
+	var count int
+	err := c.exec.QueryRow("SELECT COUNT(*) FROM symbols WHERE id = ?", id).Scan(&count)
+	if err != nil {
+		return false, fmt.Errorf("check symbol exists: %w", err)
+	}
+	return count > 0, nil
+}
+
+// GetTribalFactsByStatuses returns all tribal facts matching any of the given
+// statuses, with their evidence rows populated.
+func (c *ClaimsDB) GetTribalFactsByStatuses(statuses ...string) ([]TribalFact, error) {
+	if len(statuses) == 0 {
+		return nil, nil
+	}
+	placeholders := ""
+	args := make([]interface{}, len(statuses))
+	for i, s := range statuses {
+		if i > 0 {
+			placeholders += ", "
+		}
+		placeholders += "?"
+		args[i] = s
+	}
+	facts, err := c.queryTribalFacts(fmt.Sprintf("status IN (%s)", placeholders), args...)
+	if err != nil {
+		return nil, fmt.Errorf("get tribal facts by statuses: %w", err)
+	}
+	if err := c.populateEvidence(facts); err != nil {
+		return nil, err
+	}
+	return facts, nil
+}
+
 // populateEvidence loads evidence rows for each fact in the slice.
 func (c *ClaimsDB) populateEvidence(facts []TribalFact) error {
 	for i := range facts {
