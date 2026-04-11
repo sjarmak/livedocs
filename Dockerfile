@@ -30,3 +30,4 @@ RUN apk add --no-cache libc6-compat
 COPY --from=builder /livedocs /usr/local/bin/livedocs
 
 ENTRYPOINT ["livedocs"]
+CMD ["mcp", "--transport", "http"]

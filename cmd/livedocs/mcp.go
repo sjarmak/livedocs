@@ -5,6 +5,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -92,7 +93,13 @@ See SETUP.md for Cursor and Windsurf configuration.`,
 		case "stdio":
 			return srv.Serve()
 		case "http":
-			addr := fmt.Sprintf(":%d", mcpPort)
+			port := mcpPort
+			if envPort := os.Getenv("PORT"); envPort != "" {
+				if p, err := strconv.Atoi(envPort); err == nil {
+					port = p
+				}
+			}
+			addr := fmt.Sprintf(":%d", port)
 			return srv.ServeHTTP(addr)
 		default:
 			return fmt.Errorf("unknown transport %q: supported values are \"stdio\" and \"http\"", mcpTransport)
