@@ -2,6 +2,7 @@
   "database": "dolt",
   "backend": "dolt",
   "dolt_mode": "embedded",
+  "dolt_server_host": "127.0.0.1",
   "dolt_database": "live_docs",
   "project_id": "c565d08e-9e85-4ecb-9688-9282f3055833"
 }
