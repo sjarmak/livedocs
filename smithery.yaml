@@ -1,0 +1,19 @@
+# Smithery configuration for livedocs MCP server.
+# See: https://smithery.ai/docs/build/project-config/smithery-yaml
+
+runtime: "container"
+
+startCommand:
+  type: "http"
+  configSchema:
+    type: "object"
+    required: []
+    properties:
+      dataDir:
+        type: "string"
+        default: ""
+        description: "Path to directory containing per-repo .claims.db files (multi-repo mode). Leave empty for single-repo mode."
+
+build:
+  dockerfile: "Dockerfile"
+  dockerBuildPath: "."
