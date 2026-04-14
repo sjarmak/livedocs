@@ -209,8 +209,10 @@ func tribalProposeFactHandler(pool *DBPool) ToolHandler {
 		now := db.Now()
 		stalenessHash := fmt.Sprintf("%x", sha256.Sum256([]byte(body+sourceQuote)))
 		extractor := "mcp_propose"
+		actor := "anonymous"
 		if writerIdentity != "" {
 			extractor = "mcp_propose:" + writerIdentity
+			actor = writerIdentity
 		}
 
 		newFact := db.TribalFact{
@@ -239,60 +241,47 @@ func tribalProposeFactHandler(pool *DBPool) ToolHandler {
 			}
 
 		case "correct":
-			err = cdb.RunInTransaction(func() error {
-				// Record the correction.
-				_, cErr := cdb.InsertTribalCorrection(db.TribalCorrection{
-					FactID:    factID,
-					Action:    "correct",
-					NewBody:   body,
-					Reason:    "corrected via tribal_propose_fact",
-					Actor:     writerIdentity,
-					CreatedAt: now,
-				})
-				if cErr != nil {
-					return fmt.Errorf("insert correction: %w", cErr)
-				}
-
-				// Insert the replacement fact.
-				newFactID, cErr = cdb.InsertTribalFact(newFact, dbEvidence)
-				if cErr != nil {
-					return fmt.Errorf("insert replacement fact: %w", cErr)
-				}
-				return nil
+			// Record the correction, then insert the replacement fact.
+			// Each call is individually atomic (InsertTribalFact wraps in
+			// its own transaction). We avoid nesting RunInTransaction calls
+			// because the mutex is not reentrant.
+			_, err = cdb.InsertTribalCorrection(db.TribalCorrection{
+				FactID:    factID,
+				Action:    "correct",
+				NewBody:   body,
+				Reason:    "corrected via tribal_propose_fact",
+				Actor:     actor,
+				CreatedAt: now,
 			})
 			if err != nil {
-				return NewErrorResultf("correct fact: %v", err), nil
+				return NewErrorResultf("insert correction: %v", err), nil
+			}
+			newFactID, err = cdb.InsertTribalFact(newFact, dbEvidence)
+			if err != nil {
+				return NewErrorResultf("insert replacement fact: %v", err), nil
 			}
 
 		case "supersede":
-			err = cdb.RunInTransaction(func() error {
-				// Mark old fact as superseded.
-				if sErr := cdb.UpdateFactStatus(factID, "superseded"); sErr != nil {
-					return fmt.Errorf("supersede old fact: %w", sErr)
-				}
-
-				// Record the correction.
-				_, cErr := cdb.InsertTribalCorrection(db.TribalCorrection{
-					FactID:    factID,
-					Action:    "supersede",
-					NewBody:   body,
-					Reason:    "superseded via tribal_propose_fact",
-					Actor:     writerIdentity,
-					CreatedAt: now,
-				})
-				if cErr != nil {
-					return fmt.Errorf("insert correction: %w", cErr)
-				}
-
-				// Insert the replacement fact.
-				newFactID, cErr = cdb.InsertTribalFact(newFact, dbEvidence)
-				if cErr != nil {
-					return fmt.Errorf("insert replacement fact: %w", cErr)
-				}
-				return nil
+			// Mark old fact as superseded, record the correction, then
+			// insert the replacement. Each step uses its own transaction
+			// where applicable to avoid deadlocking the non-reentrant mutex.
+			if err = cdb.UpdateFactStatus(factID, "superseded"); err != nil {
+				return NewErrorResultf("supersede old fact: %v", err), nil
+			}
+			_, err = cdb.InsertTribalCorrection(db.TribalCorrection{
+				FactID:    factID,
+				Action:    "supersede",
+				NewBody:   body,
+				Reason:    "superseded via tribal_propose_fact",
+				Actor:     actor,
+				CreatedAt: now,
 			})
 			if err != nil {
-				return NewErrorResultf("supersede fact: %v", err), nil
+				return NewErrorResultf("insert correction: %v", err), nil
+			}
+			newFactID, err = cdb.InsertTribalFact(newFact, dbEvidence)
+			if err != nil {
+				return NewErrorResultf("insert replacement fact: %v", err), nil
 			}
 		}
 
