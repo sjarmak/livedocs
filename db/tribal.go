@@ -57,6 +57,11 @@ var validFactKinds = map[string]bool{
 	"deprecation": true,
 }
 
+// ValidFactKind reports whether kind is a recognised tribal fact kind.
+func ValidFactKind(kind string) bool {
+	return validFactKinds[kind]
+}
+
 // validFactStatuses is the set of allowed tribal fact statuses.
 var validFactStatuses = map[string]bool{
 	"active":      true,
@@ -125,6 +130,12 @@ CREATE TABLE IF NOT EXISTS tribal_corrections (
 	if err != nil {
 		return fmt.Errorf("create tribal schema: %w", err)
 	}
+
+	// Create FTS5 search index over tribal_facts for BM25-ranked search.
+	if err := c.CreateTribalSearchIndex(); err != nil {
+		return fmt.Errorf("create tribal search index: %w", err)
+	}
+
 	return nil
 }
 
@@ -457,4 +468,42 @@ func (c *ClaimsDB) loadEvidenceForFact(factID int64) ([]TribalEvidence, error) {
 		return nil, fmt.Errorf("tribal evidence rows: %w", err)
 	}
 	return evidence, nil
+}
+
+// validCorrectionActions is the set of allowed tribal correction actions.
+var validCorrectionActions = map[string]bool{
+	"correct":   true,
+	"delete":    true,
+	"supersede": true,
+}
+
+// InsertTribalCorrection inserts a correction row into tribal_corrections.
+// Returns the correction ID on success. The Action field must be one of
+// correct, delete, or supersede.
+func (c *ClaimsDB) InsertTribalCorrection(correction TribalCorrection) (int64, error) {
+	if !validCorrectionActions[correction.Action] {
+		return 0, fmt.Errorf("insert tribal correction: invalid action %q", correction.Action)
+	}
+	if correction.Reason == "" {
+		return 0, fmt.Errorf("insert tribal correction: reason is required")
+	}
+	if correction.Actor == "" {
+		return 0, fmt.Errorf("insert tribal correction: actor is required")
+	}
+
+	result, err := c.exec.Exec(`
+		INSERT INTO tribal_corrections (fact_id, action, new_body, reason, actor, created_at)
+		VALUES (?, ?, ?, ?, ?, ?)
+	`, correction.FactID, correction.Action,
+		nullableString(correction.NewBody), correction.Reason,
+		correction.Actor, correction.CreatedAt)
+	if err != nil {
+		return 0, fmt.Errorf("insert tribal correction: %w", err)
+	}
+
+	id, err := result.LastInsertId()
+	if err != nil {
+		return 0, fmt.Errorf("get tribal correction id: %w", err)
+	}
+	return id, nil
 }

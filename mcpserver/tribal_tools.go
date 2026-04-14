@@ -127,14 +127,19 @@ func parseKinds(raw string) []string {
 }
 
 // queryTribalFactsForSymbol searches for symbols by name across the pool,
-// retrieves tribal facts, and applies kind/confidence filters. It validates
-// the provenance envelope for every fact and returns an error if any fact
-// fails validation.
+// retrieves tribal facts, and applies kind/confidence/corroboration filters.
+// It validates the provenance envelope for every fact and returns an error if
+// any fact fails validation.
+//
+// When corroborationGateActive is true, LLM-extracted facts (model != "") with
+// corroboration < 2 are excluded. This prevents uncorroborated LLM facts from
+// being served unless the caller explicitly requests them via min_confidence.
 func queryTribalFactsForSymbol(
 	pool *DBPool,
 	symbolName string,
 	kinds []string,
 	minConfidence float64,
+	corroborationGateActive bool,
 ) (tribalResponse, error) {
 	resp := tribalResponse{
 		Symbol: symbolName,
@@ -187,7 +192,7 @@ func queryTribalFactsForSymbol(
 				pass1FoundFacts = true
 			}
 			for _, fact := range facts {
-				if err := appendFilteredFact(&resp, fact, kindSet, minConfidence); err != nil {
+				if err := appendFilteredFact(&resp, fact, kindSet, minConfidence, corroborationGateActive); err != nil {
 					return resp, err
 				}
 			}
@@ -219,7 +224,7 @@ func queryTribalFactsForSymbol(
 					return resp, fmt.Errorf("get facts by path prefix in repo %s: %w", repoName, err)
 				}
 				for _, fact := range facts {
-					if err := appendFilteredFact(&resp, fact, kindSet, minConfidence); err != nil {
+					if err := appendFilteredFact(&resp, fact, kindSet, minConfidence, corroborationGateActive); err != nil {
 						return resp, err
 					}
 				}
@@ -287,9 +292,15 @@ func isMissingTableErr(err error) bool {
 	return strings.Contains(sqliteErr.Error(), "no such table")
 }
 
-// appendFilteredFact applies kind, confidence, and status filters to a tribal
-// fact, validates its provenance envelope, and appends it to the response.
-func appendFilteredFact(resp *tribalResponse, fact db.TribalFact, kindSet map[string]bool, minConfidence float64) error {
+// appendFilteredFact applies kind, confidence, status, and corroboration-gate
+// filters to a tribal fact, validates its provenance envelope, and appends it
+// to the response.
+//
+// When corroborationGateActive is true, LLM-extracted facts (model != "") with
+// corroboration < 2 are excluded. Deterministic facts (model="") are never
+// affected by the gate. Callers that explicitly pass min_confidence disable the
+// gate so all facts meeting that threshold are returned.
+func appendFilteredFact(resp *tribalResponse, fact db.TribalFact, kindSet map[string]bool, minConfidence float64, corroborationGateActive bool) error {
 	if len(kindSet) > 0 && !kindSet[fact.Kind] {
 		return nil
 	}
@@ -297,6 +308,10 @@ func appendFilteredFact(resp *tribalResponse, fact db.TribalFact, kindSet map[st
 		return nil
 	}
 	if fact.Status != "active" {
+		return nil
+	}
+	// Corroboration gate: exclude uncorroborated LLM facts at default confidence.
+	if corroborationGateActive && fact.Model != "" && fact.Corroboration < 2 {
 		return nil
 	}
 	if err := validateProvenanceEnvelope(fact); err != nil {
@@ -321,8 +336,15 @@ func TribalContextForSymbolHandler(pool *DBPool) ToolHandler {
 		kindsRaw := req.GetString("kinds", "")
 		minConfidence := req.GetFloat("min_confidence", 0.0)
 
+		// Corroboration gate: active when the caller did NOT explicitly set
+		// min_confidence. If the caller explicitly passes min_confidence (even 0),
+		// all facts meeting that threshold are returned including uncorroborated
+		// LLM facts.
+		_, minConfExplicit := req.GetArguments()["min_confidence"]
+		corroborationGateActive := !minConfExplicit
+
 		kinds := parseKinds(kindsRaw)
-		resp, err := queryTribalFactsForSymbol(pool, symbol, kinds, minConfidence)
+		resp, err := queryTribalFactsForSymbol(pool, symbol, kinds, minConfidence, corroborationGateActive)
 		if err != nil {
 			return NewErrorResultf("tribal_context_for_symbol: %v", err), nil
 		}
@@ -348,7 +370,8 @@ func TribalOwnersHandler(pool *DBPool) ToolHandler {
 			return NewErrorResult("missing required parameter 'symbol'"), nil
 		}
 
-		resp, err := queryTribalFactsForSymbol(pool, symbol, []string{"ownership"}, 0.0)
+		// Corroboration gate always active for tribal_owners (no min_confidence param).
+		resp, err := queryTribalFactsForSymbol(pool, symbol, []string{"ownership"}, 0.0, true)
 		if err != nil {
 			return NewErrorResultf("tribal_owners: %v", err), nil
 		}
@@ -374,7 +397,8 @@ func TribalWhyThisWayHandler(pool *DBPool) ToolHandler {
 			return NewErrorResult("missing required parameter 'symbol'"), nil
 		}
 
-		resp, err := queryTribalFactsForSymbol(pool, symbol, []string{"rationale", "invariant"}, 0.0)
+		// Corroboration gate always active for tribal_why_this_way (no min_confidence param).
+		resp, err := queryTribalFactsForSymbol(pool, symbol, []string{"rationale", "invariant"}, 0.0, true)
 		if err != nil {
 			return NewErrorResultf("tribal_why_this_way: %v", err), nil
 		}

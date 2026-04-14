@@ -254,7 +254,9 @@ func TestTribalContextForSymbol_AllFacts(t *testing.T) {
 	pool := setupTribalTestDB(t)
 	handler := TribalContextForSymbolHandler(pool)
 
-	req := &tribalFakeRequest{args: map[string]any{"symbol": "NewServer"}}
+	// Explicitly pass min_confidence=0.0 to disable corroboration gate and
+	// retrieve all facts (including uncorroborated LLM facts).
+	req := &tribalFakeRequest{args: map[string]any{"symbol": "NewServer", "min_confidence": 0.0}}
 	result, err := handler(context.Background(), req)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -305,9 +307,12 @@ func TestTribalContextForSymbol_KindsFilter(t *testing.T) {
 	pool := setupTribalTestDB(t)
 	handler := TribalContextForSymbolHandler(pool)
 
+	// Explicitly pass min_confidence=0.0 to disable corroboration gate so
+	// this test exercises the kinds filter in isolation.
 	req := &tribalFakeRequest{args: map[string]any{
-		"symbol": "NewServer",
-		"kinds":  "ownership,rationale",
+		"symbol":         "NewServer",
+		"kinds":          "ownership,rationale",
+		"min_confidence": 0.0,
 	}}
 	result, err := handler(context.Background(), req)
 	if err != nil {
@@ -398,13 +403,16 @@ func TestTribalWhyThisWay_RationaleAndInvariant(t *testing.T) {
 		t.Fatalf("unmarshal response: %v", err)
 	}
 
-	if resp.Total != 2 {
-		t.Errorf("expected 2 facts (rationale+invariant), got %d", resp.Total)
+	// Corroboration gate is always active for tribal_why_this_way. The rationale
+	// fact is LLM-extracted (model != "") with corroboration=1, so it is excluded.
+	// Only the invariant fact (deterministic, model="") passes.
+	if resp.Total != 1 {
+		t.Errorf("expected 1 fact (invariant only — rationale excluded by corroboration gate), got %d", resp.Total)
 	}
 
 	for _, fact := range resp.Facts {
-		if fact.Kind != "rationale" && fact.Kind != "invariant" {
-			t.Errorf("unexpected kind %q, expected rationale or invariant", fact.Kind)
+		if fact.Kind != "invariant" {
+			t.Errorf("unexpected kind %q, expected invariant", fact.Kind)
 		}
 	}
 }
@@ -898,7 +906,9 @@ func TestTribalFallback_DirectHitBypassesFallback(t *testing.T) {
 	pool := setupTribalTestDB(t)
 	handler := TribalContextForSymbolHandler(pool)
 
-	req := &tribalFakeRequest{args: map[string]any{"symbol": "NewServer"}}
+	// Explicitly pass min_confidence=0.0 to disable corroboration gate so
+	// this test isolates the fallback behavior from the gate.
+	req := &tribalFakeRequest{args: map[string]any{"symbol": "NewServer", "min_confidence": 0.0}}
 	result, err := handler(context.Background(), req)
 	if err != nil {
 		t.Fatalf("handler error: %v", err)
@@ -999,5 +1009,177 @@ func TestGetTribalFactsByPathPrefix_RepoFilter(t *testing.T) {
 	}
 	if len(facts) != 0 {
 		t.Errorf("expected 0 facts for wrong repo, got %d", len(facts))
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Corroboration gate tests
+// ---------------------------------------------------------------------------
+
+// The test DB (setupTribalTestDB) has 4 facts on "NewServer":
+//   - ownership:  model="claude-haiku-4-5-20251001", corroboration=2 → LLM, corroborated (passes gate)
+//   - rationale:  model="claude-haiku-4-5-20251001", corroboration=1 → LLM, uncorroborated (blocked)
+//   - invariant:  model="",                          corroboration=3 → deterministic (always passes)
+//   - quirk:      model="claude-haiku-4-5-20251001", corroboration=1 → LLM, uncorroborated (blocked)
+
+func TestCorroborationGate_DeterministicUnaffected(t *testing.T) {
+	pool := setupTribalTestDB(t)
+	handler := TribalContextForSymbolHandler(pool)
+
+	// No explicit min_confidence → corroboration gate active.
+	// Deterministic facts (model="") must always be served regardless of
+	// corroboration count.
+	req := &tribalFakeRequest{args: map[string]any{
+		"symbol": "NewServer",
+		"kinds":  "invariant",
+	}}
+	result, err := handler(context.Background(), req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.IsError() {
+		t.Fatalf("unexpected error result: %s", result.Text())
+	}
+
+	var resp tribalResponse
+	if err := json.Unmarshal([]byte(result.Text()), &resp); err != nil {
+		t.Fatalf("unmarshal response: %v", err)
+	}
+
+	if resp.Total != 1 {
+		t.Fatalf("expected 1 invariant fact (deterministic, unaffected by gate), got %d", resp.Total)
+	}
+	if resp.Facts[0].Kind != "invariant" {
+		t.Errorf("expected kind 'invariant', got %q", resp.Facts[0].Kind)
+	}
+	if resp.Facts[0].Model != "" {
+		t.Errorf("expected empty model for deterministic fact, got %q", resp.Facts[0].Model)
+	}
+}
+
+func TestCorroborationGate_LLMUncorroboratedExcludedAtDefault(t *testing.T) {
+	pool := setupTribalTestDB(t)
+	handler := TribalContextForSymbolHandler(pool)
+
+	// No explicit min_confidence → corroboration gate active.
+	// LLM facts with corroboration < 2 should be excluded.
+	req := &tribalFakeRequest{args: map[string]any{
+		"symbol": "NewServer",
+	}}
+	result, err := handler(context.Background(), req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.IsError() {
+		t.Fatalf("unexpected error result: %s", result.Text())
+	}
+
+	var resp tribalResponse
+	if err := json.Unmarshal([]byte(result.Text()), &resp); err != nil {
+		t.Fatalf("unmarshal response: %v", err)
+	}
+
+	// Should return 2 facts: ownership (LLM, corr=2) and invariant (deterministic).
+	// Rationale (LLM, corr=1) and quirk (LLM, corr=1) should be excluded.
+	if resp.Total != 2 {
+		t.Fatalf("expected 2 facts (gate excludes uncorroborated LLM), got %d", resp.Total)
+	}
+
+	kindSet := map[string]bool{}
+	for _, fact := range resp.Facts {
+		kindSet[fact.Kind] = true
+	}
+	if !kindSet["ownership"] {
+		t.Error("expected ownership fact (LLM, corr=2) to be present")
+	}
+	if !kindSet["invariant"] {
+		t.Error("expected invariant fact (deterministic) to be present")
+	}
+	if kindSet["rationale"] {
+		t.Error("rationale fact (LLM, corr=1) should be excluded by gate")
+	}
+	if kindSet["quirk"] {
+		t.Error("quirk fact (LLM, corr=1) should be excluded by gate")
+	}
+}
+
+func TestCorroborationGate_LLMCorroboratedServed(t *testing.T) {
+	pool := setupTribalTestDB(t)
+	handler := TribalContextForSymbolHandler(pool)
+
+	// No explicit min_confidence → corroboration gate active.
+	// LLM facts with corroboration >= 2 should still be served.
+	req := &tribalFakeRequest{args: map[string]any{
+		"symbol": "NewServer",
+		"kinds":  "ownership",
+	}}
+	result, err := handler(context.Background(), req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.IsError() {
+		t.Fatalf("unexpected error result: %s", result.Text())
+	}
+
+	var resp tribalResponse
+	if err := json.Unmarshal([]byte(result.Text()), &resp); err != nil {
+		t.Fatalf("unmarshal response: %v", err)
+	}
+
+	// Ownership fact is LLM-extracted with corroboration=2 → passes gate.
+	if resp.Total != 1 {
+		t.Fatalf("expected 1 ownership fact (LLM, corr=2, passes gate), got %d", resp.Total)
+	}
+	if resp.Facts[0].Kind != "ownership" {
+		t.Errorf("expected kind 'ownership', got %q", resp.Facts[0].Kind)
+	}
+	if resp.Facts[0].Corroboration < 2 {
+		t.Errorf("expected corroboration >= 2, got %d", resp.Facts[0].Corroboration)
+	}
+}
+
+func TestCorroborationGate_ExplicitMinConfidenceOverridesGate(t *testing.T) {
+	pool := setupTribalTestDB(t)
+	handler := TribalContextForSymbolHandler(pool)
+
+	// Explicitly pass min_confidence=0.0 → gate disabled.
+	// All 4 facts should be returned including uncorroborated LLM facts.
+	req := &tribalFakeRequest{args: map[string]any{
+		"symbol":         "NewServer",
+		"min_confidence": 0.0,
+	}}
+	result, err := handler(context.Background(), req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.IsError() {
+		t.Fatalf("unexpected error result: %s", result.Text())
+	}
+
+	var resp tribalResponse
+	if err := json.Unmarshal([]byte(result.Text()), &resp); err != nil {
+		t.Fatalf("unmarshal response: %v", err)
+	}
+
+	// All 4 facts should be returned when min_confidence is explicitly set.
+	if resp.Total != 4 {
+		t.Fatalf("expected 4 facts (gate overridden by explicit min_confidence), got %d", resp.Total)
+	}
+
+	kindSet := map[string]bool{}
+	for _, fact := range resp.Facts {
+		kindSet[fact.Kind] = true
+	}
+	if !kindSet["ownership"] {
+		t.Error("expected ownership fact to be present")
+	}
+	if !kindSet["rationale"] {
+		t.Error("expected rationale fact to be present (gate overridden)")
+	}
+	if !kindSet["invariant"] {
+		t.Error("expected invariant fact to be present")
+	}
+	if !kindSet["quirk"] {
+		t.Error("expected quirk fact to be present (gate overridden)")
 	}
 }

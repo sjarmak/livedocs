@@ -506,3 +506,112 @@ func TestGetTribalFactsByKind(t *testing.T) {
 		t.Errorf("expected 1 rationale fact, got %d", len(rationale))
 	}
 }
+
+func TestInsertTribalCorrection_RoundTrip(t *testing.T) {
+	db := tribalDB(t)
+	subjectID := insertTestSymbol(t, db, "CorrectedFunc")
+
+	// Insert a fact to correct.
+	fact := TribalFact{
+		SubjectID:        subjectID,
+		Kind:             "rationale",
+		Body:             "original rationale",
+		SourceQuote:      "// original quote",
+		Confidence:       0.9,
+		Corroboration:    1,
+		Extractor:        "test",
+		ExtractorVersion: "1.0",
+		StalenessHash:    "orig_hash",
+		Status:           "active",
+		CreatedAt:        "2025-01-01T00:00:00Z",
+		LastVerified:     "2025-01-01T00:00:00Z",
+	}
+	evidence := []TribalEvidence{{
+		SourceType:  "blame",
+		SourceRef:   "file.go:10",
+		ContentHash: "ev_hash",
+	}}
+	factID, err := db.InsertTribalFact(fact, evidence)
+	if err != nil {
+		t.Fatalf("insert fact: %v", err)
+	}
+
+	// Insert a correction.
+	correctionID, err := db.InsertTribalCorrection(TribalCorrection{
+		FactID:    factID,
+		Action:    "correct",
+		NewBody:   "updated rationale",
+		Reason:    "original was inaccurate",
+		Actor:     "alice",
+		CreatedAt: "2025-02-01T00:00:00Z",
+	})
+	if err != nil {
+		t.Fatalf("insert correction: %v", err)
+	}
+	if correctionID <= 0 {
+		t.Fatalf("expected positive correction ID, got %d", correctionID)
+	}
+
+	// Verify correction was stored.
+	var gotAction, gotNewBody, gotReason, gotActor string
+	err = db.DB().QueryRow(
+		"SELECT action, new_body, reason, actor FROM tribal_corrections WHERE id = ?",
+		correctionID,
+	).Scan(&gotAction, &gotNewBody, &gotReason, &gotActor)
+	if err != nil {
+		t.Fatalf("query correction: %v", err)
+	}
+	if gotAction != "correct" {
+		t.Errorf("action: got %q, want %q", gotAction, "correct")
+	}
+	if gotNewBody != "updated rationale" {
+		t.Errorf("new_body: got %q, want %q", gotNewBody, "updated rationale")
+	}
+	if gotReason != "original was inaccurate" {
+		t.Errorf("reason: got %q, want %q", gotReason, "original was inaccurate")
+	}
+	if gotActor != "alice" {
+		t.Errorf("actor: got %q, want %q", gotActor, "alice")
+	}
+}
+
+func TestInsertTribalCorrection_InvalidAction(t *testing.T) {
+	db := tribalDB(t)
+
+	_, err := db.InsertTribalCorrection(TribalCorrection{
+		FactID:    1,
+		Action:    "invalid",
+		Reason:    "test",
+		Actor:     "bob",
+		CreatedAt: "2025-01-01T00:00:00Z",
+	})
+	if err == nil {
+		t.Fatal("expected error for invalid action")
+	}
+}
+
+func TestInsertTribalCorrection_MissingFields(t *testing.T) {
+	db := tribalDB(t)
+
+	// Missing reason.
+	_, err := db.InsertTribalCorrection(TribalCorrection{
+		FactID:    1,
+		Action:    "correct",
+		Actor:     "bob",
+		CreatedAt: "2025-01-01T00:00:00Z",
+	})
+	if err == nil {
+		t.Fatal("expected error for missing reason")
+	}
+
+	// Missing actor.
+	_, err = db.InsertTribalCorrection(TribalCorrection{
+		FactID:    1,
+		Action:    "correct",
+		Reason:    "test",
+		CreatedAt: "2025-01-01T00:00:00Z",
+	})
+	if err == nil {
+		t.Fatal("expected error for missing actor")
+	}
+}

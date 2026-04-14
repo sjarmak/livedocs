@@ -10,7 +10,7 @@ Tools and workflows that keep repository documentation automatically up to date 
 - **Claims database** (`db/`) — SQLite-backed storage for symbols, claims, and tribal knowledge with cross-repo xref index
 - **Tribal knowledge** (`extractor/tribal/`, `db/tribal.go`) — provenance-tracked ownership, rationale, invariants, and quirks extracted from CODEOWNERS, git blame, commit messages, and inline markers (TODO/HACK/NOTE)
 - **Renderer** (`renderer/`) — transforms claims into compact Markdown (interfaces, deps, function categories)
-- **MCP server** (`mcpserver/`) — Model Context Protocol server exposing claims via 11 tools (single-DB, multi-repo, and tribal knowledge modes); supports stdio and HTTP/SSE transports
+- **MCP server** (`mcpserver/`) — Model Context Protocol server exposing claims via 12 tools (4 single-DB, 4 multi-repo, 3 tribal knowledge, 1 extraction request); supports stdio and HTTP/SSE transports
 - **CLI** (`cmd/livedocs/`) — `livedocs` binary with `init`, `extract`, `mcp`, `context`, `check`, `diff`, `export`, `verify`, `tribal`, `watch`, `extract-schedule` commands
 - **Drift detection** (`drift/`, `anchor/`) — compares documentation against code exports to find stale references; tribal drift transitions facts to stale/quarantined (never deletes)
 - **Remote extraction** (`pipeline/filesource.go`, `watch/gitops.go`) — extract claims from remote repos via Sourcegraph MCP without cloning
