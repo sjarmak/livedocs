@@ -1,14 +1,17 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"log"
+	"os"
 
 	"github.com/spf13/cobra"
 
 	"github.com/live-docs/live_docs/check"
 	"github.com/live-docs/live_docs/drift"
+	"github.com/live-docs/live_docs/semantic"
 	"github.com/live-docs/live_docs/sourcegraph"
 )
 
@@ -17,6 +20,9 @@ var (
 	checkUpdateManifest bool
 	checkManifest       bool
 	checkSemantic       bool
+	checkCrossRepo      bool
+	checkDocMap         string
+	checkDocsDir        string
 )
 
 var checkCmd = &cobra.Command{
@@ -34,6 +40,11 @@ Modes:
 		path := "."
 		if len(args) > 0 {
 			path = args[0]
+		}
+
+		// Mode: cross-repo semantic check
+		if checkCrossRepo {
+			return runCrossRepoCheck(cmd, path)
 		}
 
 		// Mode: update manifest
@@ -56,6 +67,9 @@ func init() {
 	checkCmd.Flags().BoolVar(&checkUpdateManifest, "update-manifest", false, "generate or update the .livedocs/manifest file")
 	checkCmd.Flags().BoolVar(&checkManifest, "manifest", false, "use fast manifest-based check (no SQLite)")
 	checkCmd.Flags().BoolVar(&checkSemantic, "semantic", false, "run semantic drift detection via Sourcegraph deepsearch")
+	checkCmd.Flags().BoolVar(&checkCrossRepo, "cross-repo", false, "run cross-repo semantic drift detection using doc-map")
+	checkCmd.Flags().StringVar(&checkDocMap, "doc-map", "", "path to doc-map.yaml (required with --cross-repo)")
+	checkCmd.Flags().StringVar(&checkDocsDir, "docs-dir", "", "directory containing documentation files (for --cross-repo)")
 }
 
 func runFullCheck(cmd *cobra.Command, path string) error {
@@ -157,4 +171,103 @@ func runSemanticPass(cmd *cobra.Command, result *check.Result, path string) {
 			result.HasDrift = true
 		}
 	}
+}
+
+// runCrossRepoCheck runs cross-repo semantic drift detection using a doc-map
+// to validate documentation against code in remote repositories.
+func runCrossRepoCheck(cmd *cobra.Command, _ string) error {
+	if checkDocMap == "" {
+		return fmt.Errorf("--doc-map is required with --cross-repo")
+	}
+
+	docMap, err := drift.LoadDocMap(checkDocMap)
+	if err != nil {
+		return err
+	}
+
+	// Create Sourcegraph MCP client for code search.
+	sgClient, err := sourcegraph.NewSourcegraphClient()
+	if err != nil {
+		return fmt.Errorf("create sourcegraph client: %w", err)
+	}
+	defer sgClient.Close()
+
+	// Create LLM client for verification.
+	// Priority: claude CLI (uses OAuth) > ANTHROPIC_API_KEY > Sourcegraph deepsearch.
+	llm, llmSource := resolveLLMClient(sgClient)
+	log.Printf("cross-repo: using %s for LLM verification", llmSource)
+
+	searcher := &sourcegraphCodeSearcher{caller: sgClient}
+	checker := drift.NewCrossRepoChecker(llm, searcher, docMap)
+
+	ctx := cmd.Context()
+	reports, err := checker.CheckAllDocs(ctx, checkDocsDir)
+	if err != nil {
+		return fmt.Errorf("cross-repo check: %w", err)
+	}
+
+	out := cmd.OutOrStdout()
+	hasDrift := false
+
+	switch checkFormat {
+	case "json":
+		enc := json.NewEncoder(out)
+		enc.SetIndent("", "  ")
+		if err := enc.Encode(reports); err != nil {
+			return fmt.Errorf("encode JSON: %w", err)
+		}
+	case "text":
+		for _, r := range reports {
+			fmt.Fprint(out, drift.FormatCrossRepoReport(r))
+		}
+	default:
+		return fmt.Errorf("unknown format %q", checkFormat)
+	}
+
+	for _, r := range reports {
+		if r.Stale > 0 {
+			hasDrift = true
+			break
+		}
+	}
+	if hasDrift {
+		totalStale := 0
+		for _, r := range reports {
+			totalStale += r.Stale
+		}
+		return fmt.Errorf("cross-repo drift detected: %d stale section(s) across %d doc(s)", totalStale, len(reports))
+	}
+	return nil
+}
+
+// sourcegraphCodeSearcher adapts the Sourcegraph MCP client to the
+// drift.CodeSearcher interface.
+type sourcegraphCodeSearcher struct {
+	caller sourcegraph.MCPCaller
+}
+
+func (s *sourcegraphCodeSearcher) Search(ctx context.Context, repo, query string) (string, error) {
+	return s.caller.CallTool(ctx, "keyword_search", map[string]any{
+		"repos": repo,
+		"query": query,
+	})
+}
+
+// resolveLLMClient picks the best available LLM client for verification.
+// Priority: claude CLI (uses existing OAuth) > ANTHROPIC_API_KEY > Sourcegraph deepsearch.
+func resolveLLMClient(sgFallback semantic.LLMClient) (semantic.LLMClient, string) {
+	// 1. Claude CLI — uses OAuth, no extra API key needed.
+	if cli, err := semantic.NewClaudeCLIClient("haiku"); err == nil {
+		return cli, "claude CLI (OAuth)"
+	}
+
+	// 2. Direct Anthropic API — explicit API key.
+	if apiKey := os.Getenv("ANTHROPIC_API_KEY"); apiKey != "" {
+		if client, err := semantic.NewAnthropicClient(apiKey); err == nil {
+			return client, "Anthropic API (ANTHROPIC_API_KEY)"
+		}
+	}
+
+	// 3. Sourcegraph deepsearch — always available if SRC_ACCESS_TOKEN is set.
+	return sgFallback, "Sourcegraph deepsearch"
 }

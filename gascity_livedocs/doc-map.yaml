@@ -1,0 +1,127 @@
+# Cross-repo document map for Gas City documentation.
+#
+# Maps source file patterns in each monitored repository to the documentation
+# files they affect. When livedocs detects changes in a repo, it consults this
+# map to determine which docs may need review.
+#
+# Repos are identified by their Sourcegraph-style fully qualified names.
+# Source patterns use filepath.Match glob syntax.
+
+repos:
+  - name: github.com/gastownhall/gastown
+    short: gastown
+    mappings:
+      - source: "cmd/**/*.go"
+        docs:
+          - docs/01-gastown-vs-gascity.md
+      - source: "internal/**/*.go"
+        docs:
+          - docs/01-gastown-vs-gascity.md
+          - docs/08-customizable-vs-fixed.md
+          - docs/09-troubleshooting-tmux.md
+          - docs/13-troubleshooting-operational.md
+      - source: "pkg/**/*.go"
+        docs:
+          - docs/01-gastown-vs-gascity.md
+          - docs/08-customizable-vs-fixed.md
+
+  - name: github.com/gastownhall/gascity
+    short: gascity
+    mappings:
+      - source: "cmd/**/*.go"
+        docs:
+          - docs/01-gastown-vs-gascity.md
+          - docs/05-gascity-primitives.md
+      - source: "internal/supervisor/**/*.go"
+        docs:
+          - docs/07-supervisor-and-reconciliation.md
+          - docs/12-troubleshooting-supervisor.md
+          - docs/13-troubleshooting-operational.md
+      - source: "internal/session/**/*.go"
+        docs:
+          - docs/09-troubleshooting-tmux.md
+      - source: "internal/reconciler/**/*.go"
+        docs:
+          - docs/07-supervisor-and-reconciliation.md
+          - docs/12-troubleshooting-supervisor.md
+      - source: "internal/agent/**/*.go"
+        docs:
+          - docs/05-gascity-primitives.md
+      - source: "internal/provider/**/*.go"
+        docs:
+          - docs/05-gascity-primitives.md
+      - source: "internal/rig/**/*.go"
+        docs:
+          - docs/05-gascity-primitives.md
+          - docs/13-troubleshooting-operational.md
+      - source: "internal/formula/**/*.go"
+        docs:
+          - docs/05-gascity-primitives.md
+      - source: "internal/order/**/*.go"
+        docs:
+          - docs/05-gascity-primitives.md
+      - source: "internal/port/**/*.go"
+        docs:
+          - docs/06-port-coordination.md
+      - source: "internal/network/**/*.go"
+        docs:
+          - docs/06-port-coordination.md
+      - source: "internal/dolt/**/*.go"
+        docs:
+          - docs/10-troubleshooting-dolt.md
+      - source: "internal/config/**/*.go"
+        docs:
+          - docs/08-customizable-vs-fixed.md
+      - source: "**/*.toml"
+        docs:
+          - docs/05-gascity-primitives.md
+          - docs/08-customizable-vs-fixed.md
+
+  - name: github.com/gastownhall/beads
+    short: beads
+    mappings:
+      - source: "internal/schema/**/*.go"
+        docs:
+          - docs/02-beads-data-model.md
+      - source: "internal/model/**/*.go"
+        docs:
+          - docs/02-beads-data-model.md
+      - source: "internal/store/**/*.go"
+        docs:
+          - docs/02-beads-data-model.md
+          - docs/04-bead-storage-and-syncing.md
+      - source: "internal/sync/**/*.go"
+        docs:
+          - docs/04-bead-storage-and-syncing.md
+          - docs/11-troubleshooting-sync.md
+      - source: "internal/dolt/**/*.go"
+        docs:
+          - docs/03-why-dolt.md
+          - docs/04-bead-storage-and-syncing.md
+          - docs/10-troubleshooting-dolt.md
+          - docs/11-troubleshooting-sync.md
+      - source: "internal/merge/**/*.go"
+        docs:
+          - docs/11-troubleshooting-sync.md
+      - source: "cmd/**/*.go"
+        docs:
+          - docs/02-beads-data-model.md
+
+  - name: github.com/dolthub/dolt
+    short: dolt
+    mappings:
+      - source: "go/cmd/dolt/**/*.go"
+        docs:
+          - docs/03-why-dolt.md
+          - docs/10-troubleshooting-dolt.md
+      - source: "go/libraries/doltcore/merge/**/*.go"
+        docs:
+          - docs/03-why-dolt.md
+          - docs/11-troubleshooting-sync.md
+      - source: "go/libraries/doltcore/sqle/**/*.go"
+        docs:
+          - docs/03-why-dolt.md
+      - source: "go/libraries/doltcore/remotesrv/**/*.go"
+        docs:
+          - docs/04-bead-storage-and-syncing.md
+          - docs/11-troubleshooting-sync.md

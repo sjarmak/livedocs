@@ -1,0 +1,8 @@
+# Extracted claims databases (generated, large)
+data/
+
+# Poll state (per-machine)
+.state/
+
+# Runtime logs
+logs/
