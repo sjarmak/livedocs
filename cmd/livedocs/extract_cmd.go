@@ -14,6 +14,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/live-docs/live_docs/cache"
+	"github.com/live-docs/live_docs/config"
 	"github.com/live-docs/live_docs/db"
 	"github.com/live-docs/live_docs/extractor"
 	"github.com/live-docs/live_docs/extractor/goextractor"
@@ -414,7 +415,15 @@ func runExtract(ctx context.Context, cmd *cobra.Command, repoDir, repoName, outp
 				return fmt.Errorf("tribal extraction: %w", err)
 			}
 		case "llm":
-			return fmt.Errorf("LLM tribal extraction requires explicit config opt-in (Phase 2)")
+			// LLM mode is additive: run deterministic extractors first, then PR comment mining.
+			fmt.Fprintf(out, "Running tribal knowledge extraction (deterministic)...\n")
+			if err := runTribalExtraction(ctx, out, claimsDB, repoDir, repoName); err != nil {
+				return fmt.Errorf("tribal extraction: %w", err)
+			}
+			fmt.Fprintf(out, "Running tribal knowledge extraction (LLM)...\n")
+			if err := runLLMTribalExtraction(ctx, out, claimsDB, repoDir, repoName); err != nil {
+				return fmt.Errorf("LLM tribal extraction: %w", err)
+			}
 		default:
 			return fmt.Errorf("unknown --tribal value: %q (valid: deterministic, llm)", extractTribal)
 		}
@@ -940,4 +949,178 @@ func runTribalExtraction(ctx context.Context, out io.Writer, claimsDB *db.Claims
 	fmt.Fprintf(out, "- **Total tribal facts**: %d\n", ownershipCount+blameCount+rationaleCount+markerCount)
 
 	return nil
+}
+
+// runLLMTribalExtraction runs the LLM-based PR comment miner on the repository.
+// It validates config opt-in, API key presence, and git remote parsing before
+// walking repo files and classifying PR comments via LLM.
+func runLLMTribalExtraction(ctx context.Context, out io.Writer, claimsDB *db.ClaimsDB, repoDir, repoName string) error {
+	// 1. Load config and check opt-in gate.
+	cfg, err := config.Load(config.ConfigPath(repoDir))
+	if err != nil {
+		return fmt.Errorf("load config: %w", err)
+	}
+	if !cfg.Tribal.LLMEnabled {
+		return fmt.Errorf("LLM tribal extraction requires tribal.llm_enabled: true in .livedocs.yaml")
+	}
+
+	// 2. Check API key.
+	apiKey := os.Getenv("ANTHROPIC_API_KEY")
+	if apiKey == "" {
+		return fmt.Errorf("ANTHROPIC_API_KEY environment variable is required for LLM tribal extraction")
+	}
+
+	// 3. Parse git remote for owner/repo (needed by PR comment miner).
+	owner, repo, ok := getGitRemoteOwnerRepo(ctx, repoDir)
+	if !ok {
+		fmt.Fprintf(out, "Warning: could not parse git remote origin; skipping LLM tribal extraction\n")
+		return nil
+	}
+
+	// 4. Create LLM client.
+	client, err := semantic.NewAnthropicClient(apiKey, semantic.WithModel(cfg.Tribal.Model))
+	if err != nil {
+		return fmt.Errorf("create LLM client: %w", err)
+	}
+
+	// 5. Create PR comment miner.
+	miner := &tribal.PRCommentMiner{
+		RepoOwner:   owner,
+		RepoName:    repo,
+		Client:      client,
+		Model:       cfg.Tribal.Model,
+		DailyBudget: cfg.Tribal.DailyBudget,
+	}
+
+	// 6. Walk repo files and extract PR comment tribal facts.
+	var rationaleCount, invariantCount, quirkCount int
+
+	walkErr := filepath.WalkDir(repoDir, func(path string, d os.DirEntry, wErr error) error {
+		if wErr != nil {
+			return nil
+		}
+		if d.IsDir() {
+			if skipDirs[d.Name()] {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+
+		// Only process supported source files.
+		ext := strings.ToLower(filepath.Ext(path))
+		switch ext {
+		case ".go", ".ts", ".tsx", ".py", ".sh":
+			// supported
+		default:
+			return nil
+		}
+
+		relPath, relErr := filepath.Rel(repoDir, path)
+		if relErr != nil {
+			relPath = path
+		}
+
+		// Upsert a file-level symbol for tribal facts.
+		fileSymID, upErr := claimsDB.UpsertSymbol(db.Symbol{
+			Repo:       repoName,
+			ImportPath: relPath,
+			SymbolName: relPath,
+			Language:   "file",
+			Kind:       "file",
+			Visibility: "public",
+		})
+		if upErr != nil {
+			return nil // skip this file
+		}
+
+		// Extract PR comment facts for this file.
+		facts, extractErr := miner.ExtractForFile(ctx, relPath, fileSymID)
+		if extractErr != nil {
+			// Budget exceeded is a signal to stop walking.
+			if strings.Contains(extractErr.Error(), "budget exceeded") {
+				fmt.Fprintf(out, "LLM tribal: daily budget reached, stopping extraction\n")
+				return fmt.Errorf("budget exceeded")
+			}
+			// Other errors are non-fatal for individual files.
+			return nil
+		}
+
+		for _, fact := range facts {
+			if _, insertErr := claimsDB.InsertTribalFact(fact, fact.Evidence); insertErr == nil {
+				switch fact.Kind {
+				case "rationale":
+					rationaleCount++
+				case "invariant":
+					invariantCount++
+				case "quirk":
+					quirkCount++
+				}
+			}
+		}
+
+		return nil
+	})
+	// Budget exceeded is an expected early-stop, not a true error.
+	if walkErr != nil && !strings.Contains(walkErr.Error(), "budget exceeded") {
+		return fmt.Errorf("LLM tribal walk: %w", walkErr)
+	}
+
+	// 7. Print LLM tribal summary.
+	total := rationaleCount + invariantCount + quirkCount
+	fmt.Fprintf(out, "\n## LLM Tribal Knowledge Summary (PR Comments)\n\n")
+	fmt.Fprintf(out, "- **Rationale facts**: %d\n", rationaleCount)
+	fmt.Fprintf(out, "- **Invariant facts**: %d\n", invariantCount)
+	fmt.Fprintf(out, "- **Quirk facts**: %d\n", quirkCount)
+	fmt.Fprintf(out, "- **Total LLM tribal facts**: %d\n", total)
+
+	return nil
+}
+
+// getGitRemoteOwnerRepo extracts the GitHub owner and repo name from the
+// git remote "origin" URL of the repository at repoDir.
+func getGitRemoteOwnerRepo(ctx context.Context, repoDir string) (owner, name string, ok bool) {
+	cmd := exec.CommandContext(ctx, "git", "-C", repoDir, "remote", "get-url", "origin")
+	output, err := cmd.Output()
+	if err != nil {
+		return "", "", false
+	}
+	return parseGitRemoteURL(strings.TrimSpace(string(output)))
+}
+
+// parseGitRemoteURL extracts owner and repo name from a git remote URL.
+// Handles HTTPS (https://github.com/owner/repo.git) and SSH (git@github.com:owner/repo.git).
+func parseGitRemoteURL(rawURL string) (owner, name string, ok bool) {
+	rawURL = strings.TrimSpace(rawURL)
+	rawURL = strings.TrimSuffix(rawURL, ".git")
+
+	// SSH format: git@github.com:owner/repo
+	if strings.Contains(rawURL, ":") && strings.Contains(rawURL, "@") {
+		// Find the part after the colon.
+		colonIdx := strings.LastIndex(rawURL, ":")
+		path := rawURL[colonIdx+1:]
+		parts := strings.Split(path, "/")
+		if len(parts) >= 2 {
+			return parts[len(parts)-2], parts[len(parts)-1], true
+		}
+		return "", "", false
+	}
+
+	// HTTPS format: https://github.com/owner/repo
+	// Strip scheme if present.
+	if idx := strings.Index(rawURL, "://"); idx >= 0 {
+		rawURL = rawURL[idx+3:]
+	}
+	parts := strings.Split(rawURL, "/")
+	// Expect at least: host/owner/repo
+	if len(parts) >= 3 {
+		return parts[len(parts)-2], parts[len(parts)-1], true
+	}
+
+	return "", "", false
 }

@@ -33,6 +33,13 @@ func TestTribalLLMReturnsError(t *testing.T) {
 		t.Fatalf("write go.mod: %v", err)
 	}
 
+	// Initialize a git repo so deterministic extractors can run first.
+	gitInDir(t, repoDir, "init")
+	gitInDir(t, repoDir, "config", "user.email", "test@test.com")
+	gitInDir(t, repoDir, "config", "user.name", "Test User")
+	gitInDir(t, repoDir, "add", "-A")
+	gitInDir(t, repoDir, "commit", "-m", "init")
+
 	outDir := t.TempDir()
 	outputDB := filepath.Join(outDir, "llm-test.claims.db")
 
@@ -42,10 +49,11 @@ func TestTribalLLMReturnsError(t *testing.T) {
 	rootCmd.SetArgs([]string{"extract", "--tribal=llm", "--repo", "llm-repo", "--output", outputDB, repoDir})
 	err := rootCmd.Execute()
 	if err == nil {
-		t.Fatal("expected error for --tribal=llm")
+		t.Fatal("expected error for --tribal=llm without config opt-in")
 	}
-	if !strings.Contains(err.Error(), "LLM tribal extraction requires explicit config opt-in") {
-		t.Errorf("unexpected error message: %v", err)
+	// Now that Phase 2 is implemented, --tribal=llm without llm_enabled returns a config error.
+	if !strings.Contains(err.Error(), "llm_enabled") {
+		t.Errorf("expected error mentioning llm_enabled, got: %v", err)
 	}
 }
 

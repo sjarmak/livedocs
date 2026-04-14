@@ -5,6 +5,7 @@ import (
 	"context"
 	"database/sql"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -533,5 +534,161 @@ func main() { Hello() }
 	}
 	if sensitiveCount != 0 {
 		t.Errorf("expected 0 claims with 'password' in object_text, got %d", sensitiveCount)
+	}
+}
+
+func TestTribalLLMConfigNotSet(t *testing.T) {
+	resetExtractFlags()
+
+	// Create a temp repo with a Go file but no .livedocs.yaml with llm_enabled.
+	repoDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(repoDir, "main.go"), []byte("package main\n"), 0644); err != nil {
+		t.Fatalf("write go file: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(repoDir, "go.mod"), []byte("module example.com/test\n\ngo 1.21\n"), 0644); err != nil {
+		t.Fatalf("write go.mod: %v", err)
+	}
+
+	// Initialize a git repo so deterministic extractors don't fail.
+	initGitRepo(t, repoDir)
+
+	outDir := t.TempDir()
+	outputDB := filepath.Join(outDir, "llm-config.claims.db")
+
+	buf := new(bytes.Buffer)
+	rootCmd.SetOut(buf)
+	rootCmd.SetErr(buf)
+	rootCmd.SetArgs([]string{"extract", "--tribal=llm", "--repo", "llm-config-repo", "--output", outputDB, repoDir})
+	err := rootCmd.Execute()
+	if err == nil {
+		t.Fatal("expected error when llm_enabled is not set in .livedocs.yaml")
+	}
+	if !strings.Contains(err.Error(), ".livedocs.yaml") {
+		t.Errorf("error should mention .livedocs.yaml, got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "llm_enabled") {
+		t.Errorf("error should mention llm_enabled, got: %v", err)
+	}
+}
+
+func TestTribalLLMMissingAPIKey(t *testing.T) {
+	resetExtractFlags()
+
+	// Create a temp repo with .livedocs.yaml containing llm_enabled: true.
+	repoDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(repoDir, "main.go"), []byte("package main\n"), 0644); err != nil {
+		t.Fatalf("write go file: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(repoDir, "go.mod"), []byte("module example.com/test\n\ngo 1.21\n"), 0644); err != nil {
+		t.Fatalf("write go.mod: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(repoDir, ".livedocs.yaml"), []byte("tribal:\n  llm_enabled: true\n"), 0644); err != nil {
+		t.Fatalf("write .livedocs.yaml: %v", err)
+	}
+
+	// Initialize a git repo so deterministic extractors don't fail.
+	initGitRepo(t, repoDir)
+
+	// Ensure ANTHROPIC_API_KEY is not set.
+	t.Setenv("ANTHROPIC_API_KEY", "")
+
+	outDir := t.TempDir()
+	outputDB := filepath.Join(outDir, "llm-apikey.claims.db")
+
+	buf := new(bytes.Buffer)
+	rootCmd.SetOut(buf)
+	rootCmd.SetErr(buf)
+	rootCmd.SetArgs([]string{"extract", "--tribal=llm", "--repo", "llm-apikey-repo", "--output", outputDB, repoDir})
+	err := rootCmd.Execute()
+	if err == nil {
+		t.Fatal("expected error when ANTHROPIC_API_KEY is missing")
+	}
+	if !strings.Contains(err.Error(), "ANTHROPIC_API_KEY") {
+		t.Errorf("error should mention ANTHROPIC_API_KEY, got: %v", err)
+	}
+}
+
+func TestParseGitRemoteURL(t *testing.T) {
+	tests := []struct {
+		name      string
+		input     string
+		wantOwner string
+		wantName  string
+		wantOK    bool
+	}{
+		{
+			name:      "HTTPS with .git suffix",
+			input:     "https://github.com/live-docs/live_docs.git",
+			wantOwner: "live-docs",
+			wantName:  "live_docs",
+			wantOK:    true,
+		},
+		{
+			name:      "HTTPS without .git suffix",
+			input:     "https://github.com/kubernetes/kubernetes",
+			wantOwner: "kubernetes",
+			wantName:  "kubernetes",
+			wantOK:    true,
+		},
+		{
+			name:      "SSH format",
+			input:     "git@github.com:live-docs/live_docs.git",
+			wantOwner: "live-docs",
+			wantName:  "live_docs",
+			wantOK:    true,
+		},
+		{
+			name:      "SSH without .git suffix",
+			input:     "git@github.com:org/repo",
+			wantOwner: "org",
+			wantName:  "repo",
+			wantOK:    true,
+		},
+		{
+			name:   "empty string",
+			input:  "",
+			wantOK: false,
+		},
+		{
+			name:   "bare hostname",
+			input:  "github.com",
+			wantOK: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			owner, name, ok := parseGitRemoteURL(tt.input)
+			if ok != tt.wantOK {
+				t.Fatalf("parseGitRemoteURL(%q): ok=%v, want %v", tt.input, ok, tt.wantOK)
+			}
+			if ok {
+				if owner != tt.wantOwner {
+					t.Errorf("owner=%q, want %q", owner, tt.wantOwner)
+				}
+				if name != tt.wantName {
+					t.Errorf("name=%q, want %q", name, tt.wantName)
+				}
+			}
+		})
+	}
+}
+
+// initGitRepo initializes a minimal git repo in the given directory
+// so that tribal extractors (blame, rationale) don't fail on git commands.
+func initGitRepo(t *testing.T, dir string) {
+	t.Helper()
+	for _, args := range [][]string{
+		{"git", "init"},
+		{"git", "config", "user.email", "test@example.com"},
+		{"git", "config", "user.name", "Test"},
+		{"git", "add", "."},
+		{"git", "commit", "-m", "init"},
+	} {
+		cmd := exec.Command(args[0], args[1:]...)
+		cmd.Dir = dir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("%s failed: %v\n%s", strings.Join(args, " "), err, out)
+		}
 	}
 }
