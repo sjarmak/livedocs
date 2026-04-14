@@ -5,13 +5,18 @@
 ## What It Does
 
 1. **Extract** symbols and relationships from source code using tree-sitter
-2. **Store** them as structured claims in per-repo SQLite databases
-3. **Serve** them to AI agents via the [Model Context Protocol](https://modelcontextprotocol.io/) (MCP)
-4. **Detect** documentation drift — find stale references and undocumented exports
+2. **Mine** tribal knowledge — ownership, rationale, invariants, and quirks from git blame, CODEOWNERS, commit messages, and inline markers
+3. **Store** them as structured claims in per-repo SQLite databases
+4. **Serve** them to AI agents via the [Model Context Protocol](https://modelcontextprotocol.io/) (MCP)
+5. **Detect** documentation drift — find stale references, undocumented exports, and semantically inaccurate sections
+6. **Watch** repositories for changes and incrementally update claims
+7. **Enrich** claims with semantic context via Sourcegraph MCP
 
 A claims-backed MCP server reduces context acquisition from thousands of tokens of raw source to ~30-50 tokens per claim, achieving roughly 50x context reduction for codebase onboarding.
 
 ## Quick Start
+
+### Local Repository
 
 ```bash
 # Install
@@ -26,7 +31,24 @@ livedocs extract
 claude mcp add livedocs -- livedocs mcp
 ```
 
-See [SETUP.md](SETUP.md) for Cursor, Windsurf, and multi-repo configuration.
+### Remote Repository via Sourcegraph
+
+Extract claims from any public or private repo without cloning:
+
+```bash
+export SRC_ACCESS_TOKEN=<your-sourcegraph-token>
+
+# Extract from a remote repo
+livedocs extract --source sourcegraph --repo github.com/org/repo -o repo.claims.db
+
+# Watch multiple remote repos for changes
+livedocs watch --source sourcegraph --repos 'org/*' --data-dir ./claims/
+
+# Enrich claims with semantic context (purpose, complexity, stability)
+livedocs enrich --data-dir ./claims/ --repo org/repo
+```
+
+See [SETUP.md](SETUP.md) for detailed setup guides, IDE configuration, and Sourcegraph workflows.
 
 ## MCP Tools
 
@@ -49,12 +71,15 @@ livedocs mcp --db .livedocs/claims.db
 livedocs mcp --data-dir /path/to/claims/
 ```
 
-| Tool               | Description                                                  |
-| ------------------ | ------------------------------------------------------------ |
-| `list_repos`       | List all repositories with symbol/claim counts               |
-| `list_packages`    | List import paths for a repo with prefix filter              |
-| `describe_package` | Render Markdown docs for a package (interfaces, deps, types) |
-| `search_symbols`   | Cross-repo symbol search with routing index                  |
+| Tool                        | Description                                                  |
+| --------------------------- | ------------------------------------------------------------ |
+| `list_repos`                | List all repositories with symbol/claim counts               |
+| `list_packages`             | List import paths for a repo with prefix filter              |
+| `describe_package`          | Render Markdown docs for a package (interfaces, deps, types) |
+| `search_symbols`            | Cross-repo symbol search with routing index                  |
+| `tribal_context_for_symbol` | All tribal facts for a symbol with full provenance envelope  |
+| `tribal_owners`             | Ownership facts (CODEOWNERS + git blame) for a symbol        |
+| `tribal_why_this_way`       | Rationale and invariant facts explaining why code exists     |
 
 ### Static Context Generation
 
@@ -70,16 +95,50 @@ livedocs context client-go --data-dir data/claims/
 
 ## CLI Commands
 
-| Command            | Description                                   |
-| ------------------ | --------------------------------------------- |
-| `livedocs init`    | Initialize a `.livedocs/` directory in a repo |
-| `livedocs extract` | Extract symbols and claims from source code   |
-| `livedocs mcp`     | Start the MCP server (stdio transport)        |
-| `livedocs context` | Generate static Markdown context files        |
-| `livedocs check`   | Run drift detection on documentation          |
-| `livedocs diff`    | Show documentation changes since last commit  |
-| `livedocs export`  | Export claims as Markdown                     |
-| `livedocs verify`  | Verify claim anchors against current source   |
+| Command                                 | Description                                                |
+| --------------------------------------- | ---------------------------------------------------------- |
+| `livedocs init`                         | Initialize a `.livedocs/` directory in a repo              |
+| `livedocs extract`                      | Extract symbols and claims from source code                |
+| `livedocs extract --source sourcegraph` | Extract from remote repo via Sourcegraph MCP               |
+| `livedocs extract --source clone`       | Shallow-clone a remote repo, extract, clean up             |
+| `livedocs extract --tribal`             | Also extract tribal knowledge (ownership, rationale, etc.) |
+| `livedocs mcp`                          | Start the MCP server (stdio transport)                     |
+| `livedocs context`                      | Generate static Markdown context files                     |
+| `livedocs check`                        | Run drift detection on documentation                       |
+| `livedocs check --cross-repo`           | Cross-repo semantic drift detection using doc-map          |
+| `livedocs diff`                         | Show documentation changes since last commit               |
+| `livedocs export`                       | Export claims as Markdown                                  |
+| `livedocs verify`                       | Verify AI context files against current source             |
+| `livedocs verify-claims`                | Verify claim anchors against current source                |
+| `livedocs watch`                        | Watch repos for changes and incrementally extract claims   |
+| `livedocs watch --source sourcegraph`   | Watch remote repos via Sourcegraph MCP                     |
+| `livedocs extract-schedule`             | Run scheduled extractions based on cron expressions        |
+| `livedocs enrich`                       | Enrich claims with semantic context from Sourcegraph       |
+| `livedocs tribal status`                | Show tribal fact counts by kind                            |
+| `livedocs prbot`                        | Analyze PR diff for documentation impact                   |
+| `livedocs version`                      | Print version information                                  |
+
+## Sourcegraph Integration
+
+Livedocs integrates with [Sourcegraph](https://sourcegraph.com) via its MCP server for remote extraction, code search, and semantic enrichment — no local cloning needed.
+
+### What You Can Do
+
+- **Extract claims from any repo** without cloning it locally
+- **Watch remote repos** for changes and incrementally update claims
+- **Enrich claims** with semantic properties (purpose, complexity, stability) using Sourcegraph's code intelligence
+- **Cross-repo semantic drift detection** — validate documentation against code in other repositories using keyword search + LLM verification
+
+### Setup
+
+1. Get a Sourcegraph access token from your Sourcegraph instance settings
+2. Set it in your environment:
+   ```bash
+   export SRC_ACCESS_TOKEN=<your-token>
+   ```
+3. The Sourcegraph MCP server is spawned automatically when needed (requires `npx` on PATH)
+
+See [SETUP.md](SETUP.md) for detailed Sourcegraph workflow tutorials.
 
 ## GitHub Action
 
@@ -96,16 +155,20 @@ See [action.yml](action.yml) for all inputs and outputs.
 ## Architecture
 
 ```
-cmd/livedocs/     CLI entry point (cobra commands)
-mcpserver/        MCP server with adapter layer, DB pool, routing index
-renderer/         Claims-to-Markdown renderer (interfaces, deps, functions)
-db/               SQLite-backed claims storage + cross-repo xref index
-extractor/        Tree-sitter symbol extraction (Go, Python, TypeScript, Shell)
-extract/          Extraction pipeline orchestration
-drift/            Documentation drift detection
-anchor/           Claim-to-source anchoring and verification
-aicontext/        AI context file (CLAUDE.md, .cursorrules) validation
-pipeline/         Full extraction pipeline with caching
+cmd/livedocs/       CLI entry point (cobra commands)
+mcpserver/          MCP server with adapter layer, DB pool, routing index
+renderer/           Claims-to-Markdown renderer (interfaces, deps, functions)
+db/                 SQLite-backed claims storage, tribal knowledge, cross-repo xref index
+extractor/          Tree-sitter symbol extraction (Go, Python, TypeScript, Shell)
+extractor/tribal/   Tribal knowledge extractors (CODEOWNERS, blame, commit rationale, inline markers)
+pipeline/           Extraction pipeline with caching and remote file sources
+drift/              Documentation drift detection (symbol-level, semantic, cross-repo)
+semantic/           LLM-backed semantic claim generation and verification
+sourcegraph/        Sourcegraph MCP client, predicate router, enrichment pipeline
+anchor/             Claim-to-source anchoring and verification
+aicontext/          AI context file (CLAUDE.md, .cursorrules) validation
+watch/              Repository watcher with state persistence
+gascity_livedocs/   Example: automated doc freshness monitoring for Gas City ecosystem
 ```
 
 ## Supported Languages
