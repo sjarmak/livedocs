@@ -187,6 +187,100 @@ func TestMarshalRoundTrip(t *testing.T) {
 	}
 }
 
+func TestTribalDefaults(t *testing.T) {
+	cfg, err := Parse(nil)
+	if err != nil {
+		t.Fatalf("Parse(nil): %v", err)
+	}
+	if cfg.Tribal.LLMEnabled {
+		t.Error("Tribal.LLMEnabled should default to false")
+	}
+	if cfg.Tribal.DailyBudget != DefaultTribalDailyBudget {
+		t.Errorf("Tribal.DailyBudget = %d, want %d", cfg.Tribal.DailyBudget, DefaultTribalDailyBudget)
+	}
+	if cfg.Tribal.Model != DefaultTribalModel {
+		t.Errorf("Tribal.Model = %q, want %q", cfg.Tribal.Model, DefaultTribalModel)
+	}
+	if len(cfg.Tribal.AllowedRepos) != 0 {
+		t.Errorf("Tribal.AllowedRepos = %v, want empty", cfg.Tribal.AllowedRepos)
+	}
+}
+
+func TestTribalOptIn(t *testing.T) {
+	yamlData := []byte("tribal:\n  llm_enabled: true\n")
+	cfg, err := Parse(yamlData)
+	if err != nil {
+		t.Fatalf("Parse tribal opt-in: %v", err)
+	}
+	if !cfg.Tribal.LLMEnabled {
+		t.Error("Tribal.LLMEnabled should be true after explicit opt-in")
+	}
+	// Defaults should still apply for unset fields.
+	if cfg.Tribal.DailyBudget != DefaultTribalDailyBudget {
+		t.Errorf("Tribal.DailyBudget = %d, want %d", cfg.Tribal.DailyBudget, DefaultTribalDailyBudget)
+	}
+	if cfg.Tribal.Model != DefaultTribalModel {
+		t.Errorf("Tribal.Model = %q, want %q", cfg.Tribal.Model, DefaultTribalModel)
+	}
+
+	// Round-trip: marshal and re-parse should preserve LLMEnabled.
+	data, err := Marshal(cfg)
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	restored, err := Parse(data)
+	if err != nil {
+		t.Fatalf("Parse after Marshal: %v", err)
+	}
+	if !restored.Tribal.LLMEnabled {
+		t.Error("Tribal.LLMEnabled lost after round-trip")
+	}
+}
+
+func TestTribalAllowedRepos(t *testing.T) {
+	yamlData := []byte(`tribal:
+  llm_enabled: true
+  allowed_repos:
+    - "kubernetes/kubernetes"
+    - "live-docs/live_docs"
+  daily_budget: 50
+  model: "claude-sonnet-4-20250514"
+`)
+	cfg, err := Parse(yamlData)
+	if err != nil {
+		t.Fatalf("Parse tribal allowed repos: %v", err)
+	}
+	if !cfg.Tribal.LLMEnabled {
+		t.Error("Tribal.LLMEnabled should be true")
+	}
+	if len(cfg.Tribal.AllowedRepos) != 2 {
+		t.Fatalf("Tribal.AllowedRepos has %d entries, want 2", len(cfg.Tribal.AllowedRepos))
+	}
+	if cfg.Tribal.AllowedRepos[0] != "kubernetes/kubernetes" {
+		t.Errorf("AllowedRepos[0] = %q, want %q", cfg.Tribal.AllowedRepos[0], "kubernetes/kubernetes")
+	}
+	if cfg.Tribal.AllowedRepos[1] != "live-docs/live_docs" {
+		t.Errorf("AllowedRepos[1] = %q, want %q", cfg.Tribal.AllowedRepos[1], "live-docs/live_docs")
+	}
+	if cfg.Tribal.DailyBudget != 50 {
+		t.Errorf("Tribal.DailyBudget = %d, want 50", cfg.Tribal.DailyBudget)
+	}
+	if cfg.Tribal.Model != "claude-sonnet-4-20250514" {
+		t.Errorf("Tribal.Model = %q, want %q", cfg.Tribal.Model, "claude-sonnet-4-20250514")
+	}
+}
+
+func TestTribalCustomBudgetPreserved(t *testing.T) {
+	yamlData := []byte("tribal:\n  daily_budget: 200\n")
+	cfg, err := Parse(yamlData)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if cfg.Tribal.DailyBudget != 200 {
+		t.Errorf("Tribal.DailyBudget = %d, want 200 (should not be overwritten by default)", cfg.Tribal.DailyBudget)
+	}
+}
+
 func assertDefaults(t *testing.T, cfg Config) {
 	t.Helper()
 	if cfg.ClaimsDB != DefaultClaimsDBPath {
@@ -200,5 +294,15 @@ func assertDefaults(t *testing.T, cfg Config) {
 	}
 	if len(cfg.Exclude) != len(defaultExclude) {
 		t.Errorf("Exclude has %d entries, want %d", len(cfg.Exclude), len(defaultExclude))
+	}
+	// Tribal defaults should also be applied.
+	if cfg.Tribal.LLMEnabled {
+		t.Error("Tribal.LLMEnabled should default to false")
+	}
+	if cfg.Tribal.DailyBudget != DefaultTribalDailyBudget {
+		t.Errorf("Tribal.DailyBudget = %d, want %d", cfg.Tribal.DailyBudget, DefaultTribalDailyBudget)
+	}
+	if cfg.Tribal.Model != DefaultTribalModel {
+		t.Errorf("Tribal.Model = %q, want %q", cfg.Tribal.Model, DefaultTribalModel)
 	}
 }

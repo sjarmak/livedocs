@@ -28,7 +28,33 @@ const (
 
 	// DefaultCacheCapBytes is the default cache capacity: 2 GB.
 	DefaultCacheCapBytes int64 = 2 * 1024 * 1024 * 1024
+
+	// DefaultTribalDailyBudget is the default daily LLM call budget for tribal extraction.
+	DefaultTribalDailyBudget = 100
+
+	// DefaultTribalModel is the default model for LLM-classified tribal extraction.
+	DefaultTribalModel = "claude-haiku-4-5-20251001"
 )
+
+// TribalConfig holds settings for LLM-classified tribal knowledge extraction.
+// LLM extraction is opt-in: LLMEnabled must be true and --tribal=llm must be
+// passed at the CLI. Deterministic extractors run regardless of this config.
+type TribalConfig struct {
+	// LLMEnabled gates LLM-classified tribal extraction. Default: false.
+	LLMEnabled bool `yaml:"llm_enabled,omitempty"`
+
+	// AllowedRepos restricts LLM extraction to these repositories.
+	// Empty means all repositories are allowed when LLMEnabled is true.
+	AllowedRepos []string `yaml:"allowed_repos,omitempty"`
+
+	// DailyBudget is the maximum number of LLM calls per day.
+	// Default: 100.
+	DailyBudget int `yaml:"daily_budget,omitempty"`
+
+	// Model is the LLM model identifier used for tribal extraction.
+	// Default: claude-haiku-4-5-20251001.
+	Model string `yaml:"model,omitempty"`
+}
 
 // Config represents the .livedocs.yaml configuration file.
 // All fields are optional; zero values are replaced with sane defaults.
@@ -53,6 +79,9 @@ type Config struct {
 	// Repo is the repository identifier (e.g., "kubernetes/kubernetes").
 	// Default: auto-detected from git remote or directory name.
 	Repo string `yaml:"repo,omitempty"`
+
+	// Tribal holds LLM tribal extraction settings.
+	Tribal TribalConfig `yaml:"tribal,omitempty"`
 }
 
 // defaultExclude are patterns always excluded during scanning.
@@ -74,6 +103,12 @@ func (c Config) ApplyDefaults() Config {
 	}
 	if out.CacheDB == "" {
 		out.CacheDB = DefaultCacheDBPath
+	}
+	if out.Tribal.DailyBudget == 0 {
+		out.Tribal.DailyBudget = DefaultTribalDailyBudget
+	}
+	if out.Tribal.Model == "" {
+		out.Tribal.Model = DefaultTribalModel
 	}
 	// Merge default excludes with user excludes, avoiding duplicates.
 	seen := make(map[string]bool, len(out.Exclude))
