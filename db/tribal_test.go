@@ -48,6 +48,9 @@ func TestTribalSchema(t *testing.T) {
 		"extractor": false, "extractor_version": false, "model": false,
 		"staleness_hash": false, "status": false, "created_at": false,
 		"last_verified": false,
+		// Phase 3: cluster key enables deterministic clustering of tribal
+		// facts sharing a subject/kind.
+		"cluster_key": false,
 	}
 	for rows.Next() {
 		var cid int
@@ -614,4 +617,240 @@ func TestInsertTribalCorrection_MissingFields(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for missing actor")
 	}
+}
+
+// TestTribalPhase3Migration verifies the Phase 3 additive migration:
+//   - tribal_facts gains cluster_key TEXT NOT NULL DEFAULT ” on pre-Phase-3 DBs.
+//   - source_files gains last_pr_id_set BLOB and pr_miner_version TEXT DEFAULT ”.
+//   - idx_tribal_facts_cluster exists on (subject_id, kind, cluster_key).
+//   - The migration is idempotent — running CreateTribalSchema twice is a no-op.
+//   - PRAGMA foreign_keys = ON is honored on the handle returned by OpenClaimsDB.
+func TestTribalPhase3Migration(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "phase3.db")
+	db, err := OpenClaimsDB(path)
+	if err != nil {
+		t.Fatalf("open claims db: %v", err)
+	}
+	t.Cleanup(func() { db.Close() })
+
+	// Simulate a pre-Phase-3 core schema: create the tables without the
+	// Phase 3 columns, matching the shape callers would see if they had
+	// extracted against an older live_docs build.
+	legacyCore := `
+CREATE TABLE IF NOT EXISTS symbols (
+    id              INTEGER PRIMARY KEY,
+    repo            TEXT NOT NULL,
+    import_path     TEXT NOT NULL,
+    symbol_name     TEXT NOT NULL,
+    language        TEXT NOT NULL,
+    kind            TEXT NOT NULL,
+    visibility      TEXT NOT NULL DEFAULT 'public'
+                    CHECK(visibility IN ('public', 'internal', 'private', 're-exported', 'conditional')),
+    display_name    TEXT,
+    scip_symbol     TEXT,
+    UNIQUE(repo, import_path, symbol_name)
+);
+CREATE TABLE IF NOT EXISTS source_files (
+    id              INTEGER PRIMARY KEY,
+    repo            TEXT NOT NULL,
+    relative_path   TEXT NOT NULL,
+    content_hash    TEXT NOT NULL,
+    extractor_version TEXT NOT NULL,
+    grammar_version TEXT,
+    last_indexed    TEXT NOT NULL,
+    deleted         INTEGER NOT NULL DEFAULT 0,
+    UNIQUE(repo, relative_path)
+);
+CREATE TABLE IF NOT EXISTS tribal_facts (
+    id                INTEGER PRIMARY KEY,
+    subject_id        INTEGER NOT NULL REFERENCES symbols(id),
+    kind              TEXT NOT NULL CHECK(kind IN ('ownership','rationale','invariant','quirk','todo','deprecation')),
+    body              TEXT NOT NULL,
+    source_quote      TEXT NOT NULL,
+    confidence        REAL NOT NULL,
+    corroboration     INTEGER NOT NULL DEFAULT 1,
+    extractor         TEXT NOT NULL,
+    extractor_version TEXT NOT NULL,
+    model             TEXT,
+    staleness_hash    TEXT NOT NULL,
+    status            TEXT NOT NULL DEFAULT 'active' CHECK(status IN ('active','stale','quarantined','superseded','deleted')),
+    created_at        TEXT NOT NULL,
+    last_verified     TEXT NOT NULL
+);
+`
+	if _, err := db.DB().Exec(legacyCore); err != nil {
+		t.Fatalf("seed legacy core schema: %v", err)
+	}
+
+	// Sanity check: the legacy DB must NOT yet have Phase 3 columns.
+	if hasColumn(t, db, "tribal_facts", "cluster_key") {
+		t.Fatal("legacy seed unexpectedly already has cluster_key")
+	}
+	if hasColumn(t, db, "source_files", "last_pr_id_set") {
+		t.Fatal("legacy seed unexpectedly already has last_pr_id_set")
+	}
+
+	// Run the migration via CreateTribalSchema.
+	if err := db.CreateTribalSchema(); err != nil {
+		t.Fatalf("create tribal schema (migration): %v", err)
+	}
+
+	// Post-migration assertions: new columns exist with the expected types.
+	assertColumnType(t, db, "tribal_facts", "cluster_key", "TEXT", true, "''")
+	assertColumnType(t, db, "source_files", "last_pr_id_set", "BLOB", false, "")
+	assertColumnType(t, db, "source_files", "pr_miner_version", "TEXT", false, "''")
+
+	// Index exists and covers (subject_id, kind, cluster_key).
+	assertIndexExists(t, db, "idx_tribal_facts_cluster")
+	indexedCols := indexColumns(t, db, "idx_tribal_facts_cluster")
+	wantCols := []string{"subject_id", "kind", "cluster_key"}
+	if len(indexedCols) != len(wantCols) {
+		t.Fatalf("idx_tribal_facts_cluster columns: got %v, want %v", indexedCols, wantCols)
+	}
+	for i, c := range wantCols {
+		if indexedCols[i] != c {
+			t.Errorf("idx_tribal_facts_cluster column %d: got %q, want %q", i, indexedCols[i], c)
+		}
+	}
+
+	// Idempotency: a second run must succeed and produce identical schema.
+	beforeMaster := snapshotSqliteMaster(t, db)
+	if err := db.CreateTribalSchema(); err != nil {
+		t.Fatalf("second CreateTribalSchema: %v", err)
+	}
+	afterMaster := snapshotSqliteMaster(t, db)
+	if beforeMaster != afterMaster {
+		t.Errorf("schema changed on second CreateTribalSchema run\nbefore:\n%s\nafter:\n%s", beforeMaster, afterMaster)
+	}
+
+	// PRAGMA foreign_keys must be ON on the open handle.
+	var fk int
+	if err := db.DB().QueryRow("PRAGMA foreign_keys").Scan(&fk); err != nil {
+		t.Fatalf("query pragma foreign_keys: %v", err)
+	}
+	if fk != 1 {
+		t.Errorf("foreign_keys pragma: got %d, want 1", fk)
+	}
+}
+
+// hasColumn reports whether table has a column with the given name.
+func hasColumn(t *testing.T, db *ClaimsDB, table, column string) bool {
+	t.Helper()
+	rows, err := db.DB().Query("PRAGMA table_info(" + table + ")")
+	if err != nil {
+		t.Fatalf("pragma table_info(%s): %v", table, err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var cid int
+		var name, typ string
+		var notnull, pk int
+		var dflt interface{}
+		if err := rows.Scan(&cid, &name, &typ, &notnull, &dflt, &pk); err != nil {
+			t.Fatalf("scan pragma row: %v", err)
+		}
+		if name == column {
+			return true
+		}
+	}
+	return false
+}
+
+// assertColumnType verifies that (table, column) has the expected declared
+// type, NOT NULL flag, and default expression. An empty wantDefault string
+// means "do not assert on default".
+func assertColumnType(t *testing.T, db *ClaimsDB, table, column, wantType string, wantNotNull bool, wantDefault string) {
+	t.Helper()
+	rows, err := db.DB().Query("PRAGMA table_info(" + table + ")")
+	if err != nil {
+		t.Fatalf("pragma table_info(%s): %v", table, err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var cid int
+		var name, typ string
+		var notnull, pk int
+		var dflt interface{}
+		if err := rows.Scan(&cid, &name, &typ, &notnull, &dflt, &pk); err != nil {
+			t.Fatalf("scan pragma row: %v", err)
+		}
+		if name != column {
+			continue
+		}
+		if typ != wantType {
+			t.Errorf("%s.%s type: got %q, want %q", table, column, typ, wantType)
+		}
+		gotNotNull := notnull == 1
+		if gotNotNull != wantNotNull {
+			t.Errorf("%s.%s notnull: got %v, want %v", table, column, gotNotNull, wantNotNull)
+		}
+		if wantDefault != "" {
+			gotDefault, _ := dflt.(string)
+			if gotDefault != wantDefault {
+				t.Errorf("%s.%s default: got %q, want %q", table, column, gotDefault, wantDefault)
+			}
+		}
+		return
+	}
+	t.Errorf("%s.%s not found", table, column)
+}
+
+// assertIndexExists verifies the index is registered in sqlite_master.
+func assertIndexExists(t *testing.T, db *ClaimsDB, name string) {
+	t.Helper()
+	var count int
+	if err := db.DB().QueryRow(
+		"SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name=?", name,
+	).Scan(&count); err != nil {
+		t.Fatalf("query sqlite_master for %s: %v", name, err)
+	}
+	if count != 1 {
+		t.Errorf("index %s: expected 1 row in sqlite_master, got %d", name, count)
+	}
+}
+
+// indexColumns returns the ordered list of column names an index covers
+// via PRAGMA index_info.
+func indexColumns(t *testing.T, db *ClaimsDB, index string) []string {
+	t.Helper()
+	rows, err := db.DB().Query("PRAGMA index_info(" + index + ")")
+	if err != nil {
+		t.Fatalf("pragma index_info(%s): %v", index, err)
+	}
+	defer rows.Close()
+	var cols []string
+	for rows.Next() {
+		var seqno, cid int
+		var name string
+		if err := rows.Scan(&seqno, &cid, &name); err != nil {
+			t.Fatalf("scan pragma index_info row: %v", err)
+		}
+		cols = append(cols, name)
+	}
+	return cols
+}
+
+// snapshotSqliteMaster returns a deterministic dump of the non-transient
+// sqlite_master rows, used to prove the migration is idempotent.
+func snapshotSqliteMaster(t *testing.T, db *ClaimsDB) string {
+	t.Helper()
+	rows, err := db.DB().Query(`
+		SELECT type, name, tbl_name, IFNULL(sql, '')
+		FROM sqlite_master
+		WHERE name NOT LIKE 'sqlite_%'
+		ORDER BY type, name
+	`)
+	if err != nil {
+		t.Fatalf("query sqlite_master: %v", err)
+	}
+	defer rows.Close()
+	var out string
+	for rows.Next() {
+		var typ, name, tbl, sqlText string
+		if err := rows.Scan(&typ, &name, &tbl, &sqlText); err != nil {
+			t.Fatalf("scan sqlite_master row: %v", err)
+		}
+		out += typ + "|" + name + "|" + tbl + "|" + sqlText + "\n"
+	}
+	return out
 }

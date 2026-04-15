@@ -1,11 +1,38 @@
 package drift
 
 import (
+	"context"
 	"path/filepath"
 	"testing"
 
 	"github.com/live-docs/live_docs/db"
 )
+
+// deleteSymbolOrphaning deletes a symbol row while temporarily disabling
+// foreign_keys enforcement on a dedicated SQL connection. This simulates
+// a symbol "disappearing from the codebase" while leaving child
+// tribal_facts in place so drift logic can transition them to
+// quarantined. Since PRAGMA foreign_keys is a per-connection setting in
+// SQLite, we pin one connection via DB.Conn() to ensure the OFF/ON toggle
+// and the DELETE all run against the same connection.
+func deleteSymbolOrphaning(t *testing.T, cdb *db.ClaimsDB, symbolID int64) {
+	t.Helper()
+	ctx := context.Background()
+	conn, err := cdb.DB().Conn(ctx)
+	if err != nil {
+		t.Fatalf("grab conn: %v", err)
+	}
+	defer conn.Close()
+	if _, err := conn.ExecContext(ctx, "PRAGMA foreign_keys = OFF"); err != nil {
+		t.Fatalf("disable foreign keys: %v", err)
+	}
+	if _, err := conn.ExecContext(ctx, "DELETE FROM symbols WHERE id = ?", symbolID); err != nil {
+		t.Fatalf("delete symbol: %v", err)
+	}
+	if _, err := conn.ExecContext(ctx, "PRAGMA foreign_keys = ON"); err != nil {
+		t.Fatalf("re-enable foreign keys: %v", err)
+	}
+}
 
 // setupTribalDB creates a temp claims DB with tribal schema and returns it.
 func setupTribalDB(t *testing.T) *db.ClaimsDB {
@@ -140,10 +167,9 @@ func TestTribalDrift_SymbolDeleted_TransitionsToQuarantined(t *testing.T) {
 	factID := insertFact(t, cdb, symID, "active", "aaa", "aaa")
 
 	// Delete the symbol to simulate it disappearing from the codebase.
-	_, err := cdb.DB().Exec("DELETE FROM symbols WHERE id = ?", symID)
-	if err != nil {
-		t.Fatalf("delete symbol: %v", err)
-	}
+	// FK enforcement is temporarily disabled for this synthetic scenario so
+	// the tribal_facts rows can be orphaned and observed by CheckTribal.
+	deleteSymbolOrphaning(t, cdb, symID)
 
 	initialCount := countFacts(t, cdb)
 
@@ -250,11 +276,9 @@ func TestTribalDrift_StaleFactWithDeletedSymbol_Quarantined(t *testing.T) {
 	symID := insertSymbol(t, cdb, "Obsolete")
 	factID := insertFact(t, cdb, symID, "stale", "aaa", "bbb")
 
-	// Delete the symbol.
-	_, err := cdb.DB().Exec("DELETE FROM symbols WHERE id = ?", symID)
-	if err != nil {
-		t.Fatalf("delete symbol: %v", err)
-	}
+	// Delete the symbol. FK enforcement is temporarily disabled for this
+	// synthetic scenario so the tribal_facts rows can be orphaned.
+	deleteSymbolOrphaning(t, cdb, symID)
 
 	stale, quarantined, err := CheckTribal(cdb)
 	if err != nil {

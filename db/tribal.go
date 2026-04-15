@@ -84,7 +84,10 @@ var validEvidenceSourceTypes = map[string]bool{
 
 // CreateTribalSchema creates the tribal knowledge tables and indexes.
 // It is idempotent (uses IF NOT EXISTS) and can be called on a database
-// that already has the core claims schema.
+// that already has the core claims schema. Phase 3 additive migrations
+// (cluster_key column, idx_tribal_facts_cluster index, source_files
+// PR-mining columns) run at the end so that pre-Phase-3 databases are
+// upgraded in place without dropping or rewriting existing rows.
 func (c *ClaimsDB) CreateTribalSchema() error {
 	schema := `
 CREATE TABLE IF NOT EXISTS tribal_facts (
@@ -101,7 +104,8 @@ CREATE TABLE IF NOT EXISTS tribal_facts (
     staleness_hash    TEXT NOT NULL,
     status            TEXT NOT NULL DEFAULT 'active' CHECK(status IN ('active','stale','quarantined','superseded','deleted')),
     created_at        TEXT NOT NULL,
-    last_verified     TEXT NOT NULL
+    last_verified     TEXT NOT NULL,
+    cluster_key       TEXT NOT NULL DEFAULT ''
 );
 
 CREATE TABLE IF NOT EXISTS tribal_evidence (
@@ -115,6 +119,8 @@ CREATE TABLE IF NOT EXISTS tribal_evidence (
 );
 CREATE INDEX IF NOT EXISTS idx_tribal_facts_subject ON tribal_facts(subject_id);
 CREATE INDEX IF NOT EXISTS idx_tribal_evidence_fact ON tribal_evidence(fact_id);
+-- idx_tribal_facts_cluster is created by migrateTribalFactsPhase3 after
+-- ensuring the cluster_key column exists on pre-Phase-3 databases.
 
 CREATE TABLE IF NOT EXISTS tribal_corrections (
     id              INTEGER PRIMARY KEY,
@@ -136,6 +142,45 @@ CREATE TABLE IF NOT EXISTS tribal_corrections (
 		return fmt.Errorf("create tribal search index: %w", err)
 	}
 
+	// Apply Phase 3 additive migrations for databases that pre-date the
+	// Phase 3 DDL above. Each step is idempotent — it only runs if the
+	// target column/index is missing.
+	if err := c.migrateTribalFactsPhase3(); err != nil {
+		return fmt.Errorf("migrate tribal_facts phase3: %w", err)
+	}
+	if err := c.migrateSourceFilesPhase3(); err != nil {
+		return fmt.Errorf("migrate source_files phase3: %w", err)
+	}
+
+	return nil
+}
+
+// migrateTribalFactsPhase3 adds the cluster_key column and the
+// idx_tribal_facts_cluster index to tribal_facts on databases that
+// pre-date the Phase 3 DDL. It is idempotent: both steps are guarded
+// by existence checks so calling CreateTribalSchema twice is a no-op.
+func (c *ClaimsDB) migrateTribalFactsPhase3() error {
+	cols, err := c.columnsForTable("tribal_facts")
+	if err != nil {
+		return fmt.Errorf("inspect tribal_facts columns: %w", err)
+	}
+	if _, ok := cols["cluster_key"]; !ok {
+		if _, err := c.exec.Exec(
+			`ALTER TABLE tribal_facts ADD COLUMN cluster_key TEXT NOT NULL DEFAULT ''`,
+		); err != nil {
+			return fmt.Errorf("add tribal_facts.cluster_key: %w", err)
+		}
+	}
+	// CREATE INDEX IF NOT EXISTS is naturally idempotent. We still issue it
+	// in the migration path because the main schema string above only runs
+	// its index statement via exec.Exec on a fresh DB — calling it again
+	// here guarantees the index exists after migration on older DBs that
+	// saw an older schema string.
+	if _, err := c.exec.Exec(
+		`CREATE INDEX IF NOT EXISTS idx_tribal_facts_cluster ON tribal_facts(subject_id, kind, cluster_key)`,
+	); err != nil {
+		return fmt.Errorf("create idx_tribal_facts_cluster: %w", err)
+	}
 	return nil
 }
 

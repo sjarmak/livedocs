@@ -78,10 +78,12 @@ type ClaimsDB struct {
 
 // OpenClaimsDB opens or creates a per-repo claims database at the given path.
 func OpenClaimsDB(path string) (*ClaimsDB, error) {
-	// Append busy_timeout and txlock to DSN so every pooled connection inherits
-	// them. _txlock=immediate makes BEGIN acquire a write lock upfront, allowing
+	// Append pragmas to DSN so every pooled connection inherits them.
+	// _txlock=immediate makes BEGIN acquire a write lock upfront, allowing
 	// the busy_timeout to apply when another writer holds the lock.
-	dsn := path + "?_pragma=busy_timeout%3d5000&_txlock=immediate"
+	// foreign_keys=ON is required for tribal_evidence ON DELETE CASCADE and
+	// for referential integrity on Phase 3 migrations.
+	dsn := path + "?_pragma=busy_timeout%3d5000&_pragma=foreign_keys%3d1&_txlock=immediate"
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("open claims db %s: %w", path, err)
@@ -96,6 +98,10 @@ func OpenClaimsDB(path string) (*ClaimsDB, error) {
 		db.Close()
 		return nil, fmt.Errorf("set busy_timeout: %w", err)
 	}
+	// foreign_keys=ON is applied via the DSN _pragma parameter above so every
+	// pooled connection inherits it. SQLite defaults to OFF for backward
+	// compatibility; tribal_evidence relies on ON DELETE CASCADE and Phase 3
+	// migrations assume referential integrity on the open handle.
 	return &ClaimsDB{db: db, exec: db, enrichExec: db}, nil
 }
 
@@ -234,12 +240,70 @@ CREATE TABLE IF NOT EXISTS source_files (
     grammar_version TEXT,
     last_indexed    TEXT NOT NULL,
     deleted         INTEGER NOT NULL DEFAULT 0,
+    last_pr_id_set  BLOB,
+    pr_miner_version TEXT DEFAULT '',
     UNIQUE(repo, relative_path)
 );
 CREATE INDEX IF NOT EXISTS idx_source_files_deleted ON source_files(repo, deleted) WHERE deleted = 1;
 `
-	_, err := c.exec.Exec(schema)
-	return err
+	if _, err := c.exec.Exec(schema); err != nil {
+		return err
+	}
+	// Run additive Phase 3 migrations for databases that were created before
+	// last_pr_id_set / pr_miner_version were part of the source_files DDL.
+	return c.migrateSourceFilesPhase3()
+}
+
+// migrateSourceFilesPhase3 adds Phase 3 columns to source_files on databases
+// that pre-date the Phase 3 DDL above. It is idempotent: ALTER TABLE is only
+// invoked when PRAGMA table_info shows the column is missing.
+//
+// If a legacy `last_pr_mined INTEGER` column is present, it is left in place
+// (SQLite column drops are hazardous) and `last_pr_id_set BLOB` is added
+// alongside it as the canonical replacement. Future phases may drop
+// `last_pr_mined` once all deployed readers have migrated.
+func (c *ClaimsDB) migrateSourceFilesPhase3() error {
+	cols, err := c.columnsForTable("source_files")
+	if err != nil {
+		return fmt.Errorf("inspect source_files columns: %w", err)
+	}
+	if _, ok := cols["last_pr_id_set"]; !ok {
+		if _, err := c.exec.Exec(`ALTER TABLE source_files ADD COLUMN last_pr_id_set BLOB`); err != nil {
+			return fmt.Errorf("add source_files.last_pr_id_set: %w", err)
+		}
+	}
+	if _, ok := cols["pr_miner_version"]; !ok {
+		if _, err := c.exec.Exec(`ALTER TABLE source_files ADD COLUMN pr_miner_version TEXT DEFAULT ''`); err != nil {
+			return fmt.Errorf("add source_files.pr_miner_version: %w", err)
+		}
+	}
+	return nil
+}
+
+// columnsForTable returns the set of column names for a table by reading
+// PRAGMA table_info. The map value is unused; callers only need membership.
+// Returns an empty map if the table does not exist.
+func (c *ClaimsDB) columnsForTable(table string) (map[string]struct{}, error) {
+	rows, err := c.exec.Query(fmt.Sprintf("PRAGMA table_info(%s)", table))
+	if err != nil {
+		return nil, fmt.Errorf("pragma table_info(%s): %w", table, err)
+	}
+	defer rows.Close()
+	cols := make(map[string]struct{})
+	for rows.Next() {
+		var cid int
+		var name, typ string
+		var notnull, pk int
+		var dflt sql.NullString
+		if err := rows.Scan(&cid, &name, &typ, &notnull, &dflt, &pk); err != nil {
+			return nil, fmt.Errorf("scan pragma row: %w", err)
+		}
+		cols[name] = struct{}{}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate pragma rows: %w", err)
+	}
+	return cols, nil
 }
 
 // UpsertSymbol inserts or updates a symbol, returning its ID.
