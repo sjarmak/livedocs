@@ -571,7 +571,7 @@ func TestTribalLLMConfigNotSet(t *testing.T) {
 	}
 }
 
-func TestTribalLLMMissingAPIKey(t *testing.T) {
+func TestTribalLLMMissingAuth(t *testing.T) {
 	resetExtractFlags()
 
 	// Create a temp repo with .livedocs.yaml containing llm_enabled: true.
@@ -586,25 +586,38 @@ func TestTribalLLMMissingAPIKey(t *testing.T) {
 		t.Fatalf("write .livedocs.yaml: %v", err)
 	}
 
-	// Initialize a git repo so deterministic extractors don't fail.
+	// Initialize a git repo with a remote so git remote parsing works.
 	initGitRepo(t, repoDir)
+	cmd := exec.Command("git", "remote", "add", "origin", "https://github.com/test-org/test-repo.git")
+	cmd.Dir = repoDir
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("add remote: %v: %s", err, out)
+	}
 
-	// Ensure ANTHROPIC_API_KEY is not set.
+	// Ensure ANTHROPIC_API_KEY is not set. Override PATH to exclude claude
+	// binary but keep git and other essentials available.
 	t.Setenv("ANTHROPIC_API_KEY", "")
 
+	// Create a minimal PATH with only git's directory (no claude binary).
+	gitPath, err := exec.LookPath("git")
+	if err != nil {
+		t.Fatalf("git not on PATH: %v", err)
+	}
+	t.Setenv("PATH", filepath.Dir(gitPath))
+
 	outDir := t.TempDir()
-	outputDB := filepath.Join(outDir, "llm-apikey.claims.db")
+	outputDB := filepath.Join(outDir, "llm-auth.claims.db")
 
 	buf := new(bytes.Buffer)
 	rootCmd.SetOut(buf)
 	rootCmd.SetErr(buf)
-	rootCmd.SetArgs([]string{"extract", "--tribal=llm", "--repo", "llm-apikey-repo", "--output", outputDB, repoDir})
-	err := rootCmd.Execute()
+	rootCmd.SetArgs([]string{"extract", "--tribal=llm", "--repo", "llm-auth-repo", "--output", outputDB, repoDir})
+	err = rootCmd.Execute()
 	if err == nil {
-		t.Fatal("expected error when ANTHROPIC_API_KEY is missing")
+		t.Fatal("expected error when neither claude CLI nor ANTHROPIC_API_KEY is available")
 	}
-	if !strings.Contains(err.Error(), "ANTHROPIC_API_KEY") {
-		t.Errorf("error should mention ANTHROPIC_API_KEY, got: %v", err)
+	if !strings.Contains(err.Error(), "claude") && !strings.Contains(err.Error(), "ANTHROPIC_API_KEY") {
+		t.Errorf("error should mention auth methods, got: %v", err)
 	}
 }
 

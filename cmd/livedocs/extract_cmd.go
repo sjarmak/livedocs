@@ -964,23 +964,30 @@ func runLLMTribalExtraction(ctx context.Context, out io.Writer, claimsDB *db.Cla
 		return fmt.Errorf("LLM tribal extraction requires tribal.llm_enabled: true in .livedocs.yaml")
 	}
 
-	// 2. Check API key.
-	apiKey := os.Getenv("ANTHROPIC_API_KEY")
-	if apiKey == "" {
-		return fmt.Errorf("ANTHROPIC_API_KEY environment variable is required for LLM tribal extraction")
-	}
-
-	// 3. Parse git remote for owner/repo (needed by PR comment miner).
+	// 2. Parse git remote for owner/repo (needed by PR comment miner).
 	owner, repo, ok := getGitRemoteOwnerRepo(ctx, repoDir)
 	if !ok {
 		fmt.Fprintf(out, "Warning: could not parse git remote origin; skipping LLM tribal extraction\n")
 		return nil
 	}
 
-	// 4. Create LLM client.
-	client, err := semantic.NewAnthropicClient(apiKey, semantic.WithModel(cfg.Tribal.Model))
-	if err != nil {
-		return fmt.Errorf("create LLM client: %w", err)
+	// 3. Create LLM client: prefer Claude CLI (OAuth) over API key.
+	var client semantic.LLMClient
+	cliClient, cliErr := semantic.NewClaudeCLIClient(cfg.Tribal.Model)
+	if cliErr == nil {
+		client = cliClient
+		fmt.Fprintf(out, "Using Claude CLI (OAuth) for LLM tribal extraction\n")
+	} else {
+		apiKey := os.Getenv("ANTHROPIC_API_KEY")
+		if apiKey == "" {
+			return fmt.Errorf("LLM tribal extraction requires either 'claude' CLI on PATH (OAuth) or ANTHROPIC_API_KEY env var")
+		}
+		apiClient, apiErr := semantic.NewAnthropicClient(apiKey, semantic.WithModel(cfg.Tribal.Model))
+		if apiErr != nil {
+			return fmt.Errorf("create LLM client: %w", apiErr)
+		}
+		client = apiClient
+		fmt.Fprintf(out, "Using Anthropic API for LLM tribal extraction\n")
 	}
 
 	// 5. Create PR comment miner.
