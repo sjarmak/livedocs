@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -204,6 +205,97 @@ func TestTribalDefaults(t *testing.T) {
 	if len(cfg.Tribal.AllowedRepos) != 0 {
 		t.Errorf("Tribal.AllowedRepos = %v, want empty", cfg.Tribal.AllowedRepos)
 	}
+	if cfg.Tribal.MaxFilesPerRun != DefaultTribalMaxFilesPerRun {
+		t.Errorf("Tribal.MaxFilesPerRun = %d, want %d", cfg.Tribal.MaxFilesPerRun, DefaultTribalMaxFilesPerRun)
+	}
+	if cfg.Tribal.CriticBudgetPercent != DefaultTribalCriticBudgetPercent {
+		t.Errorf("Tribal.CriticBudgetPercent = %d, want %d", cfg.Tribal.CriticBudgetPercent, DefaultTribalCriticBudgetPercent)
+	}
+	if cfg.Tribal.ClusterDebugEnabled {
+		t.Error("Tribal.ClusterDebugEnabled should default to false")
+	}
+}
+
+func TestTribalPhase3Fields(t *testing.T) {
+	t.Run("defaults when unset", func(t *testing.T) {
+		cfg, err := Parse([]byte("tribal:\n  llm_enabled: true\n"))
+		if err != nil {
+			t.Fatalf("Parse: %v", err)
+		}
+		if cfg.Tribal.MaxFilesPerRun != DefaultTribalMaxFilesPerRun {
+			t.Errorf("Tribal.MaxFilesPerRun = %d, want %d",
+				cfg.Tribal.MaxFilesPerRun, DefaultTribalMaxFilesPerRun)
+		}
+		if cfg.Tribal.CriticBudgetPercent != DefaultTribalCriticBudgetPercent {
+			t.Errorf("Tribal.CriticBudgetPercent = %d, want %d",
+				cfg.Tribal.CriticBudgetPercent, DefaultTribalCriticBudgetPercent)
+		}
+		if cfg.Tribal.ClusterDebugEnabled {
+			t.Error("Tribal.ClusterDebugEnabled should default to false")
+		}
+	})
+
+	t.Run("overrides when set", func(t *testing.T) {
+		yamlData := []byte(`tribal:
+  max_files_per_run: 25
+  critic_budget_percent: 35
+  cluster_debug_enabled: true
+`)
+		cfg, err := Parse(yamlData)
+		if err != nil {
+			t.Fatalf("Parse: %v", err)
+		}
+		if cfg.Tribal.MaxFilesPerRun != 25 {
+			t.Errorf("Tribal.MaxFilesPerRun = %d, want 25", cfg.Tribal.MaxFilesPerRun)
+		}
+		if cfg.Tribal.CriticBudgetPercent != 35 {
+			t.Errorf("Tribal.CriticBudgetPercent = %d, want 35", cfg.Tribal.CriticBudgetPercent)
+		}
+		if !cfg.Tribal.ClusterDebugEnabled {
+			t.Error("Tribal.ClusterDebugEnabled should be true")
+		}
+
+		// Round-trip: marshal and re-parse should preserve overrides.
+		data, err := Marshal(cfg)
+		if err != nil {
+			t.Fatalf("Marshal: %v", err)
+		}
+		restored, err := Parse(data)
+		if err != nil {
+			t.Fatalf("Parse after Marshal: %v", err)
+		}
+		if restored.Tribal.MaxFilesPerRun != 25 {
+			t.Errorf("round-trip MaxFilesPerRun = %d, want 25", restored.Tribal.MaxFilesPerRun)
+		}
+		if restored.Tribal.CriticBudgetPercent != 35 {
+			t.Errorf("round-trip CriticBudgetPercent = %d, want 35", restored.Tribal.CriticBudgetPercent)
+		}
+		if !restored.Tribal.ClusterDebugEnabled {
+			t.Error("round-trip ClusterDebugEnabled lost")
+		}
+	})
+
+	t.Run("invalid negative max_files_per_run", func(t *testing.T) {
+		yamlData := []byte("tribal:\n  max_files_per_run: -5\n")
+		_, err := Parse(yamlData)
+		if err == nil {
+			t.Fatal("expected error for negative max_files_per_run, got nil")
+		}
+	})
+
+	t.Run("init template documents phase 3 fields", func(t *testing.T) {
+		out := DefaultYAML([]string{"go"})
+		wantSubstrings := []string{
+			"max_files_per_run",
+			"critic_budget_percent",
+			"cluster_debug_enabled",
+		}
+		for _, s := range wantSubstrings {
+			if !strings.Contains(out, s) {
+				t.Errorf("DefaultYAML output missing %q; got:\n%s", s, out)
+			}
+		}
+	})
 }
 
 func TestTribalOptIn(t *testing.T) {
@@ -304,5 +396,14 @@ func assertDefaults(t *testing.T, cfg Config) {
 	}
 	if cfg.Tribal.Model != DefaultTribalModel {
 		t.Errorf("Tribal.Model = %q, want %q", cfg.Tribal.Model, DefaultTribalModel)
+	}
+	if cfg.Tribal.MaxFilesPerRun != DefaultTribalMaxFilesPerRun {
+		t.Errorf("Tribal.MaxFilesPerRun = %d, want %d", cfg.Tribal.MaxFilesPerRun, DefaultTribalMaxFilesPerRun)
+	}
+	if cfg.Tribal.CriticBudgetPercent != DefaultTribalCriticBudgetPercent {
+		t.Errorf("Tribal.CriticBudgetPercent = %d, want %d", cfg.Tribal.CriticBudgetPercent, DefaultTribalCriticBudgetPercent)
+	}
+	if cfg.Tribal.ClusterDebugEnabled {
+		t.Error("Tribal.ClusterDebugEnabled should default to false")
 	}
 }

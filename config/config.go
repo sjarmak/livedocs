@@ -34,6 +34,14 @@ const (
 
 	// DefaultTribalModel is the default model for LLM-classified tribal extraction.
 	DefaultTribalModel = "claude-haiku-4-5-20251001"
+
+	// DefaultTribalMaxFilesPerRun is the default cap on files processed by the
+	// tribal mining loop per invocation.
+	DefaultTribalMaxFilesPerRun = 100
+
+	// DefaultTribalCriticBudgetPercent is the default reserved share of the
+	// tribal LLM budget allocated to a future critic loop.
+	DefaultTribalCriticBudgetPercent = 20
 )
 
 // TribalConfig holds settings for LLM-classified tribal knowledge extraction.
@@ -54,6 +62,18 @@ type TribalConfig struct {
 	// Model is the LLM model identifier used for tribal extraction.
 	// Default: claude-haiku-4-5-20251001.
 	Model string `yaml:"model,omitempty"`
+
+	// MaxFilesPerRun caps how many files the tribal mining loop processes per
+	// invocation. Must be greater than zero. Default: 100.
+	MaxFilesPerRun int `yaml:"max_files_per_run,omitempty"`
+
+	// CriticBudgetPercent is the reserved share (0-100) of the tribal LLM
+	// budget allocated to a future critic loop. Default: 20.
+	CriticBudgetPercent int `yaml:"critic_budget_percent,omitempty"`
+
+	// ClusterDebugEnabled toggles the cluster_debug separate DB used for
+	// Phase 5 calibration. Default: false.
+	ClusterDebugEnabled bool `yaml:"cluster_debug_enabled,omitempty"`
 }
 
 // Config represents the .livedocs.yaml configuration file.
@@ -110,6 +130,12 @@ func (c Config) ApplyDefaults() Config {
 	if out.Tribal.Model == "" {
 		out.Tribal.Model = DefaultTribalModel
 	}
+	if out.Tribal.MaxFilesPerRun == 0 {
+		out.Tribal.MaxFilesPerRun = DefaultTribalMaxFilesPerRun
+	}
+	if out.Tribal.CriticBudgetPercent == 0 {
+		out.Tribal.CriticBudgetPercent = DefaultTribalCriticBudgetPercent
+	}
 	// Merge default excludes with user excludes, avoiding duplicates.
 	seen := make(map[string]bool, len(out.Exclude))
 	for _, e := range out.Exclude {
@@ -146,7 +172,22 @@ func Parse(data []byte) (Config, error) {
 	if err := yaml.Unmarshal(data, &cfg); err != nil {
 		return Config{}, fmt.Errorf("config: parse yaml: %w", err)
 	}
+	if err := validate(&cfg); err != nil {
+		return Config{}, fmt.Errorf("config: validate: %w", err)
+	}
 	return cfg.ApplyDefaults(), nil
+}
+
+// validate checks semantic constraints on parsed config values that cannot
+// be expressed in the struct tags alone.
+func validate(cfg *Config) error {
+	if cfg.Tribal.MaxFilesPerRun < 0 {
+		return fmt.Errorf("tribal.max_files_per_run must be > 0, got %d", cfg.Tribal.MaxFilesPerRun)
+	}
+	if cfg.Tribal.CriticBudgetPercent < 0 || cfg.Tribal.CriticBudgetPercent > 100 {
+		return fmt.Errorf("tribal.critic_budget_percent must be in [0,100], got %d", cfg.Tribal.CriticBudgetPercent)
+	}
+	return nil
 }
 
 // Marshal serializes a Config to YAML bytes.
@@ -161,7 +202,17 @@ func DefaultYAML(languages []string) string {
 	}
 	data, _ := yaml.Marshal(cfg)
 	header := "# livedocs configuration\n# All fields are optional. An empty file uses sane defaults.\n# See: https://github.com/live-docs/live_docs\n"
-	return header + string(data)
+	tribalDoc := "\n# tribal:\n" +
+		"#   # Opt in to LLM-classified tribal extraction (deterministic extractors\n" +
+		"#   # always run regardless of this flag).\n" +
+		"#   llm_enabled: false\n" +
+		"#   # Max files processed by the tribal mining loop per invocation.\n" +
+		fmt.Sprintf("#   max_files_per_run: %d\n", DefaultTribalMaxFilesPerRun) +
+		"#   # Reserved share (0-100) of the tribal LLM budget for the critic loop.\n" +
+		fmt.Sprintf("#   critic_budget_percent: %d\n", DefaultTribalCriticBudgetPercent) +
+		"#   # Toggle the cluster_debug separate DB used for Phase 5 calibration.\n" +
+		"#   cluster_debug_enabled: false\n"
+	return header + string(data) + tribalDoc
 }
 
 // ConfigPath returns the absolute path to the config file for a given repo root.
