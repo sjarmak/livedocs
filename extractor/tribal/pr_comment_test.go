@@ -42,16 +42,26 @@ func (m *mockLLMClient) getCalls() []llmCall {
 	return cp
 }
 
-// mockCommandOutput returns a CommandRunner that returns the given output.
+// mockCommandOutput returns a CommandRunner that returns PR number "1" for
+// `gh pr list` calls and the given output for `gh api` calls. This matches
+// the two-step fetch pattern: findPRsForFile then fetchPRComments.
 func mockCommandOutput(output string) CommandRunner {
-	return func(_ context.Context, _ string, _ ...string) ([]byte, error) {
+	return func(_ context.Context, name string, args ...string) ([]byte, error) {
+		// Detect `gh pr list` calls (returns PR numbers).
+		for _, a := range args {
+			if a == "pr" {
+				return []byte("1\n"), nil
+			}
+		}
+		// `gh api` calls return the comment output.
 		return []byte(output), nil
 	}
 }
 
 // mockCommandError returns a CommandRunner that returns an error.
+// For `gh pr list` calls it returns the error immediately.
 func mockCommandError(err error) CommandRunner {
-	return func(_ context.Context, _ string, _ ...string) ([]byte, error) {
+	return func(_ context.Context, name string, args ...string) ([]byte, error) {
 		return nil, err
 	}
 }

@@ -132,17 +132,84 @@ func (m *PRCommentMiner) ExtractForFile(ctx context.Context, filePath string, sy
 	return facts, nil
 }
 
-// fetchComments calls `gh api` to retrieve PR review comments for the given file.
+// maxPRsPerFile is the maximum number of PRs to scan for comments per file.
+// Bounded to avoid excessive API calls on files touched by many PRs.
+const maxPRsPerFile = 10
+
+// fetchComments retrieves PR review comments for the given file.
+// Strategy: find merged PRs that touched this file (bounded), then fetch
+// review comments from each PR filtered by path. This avoids the O(all-PRs)
+// problem of paginating repos/{owner}/{repo}/pulls/comments.
 func (m *PRCommentMiner) fetchComments(ctx context.Context, filePath string) ([]PRComment, error) {
 	runner := m.RunCommand
 	if runner == nil {
 		runner = defaultCommandRunner
 	}
 
-	endpoint := fmt.Sprintf("repos/%s/%s/pulls/comments", m.RepoOwner, m.RepoName)
+	// Step 1: Find recent merged PRs that touched this file via gh pr list.
+	prNumbers, err := m.findPRsForFile(ctx, runner, filePath)
+	if err != nil {
+		return nil, fmt.Errorf("find PRs for %s: %w", filePath, err)
+	}
+	if len(prNumbers) == 0 {
+		return nil, nil
+	}
+
+	// Step 2: For each PR, fetch review comments filtered to this file.
+	var comments []PRComment
+	for _, prNum := range prNumbers {
+		prComments, err := m.fetchPRComments(ctx, runner, prNum, filePath)
+		if err != nil {
+			// Non-fatal: skip this PR and continue.
+			continue
+		}
+		comments = append(comments, prComments...)
+	}
+
+	return comments, nil
+}
+
+// findPRsForFile uses `gh pr list` to find merged PRs that touched the given file.
+func (m *PRCommentMiner) findPRsForFile(ctx context.Context, runner CommandRunner, filePath string) ([]int, error) {
+	// Use GitHub search to find PRs that mention this file path.
+	// gh pr list --search "filename:path" returns PRs touching that file.
+	output, err := runner(ctx, "gh", "pr", "list",
+		"--repo", fmt.Sprintf("%s/%s", m.RepoOwner, m.RepoName),
+		"--state", "merged",
+		"--limit", fmt.Sprintf("%d", maxPRsPerFile),
+		"--json", "number",
+		"-q", ".[].number",
+		"--search", filePath,
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	trimmed := strings.TrimSpace(string(output))
+	if trimmed == "" {
+		return nil, nil
+	}
+
+	var numbers []int
+	for _, line := range strings.Split(trimmed, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		var n int
+		if _, err := fmt.Sscanf(line, "%d", &n); err == nil {
+			numbers = append(numbers, n)
+		}
+	}
+	return numbers, nil
+}
+
+// fetchPRComments fetches review comments from a single PR, filtered to the given file.
+func (m *PRCommentMiner) fetchPRComments(ctx context.Context, runner CommandRunner, prNumber int, filePath string) ([]PRComment, error) {
+	endpoint := fmt.Sprintf("repos/%s/%s/pulls/%d/comments", m.RepoOwner, m.RepoName, prNumber)
 	jqFilter := fmt.Sprintf(`.[] | select(.path == %q)`, filePath)
 
-	output, err := runner(ctx, "gh", "api", endpoint, "--paginate", "-q", jqFilter)
+	output, err := runner(ctx, "gh", "api", endpoint, "-q", jqFilter)
 	if err != nil {
 		return nil, err
 	}
@@ -153,7 +220,6 @@ func (m *PRCommentMiner) fetchComments(ctx context.Context, filePath string) ([]
 	}
 
 	// gh with -q and select outputs one JSON object per line (newline-delimited JSON).
-	// Wrap them into a JSON array for unmarshalling.
 	lines := strings.Split(trimmed, "\n")
 	var comments []PRComment
 	for _, line := range lines {
@@ -167,7 +233,6 @@ func (m *PRCommentMiner) fetchComments(ctx context.Context, filePath string) ([]
 		}
 		comments = append(comments, c)
 	}
-
 	return comments, nil
 }
 
