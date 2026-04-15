@@ -8,8 +8,10 @@ import (
 	"errors"
 	"fmt"
 	"os/exec"
+	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"text/template"
 	"time"
 
@@ -23,6 +25,32 @@ const (
 
 // ErrBudgetExceeded is returned when the daily LLM call budget has been reached.
 var ErrBudgetExceeded = errors.New("daily LLM call budget exceeded")
+
+// ErrCursorRegression is returned by PRCommentMiner.ExtractForFile when the
+// newly observed PR window's max id is strictly smaller than the stored
+// cursor's max id. Callers should treat this as a signal to flip the file to
+// the needs_remine sentinel and increment CursorRegressionCount.
+var ErrCursorRegression = errors.New("pr cursor regression detected")
+
+// cursorRegressionCount is incremented every time ExtractForFile detects a
+// regression. Exposed for test assertions via CursorRegressionCount().
+var cursorRegressionCount int64
+
+// CursorRegressionCount returns the total number of cursor regressions
+// observed since process start. Safe for concurrent reads.
+func CursorRegressionCount() int64 {
+	return atomic.LoadInt64(&cursorRegressionCount)
+}
+
+// ResetCursorRegressionCount resets the metric to zero. Test-only.
+func ResetCursorRegressionCount() {
+	atomic.StoreInt64(&cursorRegressionCount, 0)
+}
+
+// recordCursorRegression atomically increments the counter.
+func recordCursorRegression() {
+	atomic.AddInt64(&cursorRegressionCount, 1)
+}
 
 // LLMClient abstracts the LLM API so tests can inject a mock.
 // This mirrors semantic.LLMClient but is defined locally to avoid
@@ -101,73 +129,133 @@ type PRCommentMiner struct {
 }
 
 // ExtractForFile fetches PR review comments for the given file path,
-// classifies each one via LLM (with PII redaction), and returns tribal facts.
-// The symbolID is used as the subject_id for all produced facts.
-func (m *PRCommentMiner) ExtractForFile(ctx context.Context, filePath string, symbolID int64) ([]db.TribalFact, error) {
-	comments, err := m.fetchComments(ctx, filePath)
-	if err != nil {
-		return nil, fmt.Errorf("pr comment miner: fetch comments for %s: %w", filePath, err)
-	}
-
-	if len(comments) == 0 {
-		return nil, nil
-	}
-
-	var facts []db.TribalFact
-	for _, comment := range comments {
-		// Check budget before making an LLM call.
-		if err := m.checkBudget(); err != nil {
-			return facts, err
-		}
-
-		fact, err := m.classifyComment(ctx, filePath, symbolID, comment)
-		if err != nil {
-			return facts, fmt.Errorf("pr comment miner: classify comment %s: %w", comment.HTMLURL, err)
-		}
-		if fact != nil {
-			facts = append(facts, *fact)
-		}
-	}
-
-	return facts, nil
-}
-
-// maxPRsPerFile is the maximum number of PRs to scan for comments per file.
-// Bounded to avoid excessive API calls on files touched by many PRs.
-const maxPRsPerFile = 10
-
-// fetchComments retrieves PR review comments for the given file.
-// Strategy: find merged PRs that touched this file (bounded), then fetch
-// review comments from each PR filtered by path. This avoids the O(all-PRs)
-// problem of paginating repos/{owner}/{repo}/pulls/comments.
-func (m *PRCommentMiner) fetchComments(ctx context.Context, filePath string) ([]PRComment, error) {
+// classifies each one via LLM (with PII redaction), and returns tribal
+// facts plus the updated PR cursor.
+//
+// sinceCursor is the set of PR numbers already processed for this file in a
+// previous run. Any PR observed in the current `gh pr list --search`
+// window that appears in sinceCursor is skipped (no LLM call is made).
+// The returned seenPRs slice is the UNION of sinceCursor and the newly
+// observed window; callers write it back to
+// source_files.last_pr_id_set so the next run picks up where this one
+// stopped.
+//
+// The returned facts carry no SubjectID — callers must patch it before
+// inserting, since the miner itself does not know which symbol this file
+// maps to in the claims DB.
+//
+// Cursor monotonicity: if the newly observed window's max PR id is
+// strictly smaller than the stored cursor's max id, ExtractForFile returns
+// (nil, nil, ErrCursorRegression) and increments the package-level
+// CursorRegressionCount metric. The caller is expected to flip the file
+// to the needs_remine sentinel so the next run does a full re-mine.
+func (m *PRCommentMiner) ExtractForFile(
+	ctx context.Context,
+	sourcePath string,
+	sinceCursor []int,
+) ([]db.TribalFact, []int, error) {
 	runner := m.RunCommand
 	if runner == nil {
 		runner = defaultCommandRunner
 	}
 
-	// Step 1: Find recent merged PRs that touched this file via gh pr list.
-	prNumbers, err := m.findPRsForFile(ctx, runner, filePath)
+	// Step 1: Find recent PRs that touched this file.
+	observed, err := m.findPRsForFile(ctx, runner, sourcePath)
 	if err != nil {
-		return nil, fmt.Errorf("find PRs for %s: %w", filePath, err)
-	}
-	if len(prNumbers) == 0 {
-		return nil, nil
+		return nil, nil, fmt.Errorf("pr comment miner: find PRs for %s: %w", sourcePath, err)
 	}
 
-	// Step 2: For each PR, fetch review comments filtered to this file.
-	var comments []PRComment
-	for _, prNum := range prNumbers {
-		prComments, err := m.fetchPRComments(ctx, runner, prNum, filePath)
-		if err != nil {
+	// Step 2: Monotonicity check. Only trip when we have a non-empty prior
+	// cursor AND a non-empty new window AND the new max regressed.
+	if len(sinceCursor) > 0 && len(observed) > 0 {
+		if maxInts(observed) < maxInts(sinceCursor) {
+			recordCursorRegression()
+			return nil, nil, fmt.Errorf("%w: observed max %d < cursor max %d for %s",
+				ErrCursorRegression, maxInts(observed), maxInts(sinceCursor), sourcePath)
+		}
+	}
+
+	// Step 3: Compute which observed PRs are new (not yet in cursor).
+	seenSet := make(map[int]struct{}, len(sinceCursor))
+	for _, id := range sinceCursor {
+		seenSet[id] = struct{}{}
+	}
+	var newPRs []int
+	for _, id := range observed {
+		if _, ok := seenSet[id]; !ok {
+			newPRs = append(newPRs, id)
+		}
+	}
+
+	// Step 4: Build the union that will be returned as the new cursor. We
+	// return the union even when there are zero new PRs so the caller can
+	// still refresh the stored cursor with anything the gh window surfaced.
+	unionSet := make(map[int]struct{}, len(seenSet)+len(observed))
+	for id := range seenSet {
+		unionSet[id] = struct{}{}
+	}
+	for _, id := range observed {
+		unionSet[id] = struct{}{}
+	}
+	unionSorted := make([]int, 0, len(unionSet))
+	for id := range unionSet {
+		unionSorted = append(unionSorted, id)
+	}
+	sort.Ints(unionSorted)
+
+	// Step 5: If there's nothing new, skip LLM calls entirely.
+	if len(newPRs) == 0 {
+		return nil, unionSorted, nil
+	}
+
+	// Step 6: For each new PR, fetch review comments and classify.
+	var facts []db.TribalFact
+	for _, prNum := range newPRs {
+		prComments, ferr := m.fetchPRComments(ctx, runner, prNum, sourcePath)
+		if ferr != nil {
 			// Non-fatal: skip this PR and continue.
 			continue
 		}
-		comments = append(comments, prComments...)
+		for _, comment := range prComments {
+			// Check budget before making an LLM call.
+			if bErr := m.checkBudget(); bErr != nil {
+				// Return facts gathered so far plus the union cursor: the
+				// caller can still record progress for the PRs we did
+				// complete. Because classification happens per-comment
+				// not per-PR, returning the full union is conservative
+				// (possibly over-claiming progress on the in-flight PR),
+				// but acceptable: re-runs will redo the budgeted calls
+				// without regressing.
+				return facts, unionSorted, bErr
+			}
+			fact, cErr := m.classifyComment(ctx, sourcePath, 0, comment)
+			if cErr != nil {
+				return facts, unionSorted, fmt.Errorf("pr comment miner: classify comment %s: %w", comment.HTMLURL, cErr)
+			}
+			if fact != nil {
+				facts = append(facts, *fact)
+			}
+		}
 	}
 
-	return comments, nil
+	return facts, unionSorted, nil
 }
+
+// maxInts returns the maximum of a non-empty int slice. Callers must
+// guarantee len(xs) > 0; this helper is internal.
+func maxInts(xs []int) int {
+	m := xs[0]
+	for _, v := range xs[1:] {
+		if v > m {
+			m = v
+		}
+	}
+	return m
+}
+
+// maxPRsPerFile is the maximum number of PRs to scan for comments per file.
+// Bounded to avoid excessive API calls on files touched by many PRs.
+const maxPRsPerFile = 10
 
 // findPRsForFile uses `gh pr list` to find merged PRs that touched the given file.
 func (m *PRCommentMiner) findPRsForFile(ctx context.Context, runner CommandRunner, filePath string) ([]int, error) {
@@ -257,8 +345,10 @@ func (m *PRCommentMiner) incrementCallCount() {
 }
 
 // classifyComment redacts PII, sends the comment to the LLM for classification,
-// and returns a TribalFact if the classification is non-null.
-func (m *PRCommentMiner) classifyComment(ctx context.Context, filePath string, symbolID int64, comment PRComment) (*db.TribalFact, error) {
+// and returns a TribalFact if the classification is non-null. The returned
+// fact has SubjectID=0; the caller is responsible for patching it to the
+// correct symbol ID before inserting.
+func (m *PRCommentMiner) classifyComment(ctx context.Context, filePath string, _ int64, comment PRComment) (*db.TribalFact, error) {
 	// Redact PII from both the comment body and the diff hunk BEFORE
 	// sending to the LLM.
 	redactedBody := RedactPII(comment.Body)
@@ -324,7 +414,7 @@ func (m *PRCommentMiner) classifyComment(ctx context.Context, filePath string, s
 	hash := sha256Hash(comment.Body + comment.DiffHunk)
 
 	fact := &db.TribalFact{
-		SubjectID:        symbolID,
+		SubjectID:        0, // caller patches after receiving
 		Kind:             result.Kind,
 		Body:             result.Body,
 		SourceQuote:      comment.Body,

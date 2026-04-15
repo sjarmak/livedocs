@@ -114,7 +114,7 @@ func TestPRCommentMiner_GHOutputParsing(t *testing.T) {
 		RunCommand: mockCommandOutput(ghOutput),
 	}
 
-	facts, err := miner.ExtractForFile(context.Background(), "pkg/cache.go", 42)
+	facts, _, err := miner.ExtractForFile(context.Background(), "pkg/cache.go", nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -160,7 +160,7 @@ func TestPRCommentMiner_PIIRedactedBeforeLLM(t *testing.T) {
 		RunCommand: mockCommandOutput(commentWithPII),
 	}
 
-	_, err := miner.ExtractForFile(context.Background(), "pkg/auth.go", 10)
+	_, _, err := miner.ExtractForFile(context.Background(), "pkg/auth.go", nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -215,7 +215,7 @@ func TestPRCommentMiner_NullClassificationSkipped(t *testing.T) {
 		RunCommand: mockCommandOutput(comment),
 	}
 
-	facts, err := miner.ExtractForFile(context.Background(), "main.go", 1)
+	facts, _, err := miner.ExtractForFile(context.Background(), "main.go", nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -254,7 +254,7 @@ func TestPRCommentMiner_FactProvenanceFields(t *testing.T) {
 		RunCommand: mockCommandOutput(comment),
 	}
 
-	facts, err := miner.ExtractForFile(context.Background(), "pkg/client.go", 77)
+	facts, _, err := miner.ExtractForFile(context.Background(), "pkg/client.go", nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -296,9 +296,9 @@ func TestPRCommentMiner_FactProvenanceFields(t *testing.T) {
 		t.Errorf("ExtractorVersion = %q, want %q", fact.ExtractorVersion, "0.1.0")
 	}
 
-	// AC7: subject_id is set
-	if fact.SubjectID != 77 {
-		t.Errorf("SubjectID = %d, want 77", fact.SubjectID)
+	// SubjectID is set by the caller, not the miner. The miner leaves it at 0.
+	if fact.SubjectID != 0 {
+		t.Errorf("SubjectID = %d, want 0 (caller patches)", fact.SubjectID)
 	}
 
 	// AC8: evidence source_type = "pr_comment"
@@ -367,7 +367,7 @@ func TestPRCommentMiner_CostBudgetEnforcement(t *testing.T) {
 		RunCommand:  mockCommandOutput(comments),
 	}
 
-	facts, err := miner.ExtractForFile(context.Background(), "file.go", 50)
+	facts, _, err := miner.ExtractForFile(context.Background(), "file.go", nil)
 
 	// Should return ErrBudgetExceeded
 	if err == nil {
@@ -400,7 +400,7 @@ func TestPRCommentMiner_EmptyGHOutput(t *testing.T) {
 		RunCommand: mockCommandOutput(""),
 	}
 
-	facts, err := miner.ExtractForFile(context.Background(), "nonexistent.go", 1)
+	facts, _, err := miner.ExtractForFile(context.Background(), "nonexistent.go", nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -426,7 +426,7 @@ func TestPRCommentMiner_GHAPIError(t *testing.T) {
 		RunCommand: mockCommandError(errors.New("gh: not authenticated")),
 	}
 
-	_, err := miner.ExtractForFile(context.Background(), "file.go", 1)
+	_, _, err := miner.ExtractForFile(context.Background(), "file.go", nil)
 	if err == nil {
 		t.Fatal("expected error from gh api failure, got nil")
 	}
@@ -459,7 +459,7 @@ func TestPRCommentMiner_ConfidenceClampedBelowOne(t *testing.T) {
 		RunCommand: mockCommandOutput(comment),
 	}
 
-	facts, err := miner.ExtractForFile(context.Background(), "config.go", 5)
+	facts, _, err := miner.ExtractForFile(context.Background(), "config.go", nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -498,7 +498,7 @@ func TestPRCommentMiner_MentionRedactedInDiffHunk(t *testing.T) {
 		RunCommand: mockCommandOutput(comment),
 	}
 
-	_, err := miner.ExtractForFile(context.Background(), "internal.go", 20)
+	_, _, err := miner.ExtractForFile(context.Background(), "internal.go", nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -516,5 +516,215 @@ func TestPRCommentMiner_MentionRedactedInDiffHunk(t *testing.T) {
 	}
 	if !strings.Contains(userPrompt, "[REDACTED_TOKEN]") {
 		t.Error("expected [REDACTED_TOKEN] in user prompt from diff hunk")
+	}
+}
+
+// --- Incremental cursor tests ---
+
+// scriptedRunner returns a CommandRunner that recognises `gh pr list` and
+// `gh api` calls separately. prListOutputs is consumed in order for each
+// subsequent `gh pr list` invocation (the last entry sticks if more calls
+// arrive than scripted outputs). The same applies to apiOutputs.
+type scriptedRunner struct {
+	mu             sync.Mutex
+	prListCalls    int
+	apiCalls       int
+	prListOutputs  []string
+	apiOutputs     []string
+	defaultPRList  string
+	defaultAPIBody string
+}
+
+func (s *scriptedRunner) run(_ context.Context, name string, args ...string) ([]byte, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	isPRList := false
+	for i, a := range args {
+		if a == "pr" && i+1 < len(args) && args[i+1] == "list" {
+			isPRList = true
+			break
+		}
+	}
+	if isPRList {
+		out := s.defaultPRList
+		if s.prListCalls < len(s.prListOutputs) {
+			out = s.prListOutputs[s.prListCalls]
+		}
+		s.prListCalls++
+		return []byte(out), nil
+	}
+	// gh api
+	out := s.defaultAPIBody
+	if s.apiCalls < len(s.apiOutputs) {
+		out = s.apiOutputs[s.apiCalls]
+	}
+	s.apiCalls++
+	return []byte(out), nil
+}
+
+func (s *scriptedRunner) Runner() CommandRunner { return s.run }
+
+func TestPRCommentIncremental(t *testing.T) {
+	ResetCursorRegressionCount()
+
+	// First run: gh pr list returns PRs 1 and 2. gh api returns one comment each.
+	comment1 := samplePRCommentJSON("comment for pr 1 about a race", "@@ hunk1", "pkg/x.go", "https://github.com/org/repo/pull/1#r1", "user1")
+	comment2 := samplePRCommentJSON("comment for pr 2 about an invariant", "@@ hunk2", "pkg/x.go", "https://github.com/org/repo/pull/2#r2", "user2")
+
+	script := &scriptedRunner{
+		prListOutputs: []string{"1\n2\n"},
+		apiOutputs:    []string{comment1, comment2},
+	}
+
+	llm := &mockLLMClient{
+		responses: []string{
+			`{"kind":"rationale","body":"fact 1","confidence":0.8}`,
+			`{"kind":"invariant","body":"fact 2","confidence":0.8}`,
+		},
+	}
+
+	miner := &PRCommentMiner{
+		RepoOwner:  "org",
+		RepoName:   "repo",
+		Client:     llm,
+		Model:      "claude-haiku-4-5-20251001",
+		RunCommand: script.Runner(),
+	}
+
+	facts, seen, err := miner.ExtractForFile(context.Background(), "pkg/x.go", nil)
+	if err != nil {
+		t.Fatalf("first run error: %v", err)
+	}
+	if len(facts) != 2 {
+		t.Fatalf("first run: expected 2 facts, got %d", len(facts))
+	}
+	if len(seen) != 2 || seen[0] != 1 || seen[1] != 2 {
+		t.Errorf("first run seen = %v, want [1 2]", seen)
+	}
+
+	firstRunLLMCalls := len(llm.getCalls())
+	if firstRunLLMCalls != 2 {
+		t.Errorf("first run LLM calls = %d, want 2", firstRunLLMCalls)
+	}
+
+	// Second run: same PRs returned by gh pr list. No new PRs, so zero LLM calls.
+	script2 := &scriptedRunner{
+		prListOutputs: []string{"1\n2\n"},
+		// apiOutputs deliberately empty — if the miner tries to fetch, test fails.
+	}
+	miner.RunCommand = script2.Runner()
+
+	facts2, seen2, err := miner.ExtractForFile(context.Background(), "pkg/x.go", seen)
+	if err != nil {
+		t.Fatalf("second run error: %v", err)
+	}
+	if len(facts2) != 0 {
+		t.Errorf("second run: expected 0 facts, got %d", len(facts2))
+	}
+	if len(seen2) != 2 {
+		t.Errorf("second run seen = %v, want [1 2]", seen2)
+	}
+
+	// Total LLM calls must still be 2 — second run must NOT invoke LLM.
+	if total := len(llm.getCalls()); total != 2 {
+		t.Errorf("second run must produce 0 LLM calls; total across both runs = %d, want 2", total)
+	}
+}
+
+func TestPRCommentForceRemine(t *testing.T) {
+	ResetCursorRegressionCount()
+
+	comment1 := samplePRCommentJSON("force remine comment 1", "@@ h1", "f.go", "https://github.com/org/repo/pull/1#r1", "u")
+	comment2 := samplePRCommentJSON("force remine comment 2", "@@ h2", "f.go", "https://github.com/org/repo/pull/2#r2", "u")
+
+	newRunner := func() CommandRunner {
+		s := &scriptedRunner{
+			prListOutputs: []string{"1\n2\n"},
+			apiOutputs:    []string{comment1, comment2},
+		}
+		return s.Runner()
+	}
+
+	llm := &mockLLMClient{
+		responses: []string{
+			`{"kind":"rationale","body":"r1","confidence":0.8}`,
+			`{"kind":"rationale","body":"r2","confidence":0.8}`,
+			// Force-remine simulated: cursor cleared, runner reset.
+			`{"kind":"rationale","body":"r3","confidence":0.8}`,
+			`{"kind":"rationale","body":"r4","confidence":0.8}`,
+		},
+	}
+
+	miner := &PRCommentMiner{
+		RepoOwner:  "org",
+		RepoName:   "repo",
+		Client:     llm,
+		Model:      "claude-haiku-4-5-20251001",
+		RunCommand: newRunner(),
+	}
+
+	facts1, seen, err := miner.ExtractForFile(context.Background(), "f.go", nil)
+	if err != nil {
+		t.Fatalf("first run error: %v", err)
+	}
+	if len(facts1) != 2 {
+		t.Fatalf("first run: expected 2 facts, got %d", len(facts1))
+	}
+
+	// Simulate --force-remine by passing sinceCursor=nil again with a fresh runner.
+	miner.RunCommand = newRunner()
+	facts2, seen2, err := miner.ExtractForFile(context.Background(), "f.go", nil)
+	if err != nil {
+		t.Fatalf("force-remine run error: %v", err)
+	}
+	if len(facts2) != len(facts1) {
+		t.Errorf("force-remine facts = %d, want %d (same as first run)", len(facts2), len(facts1))
+	}
+	if len(seen2) != len(seen) {
+		t.Errorf("force-remine seen = %v, want %v", seen2, seen)
+	}
+
+	// Total LLM calls must be 4 (2 per run).
+	if total := len(llm.getCalls()); total != 4 {
+		t.Errorf("force-remine total LLM calls = %d, want 4", total)
+	}
+}
+
+func TestTribalIncrementalCursorMonotonicity(t *testing.T) {
+	ResetCursorRegressionCount()
+
+	// Prior cursor has PRs up to #20. gh pr list now only returns #5 (max<20).
+	script := &scriptedRunner{
+		prListOutputs: []string{"5\n"},
+	}
+
+	llm := &mockLLMClient{} // must never be called
+
+	miner := &PRCommentMiner{
+		RepoOwner:  "org",
+		RepoName:   "repo",
+		Client:     llm,
+		Model:      "claude-haiku-4-5-20251001",
+		RunCommand: script.Runner(),
+	}
+
+	facts, seen, err := miner.ExtractForFile(context.Background(), "pkg/y.go", []int{10, 20})
+	if err == nil {
+		t.Fatal("expected ErrCursorRegression, got nil")
+	}
+	if !errors.Is(err, ErrCursorRegression) {
+		t.Errorf("expected ErrCursorRegression, got %v", err)
+	}
+	if len(facts) != 0 {
+		t.Errorf("expected 0 facts on regression, got %d", len(facts))
+	}
+	if seen != nil {
+		t.Errorf("expected nil seenPRs on regression, got %v", seen)
+	}
+	if CursorRegressionCount() != 1 {
+		t.Errorf("CursorRegressionCount = %d, want 1", CursorRegressionCount())
+	}
+	if len(llm.getCalls()) != 0 {
+		t.Errorf("LLM calls on regression = %d, want 0", len(llm.getCalls()))
 	}
 }

@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"crypto/sha256"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -28,16 +29,19 @@ import (
 )
 
 var (
-	extractSource      string
-	extractRepo        string
-	extractOutput      string
-	extractTier2       bool
-	extractTribal      string
-	extractDataDir     string
-	extractFromRev     string
-	extractToRev       string
-	extractConfirm     bool
-	extractConcurrency int
+	extractSource                 string
+	extractRepo                   string
+	extractOutput                 string
+	extractTier2                  bool
+	extractTribal                 string
+	extractDataDir                string
+	extractFromRev                string
+	extractToRev                  string
+	extractConfirm                bool
+	extractConcurrency            int
+	extractAcceptUnknownGhVersion bool
+	extractForceRemine            bool
+	extractMaxFiles               int
 )
 
 // newLLMClient creates the LLM client for semantic extraction.
@@ -155,7 +159,16 @@ func init() {
 	extractCmd.Flags().StringVar(&extractToRev, "to-rev", "", "end revision for incremental extraction (used with --source sourcegraph)")
 	extractCmd.Flags().BoolVar(&extractConfirm, "confirm", false, "confirm full extraction after cost estimate (used with --source sourcegraph)")
 	extractCmd.Flags().IntVar(&extractConcurrency, "concurrency", 10, "max concurrent MCP calls (used with --source sourcegraph)")
+	extractCmd.Flags().BoolVar(&extractAcceptUnknownGhVersion, "accept-unknown-gh-version", false, "accept a gh CLI version not in the advisory allowlist (used with --tribal=llm)")
+	extractCmd.Flags().BoolVar(&extractForceRemine, "force-remine", false, "clear the stored PR cursor and re-mine every file from scratch (used with --tribal=llm)")
+	extractCmd.Flags().IntVar(&extractMaxFiles, "max-files", 0, "override tribal.max_files_per_run: cap files processed by tribal mining per invocation (0 = use config default)")
 }
+
+// rankedFilesTrace is a package-level hook used by tests to observe which
+// files the tribal mining pipeline selects. When non-nil, both tribal
+// extraction paths invoke it with the ordered slice of relative paths
+// they are about to process. It is never set in production code.
+var rankedFilesTrace func([]string)
 
 // skipDirs contains directory names to skip during file walking.
 var skipDirs = map[string]bool{
@@ -165,6 +178,76 @@ var skipDirs = map[string]bool{
 	"_output":      true,
 	"_build":       true,
 	".cache":       true,
+}
+
+// resolveMaxFilesForTribal returns the cap on files processed by the tribal
+// mining loop per invocation. If --max-files was set to a positive value it
+// takes precedence; otherwise we fall back to cfg.Tribal.MaxFilesPerRun from
+// the repo's .livedocs.yaml (which defaults to config.DefaultTribalMaxFilesPerRun).
+func resolveMaxFilesForTribal(repoDir string) int {
+	if extractMaxFiles > 0 {
+		return extractMaxFiles
+	}
+	cfg, err := config.Load(config.ConfigPath(repoDir))
+	if err != nil || cfg.Tribal.MaxFilesPerRun <= 0 {
+		return config.DefaultTribalMaxFilesPerRun
+	}
+	return cfg.Tribal.MaxFilesPerRun
+}
+
+// seedSourceFilesForTribal walks repoDir and upserts a minimal source_files
+// row for every candidate file the tribal extractors can process. This lets
+// ClaimsDB.RankFilesForMining see every candidate even on a fresh DB that
+// hasn't been through a full structural extraction pass. It does NOT touch
+// claims or symbols — structural extraction (earlier phases of runExtract)
+// is responsible for those.
+func seedSourceFilesForTribal(ctx context.Context, claimsDB *db.ClaimsDB, repoDir, repoName string) error {
+	return filepath.WalkDir(repoDir, func(path string, d os.DirEntry, wErr error) error {
+		if wErr != nil {
+			return nil
+		}
+		if d.IsDir() {
+			if skipDirs[d.Name()] {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+		ext := strings.ToLower(filepath.Ext(path))
+		switch ext {
+		case ".go", ".ts", ".tsx", ".py", ".sh":
+			// supported
+		default:
+			return nil
+		}
+		relPath, relErr := filepath.Rel(repoDir, path)
+		if relErr != nil {
+			relPath = path
+		}
+		// Skip paths excluded by glob rules so the ranker never even
+		// sees them. (The SQL layer also filters them, but skipping
+		// here avoids inserting rows we'd only filter out later.)
+		if db.ShouldSkipForMining(relPath) {
+			return nil
+		}
+		content, readErr := os.ReadFile(path)
+		if readErr != nil {
+			return nil
+		}
+		contentHash := fmt.Sprintf("%x", sha256.Sum256(content))
+		_, _ = claimsDB.UpsertSourceFile(db.SourceFile{
+			Repo:             repoName,
+			RelativePath:     relPath,
+			ContentHash:      contentHash,
+			ExtractorVersion: "tribal-seed",
+			LastIndexed:      db.Now(),
+		})
+		return nil
+	})
 }
 
 func runExtract(ctx context.Context, cmd *cobra.Command, repoDir, repoName, outputPath string) error {
@@ -408,20 +491,23 @@ func runExtract(ctx context.Context, cmd *cobra.Command, repoDir, repoName, outp
 
 	// Phase 4: Tribal knowledge extraction (if requested).
 	if extractTribal != "" {
+		// Resolve the files-per-run cap from --max-files flag or config default.
+		maxFiles := resolveMaxFilesForTribal(repoDir)
+
 		switch extractTribal {
 		case "deterministic":
 			fmt.Fprintf(out, "Running tribal knowledge extraction (deterministic)...\n")
-			if err := runTribalExtraction(ctx, out, claimsDB, repoDir, repoName); err != nil {
+			if err := runTribalExtraction(ctx, out, claimsDB, repoDir, repoName, maxFiles); err != nil {
 				return fmt.Errorf("tribal extraction: %w", err)
 			}
 		case "llm":
 			// LLM mode is additive: run deterministic extractors first, then PR comment mining.
 			fmt.Fprintf(out, "Running tribal knowledge extraction (deterministic)...\n")
-			if err := runTribalExtraction(ctx, out, claimsDB, repoDir, repoName); err != nil {
+			if err := runTribalExtraction(ctx, out, claimsDB, repoDir, repoName, maxFiles); err != nil {
 				return fmt.Errorf("tribal extraction: %w", err)
 			}
 			fmt.Fprintf(out, "Running tribal knowledge extraction (LLM)...\n")
-			if err := runLLMTribalExtraction(ctx, out, claimsDB, repoDir, repoName); err != nil {
+			if err := runLLMTribalExtraction(ctx, out, claimsDB, repoDir, repoName, maxFiles); err != nil {
 				return fmt.Errorf("LLM tribal extraction: %w", err)
 			}
 		default:
@@ -823,7 +909,11 @@ func (t *tribalFlagValue) Type() string { return "string" }
 
 // runTribalExtraction runs all Phase 1 deterministic tribal extractors on the
 // extracted repository and inserts facts into the claims database.
-func runTribalExtraction(ctx context.Context, out io.Writer, claimsDB *db.ClaimsDB, repoDir, repoName string) error {
+//
+// File selection uses ClaimsDB.RankFilesForMining to prioritize never-mined
+// and high-surface files, capped at maxFiles. Source_files are seeded from
+// disk first so fresh DBs have a ranking target.
+func runTribalExtraction(ctx context.Context, out io.Writer, claimsDB *db.ClaimsDB, repoDir, repoName string, maxFiles int) error {
 	// Ensure tribal schema exists.
 	if err := claimsDB.CreateTribalSchema(); err != nil {
 		return fmt.Errorf("create tribal schema: %w", err)
@@ -839,43 +929,45 @@ func runTribalExtraction(ctx context.Context, out io.Writer, claimsDB *db.Claims
 		ownershipCount += n
 	}
 
-	// 2. Walk repo files for blame/rationale/marker extraction.
-	// We walk directly rather than querying DB source_files, because the Go deep
-	// extractor stores absolute paths while non-Go files store relative paths.
+	// 2. Seed source_files so the ranker has a complete view of candidate
+	// files on a fresh DB, then call RankFilesForMining to prioritize.
+	if err := seedSourceFilesForTribal(ctx, claimsDB, repoDir, repoName); err != nil {
+		fmt.Fprintf(out, "Tribal: seed source_files warning: %v\n", err)
+	}
+	rankedFiles, rankErr := claimsDB.RankFilesForMining(repoName, maxFiles)
+	if rankErr != nil {
+		return fmt.Errorf("rank files for tribal mining: %w", rankErr)
+	}
+	if rankedFilesTrace != nil {
+		rankedFilesTrace(append([]string(nil), rankedFiles...))
+	}
+
 	blameExt := &tribal.BlameExtractor{}
 	rationaleExt := &tribal.CommitRationaleExtractor{RepoDir: repoDir}
 	markerExt := &tribal.MarkerExtractor{}
 
-	walkErr := filepath.WalkDir(repoDir, func(path string, d os.DirEntry, wErr error) error {
-		if wErr != nil {
-			return nil
-		}
-		if d.IsDir() {
-			if skipDirs[d.Name()] {
-				return filepath.SkipDir
-			}
-			return nil
-		}
-
+	for _, relPath := range rankedFiles {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
 		default:
 		}
 
-		// Only process source files that extractors would handle.
-		ext := strings.ToLower(filepath.Ext(path))
+		// Second-layer glob defense (redundant with SQL but cheap).
+		if db.ShouldSkipForMining(relPath) {
+			continue
+		}
+
+		// Filter extensions the deterministic extractors actually handle.
+		ext := strings.ToLower(filepath.Ext(relPath))
 		switch ext {
 		case ".go", ".ts", ".tsx", ".py", ".sh":
 			// supported
 		default:
-			return nil
+			continue
 		}
 
-		relPath, relErr := filepath.Rel(repoDir, path)
-		if relErr != nil {
-			relPath = path
-		}
+		absPath := filepath.Join(repoDir, relPath)
 
 		// Upsert a file-level symbol for tribal facts.
 		fileSymID, upErr := claimsDB.UpsertSymbol(db.Symbol{
@@ -887,13 +979,13 @@ func runTribalExtraction(ctx context.Context, out io.Writer, claimsDB *db.Claims
 			Visibility: "public",
 		})
 		if upErr != nil {
-			return nil // skip this file
+			continue // skip this file
 		}
 
 		// 3. Blame extraction: use file-level symbol spanning all lines.
-		content, readErr := os.ReadFile(path)
+		content, readErr := os.ReadFile(absPath)
 		if readErr != nil {
-			return nil
+			continue
 		}
 		lineCount := 1
 		for _, b := range content {
@@ -910,7 +1002,7 @@ func runTribalExtraction(ctx context.Context, out io.Writer, claimsDB *db.Claims
 		blameFacts, blameErr := blameExt.ExtractForFile(ctx, repoDir, relPath, symRanges)
 		if blameErr == nil {
 			for _, fact := range blameFacts {
-				if _, insertErr := claimsDB.InsertTribalFact(fact, fact.Evidence); insertErr == nil {
+				if _, _, insertErr := claimsDB.UpsertTribalFact(fact, fact.Evidence); insertErr == nil {
 					blameCount++
 				}
 			}
@@ -919,7 +1011,7 @@ func runTribalExtraction(ctx context.Context, out io.Writer, claimsDB *db.Claims
 		// 4. Commit rationale extraction.
 		fact, evidence, ratErr := rationaleExt.ExtractForFile(ctx, relPath, fileSymID)
 		if ratErr == nil && fact != nil {
-			if _, insertErr := claimsDB.InsertTribalFact(*fact, evidence); insertErr == nil {
+			if _, _, insertErr := claimsDB.UpsertTribalFact(*fact, evidence); insertErr == nil {
 				rationaleCount++
 			}
 		}
@@ -929,16 +1021,11 @@ func runTribalExtraction(ctx context.Context, out io.Writer, claimsDB *db.Claims
 		if markerErr == nil {
 			for i := range markerFacts {
 				markerFacts[i].SubjectID = fileSymID
-				if _, insertErr := claimsDB.InsertTribalFact(markerFacts[i], markerFacts[i].Evidence); insertErr == nil {
+				if _, _, insertErr := claimsDB.UpsertTribalFact(markerFacts[i], markerFacts[i].Evidence); insertErr == nil {
 					markerCount++
 				}
 			}
 		}
-
-		return nil
-	})
-	if walkErr != nil {
-		return fmt.Errorf("tribal walk: %w", walkErr)
 	}
 
 	fmt.Fprintf(out, "\n## Tribal Knowledge Summary\n\n")
@@ -952,9 +1039,10 @@ func runTribalExtraction(ctx context.Context, out io.Writer, claimsDB *db.Claims
 }
 
 // runLLMTribalExtraction runs the LLM-based PR comment miner on the repository.
-// It validates config opt-in, API key presence, and git remote parsing before
-// walking repo files and classifying PR comments via LLM.
-func runLLMTribalExtraction(ctx context.Context, out io.Writer, claimsDB *db.ClaimsDB, repoDir, repoName string) error {
+// It validates config opt-in, API key presence, and git remote parsing, then
+// selects files via ClaimsDB.RankFilesForMining (capped at maxFiles) before
+// classifying PR comments via LLM.
+func runLLMTribalExtraction(ctx context.Context, out io.Writer, claimsDB *db.ClaimsDB, repoDir, repoName string, maxFiles int) error {
 	// 1. Load config and check opt-in gate.
 	cfg, err := config.Load(config.ConfigPath(repoDir))
 	if err != nil {
@@ -971,7 +1059,23 @@ func runLLMTribalExtraction(ctx context.Context, out io.Writer, claimsDB *db.Cla
 		return nil
 	}
 
-	// 3. Create LLM client: prefer Claude CLI (OAuth) over API key.
+	// 3. gh CLI version preflight.
+	ghVersion, ghErr := tribal.CheckGhVersion(ctx, nil, extractAcceptUnknownGhVersion)
+	if ghErr != nil {
+		return fmt.Errorf("gh CLI preflight: %w (rerun with --accept-unknown-gh-version to bypass)", ghErr)
+	}
+	fmt.Fprintf(out, "gh CLI version: %s\n", ghVersion)
+	minerVersion := "gh-" + ghVersion
+
+	// 4. Optional force-remine: clear all stored PR cursors for this repo.
+	if extractForceRemine {
+		if err := claimsDB.ClearPRIDSet(repoName); err != nil {
+			return fmt.Errorf("force-remine: clear pr id set: %w", err)
+		}
+		fmt.Fprintf(out, "force-remine: cleared PR cursors for %s\n", repoName)
+	}
+
+	// 5. Create LLM client: prefer Claude CLI (OAuth) over API key.
 	var client semantic.LLMClient
 	cliClient, cliErr := semantic.NewClaudeCLIClient(cfg.Tribal.Model)
 	if cliErr == nil {
@@ -990,7 +1094,7 @@ func runLLMTribalExtraction(ctx context.Context, out io.Writer, claimsDB *db.Cla
 		fmt.Fprintf(out, "Using Anthropic API for LLM tribal extraction\n")
 	}
 
-	// 5. Create PR comment miner.
+	// 6. Create PR comment miner.
 	miner := &tribal.PRCommentMiner{
 		RepoOwner:   owner,
 		RepoName:    repo,
@@ -999,38 +1103,42 @@ func runLLMTribalExtraction(ctx context.Context, out io.Writer, claimsDB *db.Cla
 		DailyBudget: cfg.Tribal.DailyBudget,
 	}
 
-	// 6. Walk repo files and extract PR comment tribal facts.
+	// 6. Select files via the ranker. source_files is seeded by
+	// runTribalExtraction (always invoked in the LLM path), so the ranker
+	// has a complete candidate set.
+	rankedFiles, rankErr := claimsDB.RankFilesForMining(repoName, maxFiles)
+	if rankErr != nil {
+		return fmt.Errorf("rank files for LLM tribal mining: %w", rankErr)
+	}
+	if rankedFilesTrace != nil {
+		rankedFilesTrace(append([]string(nil), rankedFiles...))
+	}
+
 	var rationaleCount, invariantCount, quirkCount int
+	var budgetExceeded bool
 
-	walkErr := filepath.WalkDir(repoDir, func(path string, d os.DirEntry, wErr error) error {
-		if wErr != nil {
-			return nil
+	for _, relPath := range rankedFiles {
+		if budgetExceeded {
+			break
 		}
-		if d.IsDir() {
-			if skipDirs[d.Name()] {
-				return filepath.SkipDir
-			}
-			return nil
-		}
-
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
 		default:
 		}
 
-		// Only process supported source files.
-		ext := strings.ToLower(filepath.Ext(path))
+		// Second-layer glob defense.
+		if db.ShouldSkipForMining(relPath) {
+			continue
+		}
+
+		// Filter supported extensions.
+		ext := strings.ToLower(filepath.Ext(relPath))
 		switch ext {
 		case ".go", ".ts", ".tsx", ".py", ".sh":
 			// supported
 		default:
-			return nil
-		}
-
-		relPath, relErr := filepath.Rel(repoDir, path)
-		if relErr != nil {
-			relPath = path
+			continue
 		}
 
 		// Upsert a file-level symbol for tribal facts.
@@ -1043,23 +1151,44 @@ func runLLMTribalExtraction(ctx context.Context, out io.Writer, claimsDB *db.Cla
 			Visibility: "public",
 		})
 		if upErr != nil {
-			return nil // skip this file
+			continue // skip this file
+		}
+
+		// Load the stored PR cursor for this file. A "needs_remine" sentinel
+		// forces a full re-mine by treating the cursor as empty.
+		cursor, storedVersion, getErr := claimsDB.GetPRIDSet(repoName, relPath)
+		if getErr != nil {
+			cursor = nil
+			storedVersion = ""
+		}
+		if storedVersion == db.PRMinerVersionNeedsRemine {
+			cursor = nil
 		}
 
 		// Extract PR comment facts for this file.
-		facts, extractErr := miner.ExtractForFile(ctx, relPath, fileSymID)
+		facts, seenPRs, extractErr := miner.ExtractForFile(ctx, relPath, cursor)
 		if extractErr != nil {
-			// Budget exceeded is a signal to stop walking.
-			if strings.Contains(extractErr.Error(), "budget exceeded") {
+			if errors.Is(extractErr, tribal.ErrCursorRegression) {
+				if mErr := claimsDB.MarkNeedsRemine(repoName, relPath); mErr != nil {
+					fmt.Fprintf(out, "LLM tribal: mark needs_remine failed for %s: %v\n", relPath, mErr)
+				}
+				continue
+			}
+			// Budget exceeded is a signal to stop mining further files.
+			if errors.Is(extractErr, tribal.ErrBudgetExceeded) || strings.Contains(extractErr.Error(), "budget exceeded") {
 				fmt.Fprintf(out, "LLM tribal: daily budget reached, stopping extraction\n")
-				return fmt.Errorf("budget exceeded")
+				budgetExceeded = true
+				continue
 			}
 			// Other errors are non-fatal for individual files.
-			return nil
+			continue
 		}
 
 		for _, fact := range facts {
-			if _, insertErr := claimsDB.InsertTribalFact(fact, fact.Evidence); insertErr == nil {
+			// Patch the SubjectID — the miner leaves it as 0 so the caller
+			// owns the symbol mapping.
+			fact.SubjectID = fileSymID
+			if _, _, insertErr := claimsDB.UpsertTribalFact(fact, fact.Evidence); insertErr == nil {
 				switch fact.Kind {
 				case "rationale":
 					rationaleCount++
@@ -1071,11 +1200,12 @@ func runLLMTribalExtraction(ctx context.Context, out io.Writer, claimsDB *db.Cla
 			}
 		}
 
-		return nil
-	})
-	// Budget exceeded is an expected early-stop, not a true error.
-	if walkErr != nil && !strings.Contains(walkErr.Error(), "budget exceeded") {
-		return fmt.Errorf("LLM tribal walk: %w", walkErr)
+		// Persist the updated PR cursor so the next run skips these PRs.
+		if len(seenPRs) > 0 {
+			if setErr := claimsDB.SetPRIDSet(repoName, relPath, seenPRs, minerVersion); setErr != nil {
+				fmt.Fprintf(out, "LLM tribal: set pr id set failed for %s: %v\n", relPath, setErr)
+			}
+		}
 	}
 
 	// 7. Print LLM tribal summary.
