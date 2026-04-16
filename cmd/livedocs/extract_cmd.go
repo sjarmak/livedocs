@@ -803,53 +803,56 @@ func storeClaims(claimsDB *db.ClaimsDB, repoName string, claims []extractor.Clai
 	claims = extractor.FilterSensitiveClaims(claims)
 
 	stored := 0
-	for _, claim := range claims {
-		if claim.SubjectRepo == "" {
-			claim.SubjectRepo = repoName
-		}
+	err := claimsDB.RunInTransaction(func() error {
+		for _, claim := range claims {
+			if claim.SubjectRepo == "" {
+				claim.SubjectRepo = repoName
+			}
 
-		vis := string(claim.Visibility)
-		if vis == "" {
-			vis = "public"
-		}
+			vis := string(claim.Visibility)
+			if vis == "" {
+				vis = "public"
+			}
 
-		kind := string(claim.Kind)
-		if kind == "" {
-			kind = "var"
-		}
+			kind := string(claim.Kind)
+			if kind == "" {
+				kind = "var"
+			}
 
-		symID, err := claimsDB.UpsertSymbol(db.Symbol{
-			Repo:        claim.SubjectRepo,
-			ImportPath:  claim.SubjectImportPath,
-			SymbolName:  claim.SubjectName,
-			Language:    claim.Language,
-			Kind:        kind,
-			Visibility:  vis,
-			DisplayName: claim.SubjectName,
-			SCIPSymbol:  claim.SCIPSymbol,
-		})
-		if err != nil {
-			return stored, fmt.Errorf("upsert symbol %s: %w", claim.SubjectName, err)
-		}
+			symID, err := claimsDB.UpsertSymbol(db.Symbol{
+				Repo:        claim.SubjectRepo,
+				ImportPath:  claim.SubjectImportPath,
+				SymbolName:  claim.SubjectName,
+				Language:    claim.Language,
+				Kind:        kind,
+				Visibility:  vis,
+				DisplayName: claim.SubjectName,
+				SCIPSymbol:  claim.SCIPSymbol,
+			})
+			if err != nil {
+				return fmt.Errorf("upsert symbol %s: %w", claim.SubjectName, err)
+			}
 
-		_, err = claimsDB.InsertClaim(db.Claim{
-			SubjectID:        symID,
-			Predicate:        string(claim.Predicate),
-			ObjectText:       claim.ObjectText,
-			SourceFile:       claim.SourceFile,
-			SourceLine:       claim.SourceLine,
-			Confidence:       claim.Confidence,
-			ClaimTier:        string(claim.ClaimTier),
-			Extractor:        claim.Extractor,
-			ExtractorVersion: claim.ExtractorVersion,
-			LastVerified:     db.Now(),
-		})
-		if err != nil {
-			return stored, fmt.Errorf("insert claim for %s: %w", claim.SubjectName, err)
+			_, err = claimsDB.InsertClaim(db.Claim{
+				SubjectID:        symID,
+				Predicate:        string(claim.Predicate),
+				ObjectText:       claim.ObjectText,
+				SourceFile:       claim.SourceFile,
+				SourceLine:       claim.SourceLine,
+				Confidence:       claim.Confidence,
+				ClaimTier:        string(claim.ClaimTier),
+				Extractor:        claim.Extractor,
+				ExtractorVersion: claim.ExtractorVersion,
+				LastVerified:     db.Now(),
+			})
+			if err != nil {
+				return fmt.Errorf("insert claim for %s: %w", claim.SubjectName, err)
+			}
+			stored++
 		}
-		stored++
-	}
-	return stored, nil
+		return nil
+	})
+	return stored, err
 }
 
 // prefetchedDiffSource wraps a FileSource and overrides DiffBetween to return
