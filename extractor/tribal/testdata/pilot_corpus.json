@@ -1,0 +1,552 @@
+[
+  {
+    "subject": "pkg/scheduler/scheduler.go",
+    "kind": "invariant",
+    "body": "callers must hold the scheduler lock before mutating the node cache"
+  },
+  {
+    "subject": "pkg/scheduler/scheduler.go",
+    "kind": "invariant",
+    "body": "@alice Callers must hold the scheduler lock before mutating the node cache."
+  },
+  {
+    "subject": "pkg/scheduler/scheduler.go",
+    "kind": "invariant",
+    "body": "see scheduler.go:142 callers must hold the scheduler lock before mutating the node cache"
+  },
+  {
+    "subject": "pkg/scheduler/scheduler.go",
+    "kind": "invariant",
+    "body": "Callers must hold the scheduler lock before mutating the node cache!"
+  },
+  {
+    "subject": "pkg/scheduler/framework/registry.go",
+    "kind": "rationale",
+    "body": "plugin registration must happen before the scheduler starts its run loop"
+  },
+  {
+    "subject": "pkg/scheduler/framework/registry.go",
+    "kind": "rationale",
+    "body": "@bob plugin registration must happen before the scheduler starts its run loop."
+  },
+  {
+    "subject": "pkg/scheduler/framework/registry.go",
+    "kind": "rationale",
+    "body": "see registry.go:88 plugin registration must happen before the scheduler starts its run loop"
+  },
+  {
+    "subject": "pkg/scheduler/eventhandlers.go",
+    "kind": "invariant",
+    "body": "event handlers must be registered before informer start or they will miss bootstrap events"
+  },
+  {
+    "subject": "pkg/scheduler/eventhandlers.go",
+    "kind": "invariant",
+    "body": "Event handlers must be registered before informer start or they will miss bootstrap events."
+  },
+  {
+    "subject": "pkg/scheduler/eventhandlers.go",
+    "kind": "invariant",
+    "body": "see eventhandlers.go:37 event handlers must be registered before informer start or they will miss bootstrap events"
+  },
+  {
+    "subject": "pkg/scheduler/eventhandlers.go",
+    "kind": "invariant",
+    "body": "@carol event handlers must be registered before informer start or they will miss bootstrap events"
+  },
+  {
+    "subject": "pkg/scheduler/internal/queue/scheduling_queue.go",
+    "kind": "quirk",
+    "body": "unschedulable pods are moved back to the active queue only after a backoff period"
+  },
+  {
+    "subject": "pkg/scheduler/internal/queue/scheduling_queue.go",
+    "kind": "quirk",
+    "body": "Unschedulable pods are moved back to the active queue only after a backoff period."
+  },
+  {
+    "subject": "pkg/scheduler/internal/queue/scheduling_queue.go",
+    "kind": "quirk",
+    "body": "see scheduling_queue.go:901 unschedulable pods are moved back to the active queue only after a backoff period"
+  },
+  {
+    "subject": "pkg/scheduler/framework/plugins/volumebinding/binder.go",
+    "kind": "invariant",
+    "body": "the volume binder must run before pod binding to avoid scheduling a pod that cannot attach its volume"
+  },
+  {
+    "subject": "pkg/scheduler/framework/plugins/volumebinding/binder.go",
+    "kind": "invariant",
+    "body": "The volume binder must run before pod binding to avoid scheduling a pod that cannot attach its volume."
+  },
+  {
+    "subject": "pkg/scheduler/framework/plugins/volumebinding/binder.go",
+    "kind": "invariant",
+    "body": "see binder.go:241 the volume binder must run before pod binding to avoid scheduling a pod that cannot attach its volume"
+  },
+  {
+    "subject": "pkg/scheduler/framework/plugins/volumebinding/binder.go",
+    "kind": "invariant",
+    "body": "@dave the volume binder must run before pod binding to avoid scheduling a pod that cannot attach its volume"
+  },
+  {
+    "subject": "pkg/scheduler/framework/plugins/noderesources/fit.go",
+    "kind": "rationale",
+    "body": "the node resources fit plugin caches allocatable per node to avoid recomputing on every pod"
+  },
+  {
+    "subject": "pkg/scheduler/framework/plugins/noderesources/fit.go",
+    "kind": "rationale",
+    "body": "The node resources fit plugin caches allocatable per node to avoid recomputing on every pod."
+  },
+  {
+    "subject": "pkg/scheduler/framework/plugins/noderesources/fit.go",
+    "kind": "rationale",
+    "body": "see fit.go:404 the node resources fit plugin caches allocatable per node to avoid recomputing on every pod"
+  },
+  {
+    "subject": "pkg/scheduler/framework/plugins/interpodaffinity/plugin.go",
+    "kind": "quirk",
+    "body": "inter-pod affinity evaluation is quadratic in the number of matching pods per node"
+  },
+  {
+    "subject": "pkg/scheduler/framework/plugins/interpodaffinity/plugin.go",
+    "kind": "quirk",
+    "body": "Inter-pod affinity evaluation is quadratic in the number of matching pods per node."
+  },
+  {
+    "subject": "pkg/scheduler/framework/plugins/tainttoleration/taint_toleration.go",
+    "kind": "invariant",
+    "body": "taint toleration must run before pod binding to prevent scheduling on tainted nodes"
+  },
+  {
+    "subject": "pkg/scheduler/framework/plugins/tainttoleration/taint_toleration.go",
+    "kind": "invariant",
+    "body": "Taint toleration must run before pod binding to prevent scheduling on tainted nodes."
+  },
+  {
+    "subject": "pkg/scheduler/framework/plugins/defaultbinder/default_binder.go",
+    "kind": "rationale",
+    "body": "the default binder retries pod binding once on conflict to tolerate stale cache reads"
+  },
+  {
+    "subject": "pkg/scheduler/framework/plugins/defaultbinder/default_binder.go",
+    "kind": "rationale",
+    "body": "The default binder retries pod binding once on conflict to tolerate stale cache reads."
+  },
+  {
+    "subject": "pkg/scheduler/framework/plugins/defaultbinder/default_binder.go",
+    "kind": "rationale",
+    "body": "see default_binder.go:77 the default binder retries pod binding once on conflict to tolerate stale cache reads"
+  },
+  {
+    "subject": "pkg/scheduler/profile/profile.go",
+    "kind": "invariant",
+    "body": "scheduler profiles are immutable after the scheduler is constructed"
+  },
+  {
+    "subject": "pkg/scheduler/profile/profile.go",
+    "kind": "invariant",
+    "body": "Scheduler profiles are immutable after the scheduler is constructed."
+  },
+  {
+    "subject": "pkg/scheduler/internal/cache/cache.go",
+    "kind": "invariant",
+    "body": "the scheduler cache must be kept in sync with the api server via the informer"
+  },
+  {
+    "subject": "pkg/scheduler/internal/cache/cache.go",
+    "kind": "invariant",
+    "body": "The scheduler cache must be kept in sync with the api server via the informer."
+  },
+  {
+    "subject": "pkg/scheduler/internal/cache/cache.go",
+    "kind": "invariant",
+    "body": "see cache.go:512 the scheduler cache must be kept in sync with the api server via the informer"
+  },
+  {
+    "subject": "pkg/scheduler/framework/runtime/framework.go",
+    "kind": "rationale",
+    "body": "plugin execution order is stable across scheduler runs to guarantee reproducible placements"
+  },
+  {
+    "subject": "pkg/scheduler/framework/runtime/framework.go",
+    "kind": "rationale",
+    "body": "Plugin execution order is stable across scheduler runs to guarantee reproducible placements."
+  },
+  {
+    "subject": "pkg/scheduler/framework/runtime/waiting_pods_map.go",
+    "kind": "quirk",
+    "body": "waiting pods may time out before a permit plugin decides so callers must recheck status"
+  },
+  {
+    "subject": "pkg/scheduler/framework/runtime/waiting_pods_map.go",
+    "kind": "quirk",
+    "body": "Waiting pods may time out before a permit plugin decides so callers must recheck status."
+  },
+  {
+    "subject": "pkg/scheduler/eventhandlers.go",
+    "kind": "rationale",
+    "body": "each event type is registered exactly once per scheduler lifetime to avoid duplicate handler dispatch"
+  },
+  {
+    "subject": "pkg/scheduler/eventhandlers.go",
+    "kind": "rationale",
+    "body": "Each event type is registered exactly once per scheduler lifetime to avoid duplicate handler dispatch."
+  },
+  {
+    "subject": "pkg/scheduler/framework/plugins/nodename/node_name.go",
+    "kind": "invariant",
+    "body": "nodename filter must run before more expensive filters to short-circuit impossible placements"
+  },
+  {
+    "subject": "pkg/scheduler/framework/plugins/nodename/node_name.go",
+    "kind": "invariant",
+    "body": "Nodename filter must run before more expensive filters to short-circuit impossible placements."
+  },
+  {
+    "subject": "pkg/scheduler/framework/plugins/nodeaffinity/node_affinity.go",
+    "kind": "invariant",
+    "body": "node affinity required terms must all match for a node to be feasible"
+  },
+  {
+    "subject": "pkg/scheduler/framework/plugins/nodeaffinity/node_affinity.go",
+    "kind": "invariant",
+    "body": "Node affinity required terms must all match for a node to be feasible."
+  },
+  {
+    "subject": "pkg/scheduler/framework/plugins/podtopologyspread/plugin.go",
+    "kind": "quirk",
+    "body": "pod topology spread metrics are recomputed lazily so freshly registered pods may be excluded"
+  },
+  {
+    "subject": "pkg/scheduler/framework/plugins/podtopologyspread/plugin.go",
+    "kind": "quirk",
+    "body": "Pod topology spread metrics are recomputed lazily so freshly registered pods may be excluded."
+  },
+  {
+    "subject": "pkg/scheduler/framework/plugins/volumezone/volume_zone.go",
+    "kind": "invariant",
+    "body": "volume zone matching must run before binding to prevent cross-zone attach failures"
+  },
+  {
+    "subject": "pkg/scheduler/framework/plugins/volumezone/volume_zone.go",
+    "kind": "invariant",
+    "body": "Volume zone matching must run before binding to prevent cross-zone attach failures."
+  },
+  {
+    "subject": "pkg/scheduler/framework/plugins/volumerestrictions/volume_restrictions.go",
+    "kind": "quirk",
+    "body": "some volume types cannot be attached to more than one node at a time"
+  },
+  {
+    "subject": "pkg/scheduler/framework/plugins/volumerestrictions/volume_restrictions.go",
+    "kind": "quirk",
+    "body": "Some volume types cannot be attached to more than one node at a time."
+  },
+  {
+    "subject": "pkg/scheduler/framework/plugins/imagelocality/image_locality.go",
+    "kind": "rationale",
+    "body": "image locality scoring prefers nodes that already have the pod image cached"
+  },
+  {
+    "subject": "pkg/scheduler/framework/plugins/imagelocality/image_locality.go",
+    "kind": "rationale",
+    "body": "Image locality scoring prefers nodes that already have the pod image cached."
+  },
+  {
+    "subject": "pkg/scheduler/framework/plugins/selectorspread/selector_spread.go",
+    "kind": "rationale",
+    "body": "selector spread scoring spreads pods across nodes with matching label selectors"
+  },
+  {
+    "subject": "pkg/scheduler/framework/plugins/selectorspread/selector_spread.go",
+    "kind": "rationale",
+    "body": "Selector spread scoring spreads pods across nodes with matching label selectors."
+  },
+  {
+    "subject": "pkg/scheduler/framework/plugins/queuesort/priority_sort.go",
+    "kind": "invariant",
+    "body": "priority-based queue sort must be stable across ties to guarantee fair scheduling order"
+  },
+  {
+    "subject": "pkg/scheduler/framework/plugins/queuesort/priority_sort.go",
+    "kind": "invariant",
+    "body": "Priority-based queue sort must be stable across ties to guarantee fair scheduling order."
+  },
+  {
+    "subject": "pkg/scheduler/framework/plugins/preemption/preemption.go",
+    "kind": "rationale",
+    "body": "preemption attempts to free space by evicting lower priority pods when a pending pod fails to schedule"
+  },
+  {
+    "subject": "pkg/scheduler/framework/plugins/preemption/preemption.go",
+    "kind": "rationale",
+    "body": "Preemption attempts to free space by evicting lower priority pods when a pending pod fails to schedule."
+  },
+  {
+    "subject": "pkg/scheduler/apis/config/v1/defaults.go",
+    "kind": "rationale",
+    "body": "default scheduler config values are baked into the binary so upgrades can rely on them"
+  },
+  {
+    "subject": "pkg/scheduler/apis/config/v1/defaults.go",
+    "kind": "rationale",
+    "body": "Default scheduler config values are baked into the binary so upgrades can rely on them."
+  },
+  {
+    "subject": "pkg/scheduler/metrics/metrics.go",
+    "kind": "invariant",
+    "body": "scheduler metrics must be registered before the http server starts serving requests"
+  },
+  {
+    "subject": "pkg/scheduler/metrics/metrics.go",
+    "kind": "invariant",
+    "body": "Scheduler metrics must be registered before the http server starts serving requests."
+  },
+  {
+    "subject": "pkg/scheduler/metrics/profile_metrics.go",
+    "kind": "quirk",
+    "body": "per profile metrics are cardinality bounded by the number of scheduler profiles"
+  },
+  {
+    "subject": "pkg/scheduler/metrics/profile_metrics.go",
+    "kind": "quirk",
+    "body": "Per profile metrics are cardinality bounded by the number of scheduler profiles."
+  },
+  {
+    "subject": "pkg/scheduler/internal/queue/active_queue.go",
+    "kind": "invariant",
+    "body": "active queue ordering reflects priority then arrival time within equal priority"
+  },
+  {
+    "subject": "pkg/scheduler/internal/queue/active_queue.go",
+    "kind": "invariant",
+    "body": "Active queue ordering reflects priority then arrival time within equal priority."
+  },
+  {
+    "subject": "pkg/scheduler/internal/queue/backoff_queue.go",
+    "kind": "quirk",
+    "body": "backoff duration doubles with each consecutive scheduling failure up to a configurable maximum"
+  },
+  {
+    "subject": "pkg/scheduler/internal/queue/backoff_queue.go",
+    "kind": "quirk",
+    "body": "Backoff duration doubles with each consecutive scheduling failure up to a configurable maximum."
+  },
+  {
+    "subject": "pkg/scheduler/internal/queue/unschedulable_pods.go",
+    "kind": "quirk",
+    "body": "unschedulable pods are requeued when a relevant cluster event changes feasibility"
+  },
+  {
+    "subject": "pkg/scheduler/internal/queue/unschedulable_pods.go",
+    "kind": "quirk",
+    "body": "Unschedulable pods are requeued when a relevant cluster event changes feasibility."
+  },
+  {
+    "subject": "pkg/scheduler/framework/runtime/registry.go",
+    "kind": "rationale",
+    "body": "plugin registry allows out-of-tree plugins to extend the scheduler without forking the codebase"
+  },
+  {
+    "subject": "pkg/scheduler/framework/runtime/registry.go",
+    "kind": "rationale",
+    "body": "Plugin registry allows out-of-tree plugins to extend the scheduler without forking the codebase."
+  },
+  {
+    "subject": "pkg/scheduler/framework/plugins/nodeports/node_ports.go",
+    "kind": "invariant",
+    "body": "node ports plugin must reject pods whose required ports conflict with existing allocations"
+  },
+  {
+    "subject": "pkg/scheduler/framework/plugins/nodeports/node_ports.go",
+    "kind": "invariant",
+    "body": "Node ports plugin must reject pods whose required ports conflict with existing allocations."
+  },
+  {
+    "subject": "pkg/scheduler/framework/plugins/nodeunschedulable/node_unschedulable.go",
+    "kind": "invariant",
+    "body": "nodes marked unschedulable are skipped unless the pod has an explicit toleration"
+  },
+  {
+    "subject": "pkg/scheduler/framework/plugins/nodeunschedulable/node_unschedulable.go",
+    "kind": "invariant",
+    "body": "Nodes marked unschedulable are skipped unless the pod has an explicit toleration."
+  },
+  {
+    "subject": "pkg/scheduler/framework/plugins/examples/multipoint/multipoint.go",
+    "kind": "rationale",
+    "body": "multipoint plugins demonstrate how to extend multiple scheduler extension points from one registration"
+  },
+  {
+    "subject": "pkg/scheduler/framework/plugins/examples/multipoint/multipoint.go",
+    "kind": "rationale",
+    "body": "Multipoint plugins demonstrate how to extend multiple scheduler extension points from one registration."
+  },
+  {
+    "subject": "pkg/scheduler/framework/plugins/feature/feature.go",
+    "kind": "quirk",
+    "body": "feature gates are evaluated at plugin init time so changes require a scheduler restart"
+  },
+  {
+    "subject": "pkg/scheduler/framework/plugins/feature/feature.go",
+    "kind": "quirk",
+    "body": "Feature gates are evaluated at plugin init time so changes require a scheduler restart."
+  },
+  {
+    "subject": "pkg/controller/deployment/deployment_controller.go",
+    "kind": "invariant",
+    "body": "replica count updates must be serialized per deployment to avoid write conflicts"
+  },
+  {
+    "subject": "pkg/controller/deployment/deployment_controller.go",
+    "kind": "invariant",
+    "body": "Replica count updates must be serialized per deployment to avoid write conflicts."
+  },
+  {
+    "subject": "pkg/controller/daemon/daemon_controller.go",
+    "kind": "rationale",
+    "body": "daemon set controller uses node events to schedule pods exactly once per node"
+  },
+  {
+    "subject": "pkg/controller/daemon/daemon_controller.go",
+    "kind": "rationale",
+    "body": "Daemon set controller uses node events to schedule pods exactly once per node."
+  },
+  {
+    "subject": "pkg/controller/job/job_controller.go",
+    "kind": "quirk",
+    "body": "job completion count is approximate when pods are backoff limited and terminate in bursts"
+  },
+  {
+    "subject": "pkg/controller/job/job_controller.go",
+    "kind": "quirk",
+    "body": "Job completion count is approximate when pods are backoff limited and terminate in bursts."
+  },
+  {
+    "subject": "pkg/controller/replicaset/replica_set.go",
+    "kind": "invariant",
+    "body": "replica set must ensure desired replicas match observed replicas on every reconcile"
+  },
+  {
+    "subject": "pkg/controller/replicaset/replica_set.go",
+    "kind": "invariant",
+    "body": "Replica set must ensure desired replicas match observed replicas on every reconcile."
+  },
+  {
+    "subject": "pkg/controller/statefulset/stateful_set.go",
+    "kind": "invariant",
+    "body": "stateful set pod creation is strictly ordered from ordinal zero up to ordinal N minus one"
+  },
+  {
+    "subject": "pkg/controller/statefulset/stateful_set.go",
+    "kind": "invariant",
+    "body": "Stateful set pod creation is strictly ordered from ordinal zero up to ordinal N minus one."
+  },
+  {
+    "subject": "pkg/controller/cronjob/cronjob_controller.go",
+    "kind": "quirk",
+    "body": "cron job schedules are parsed at reconcile time so a malformed schedule stalls the controller"
+  },
+  {
+    "subject": "pkg/controller/cronjob/cronjob_controller.go",
+    "kind": "quirk",
+    "body": "Cron job schedules are parsed at reconcile time so a malformed schedule stalls the controller."
+  },
+  {
+    "subject": "pkg/controller/endpoint/endpoints_controller.go",
+    "kind": "invariant",
+    "body": "endpoints must be updated before services report ready to avoid routing to stale backends"
+  },
+  {
+    "subject": "pkg/controller/endpoint/endpoints_controller.go",
+    "kind": "invariant",
+    "body": "Endpoints must be updated before services report ready to avoid routing to stale backends."
+  },
+  {
+    "subject": "pkg/controller/endpointslice/endpointslice_controller.go",
+    "kind": "rationale",
+    "body": "endpoint slices scale better than endpoints for large services because updates are chunked"
+  },
+  {
+    "subject": "pkg/controller/endpointslice/endpointslice_controller.go",
+    "kind": "rationale",
+    "body": "Endpoint slices scale better than endpoints for large services because updates are chunked."
+  },
+  {
+    "subject": "pkg/controller/namespace/namespace_controller.go",
+    "kind": "invariant",
+    "body": "namespace deletion must clean up all namespaced resources before the namespace itself is removed"
+  },
+  {
+    "subject": "pkg/controller/namespace/namespace_controller.go",
+    "kind": "invariant",
+    "body": "Namespace deletion must clean up all namespaced resources before the namespace itself is removed."
+  },
+  {
+    "subject": "pkg/controller/resourcequota/resource_quota_controller.go",
+    "kind": "invariant",
+    "body": "resource quota usage is recomputed on every pod add to stay consistent with admission decisions"
+  },
+  {
+    "subject": "pkg/controller/resourcequota/resource_quota_controller.go",
+    "kind": "invariant",
+    "body": "Resource quota usage is recomputed on every pod add to stay consistent with admission decisions."
+  },
+  {
+    "subject": "pkg/controller/serviceaccount/serviceaccounts_controller.go",
+    "kind": "rationale",
+    "body": "service account controller ensures every namespace has a default service account on creation"
+  },
+  {
+    "subject": "pkg/controller/serviceaccount/serviceaccounts_controller.go",
+    "kind": "rationale",
+    "body": "Service account controller ensures every namespace has a default service account on creation."
+  },
+  {
+    "subject": "pkg/controller/podgc/gc_controller.go",
+    "kind": "quirk",
+    "body": "pod gc deletes completed pods based on a TTL derived from the cluster wide defaults"
+  },
+  {
+    "subject": "pkg/controller/podgc/gc_controller.go",
+    "kind": "quirk",
+    "body": "Pod gc deletes completed pods based on a TTL derived from the cluster wide defaults."
+  },
+  {
+    "subject": "pkg/controller/nodeipam/node_ipam_controller.go",
+    "kind": "invariant",
+    "body": "node ipam controller must allocate unique CIDR blocks to each node across the cluster"
+  },
+  {
+    "subject": "pkg/controller/nodeipam/node_ipam_controller.go",
+    "kind": "invariant",
+    "body": "Node ipam controller must allocate unique CIDR blocks to each node across the cluster."
+  },
+  {
+    "subject": "pkg/controller/nodelifecycle/node_lifecycle_controller.go",
+    "kind": "rationale",
+    "body": "node lifecycle controller transitions unhealthy nodes to NotReady after a tunable grace period"
+  },
+  {
+    "subject": "pkg/controller/nodelifecycle/node_lifecycle_controller.go",
+    "kind": "rationale",
+    "body": "Node lifecycle controller transitions unhealthy nodes to NotReady after a tunable grace period."
+  },
+  {
+    "subject": "pkg/kubelet/kubelet.go",
+    "kind": "invariant",
+    "body": "kubelet must only report node status after the runtime is ready to accept pods"
+  },
+  {
+    "subject": "pkg/kubelet/kubelet.go",
+    "kind": "invariant",
+    "body": "Kubelet must only report node status after the runtime is ready to accept pods."
+  },
+  {
+    "subject": "pkg/kubelet/kubelet.go",
+    "kind": "invariant",
+    "body": "see kubelet.go:1203 kubelet must only report node status after the runtime is ready to accept pods"
+  }
+]

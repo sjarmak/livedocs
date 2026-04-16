@@ -235,14 +235,14 @@ func tribalProposeFactHandler(pool *DBPool) ToolHandler {
 
 		switch action {
 		case "create":
-			newFactID, err = cdb.InsertTribalFact(newFact, dbEvidence)
+			newFactID, _, err = cdb.UpsertTribalFact(newFact, dbEvidence)
 			if err != nil {
 				return NewErrorResultf("insert fact: %v", err), nil
 			}
 
 		case "correct":
-			// Record the correction, then insert the replacement fact.
-			// Each call is individually atomic (InsertTribalFact wraps in
+			// Record the correction, then upsert the replacement fact.
+			// Each call is individually atomic (UpsertTribalFact wraps in
 			// its own transaction). We avoid nesting RunInTransaction calls
 			// because the mutex is not reentrant.
 			_, err = cdb.InsertTribalCorrection(db.TribalCorrection{
@@ -256,14 +256,14 @@ func tribalProposeFactHandler(pool *DBPool) ToolHandler {
 			if err != nil {
 				return NewErrorResultf("insert correction: %v", err), nil
 			}
-			newFactID, err = cdb.InsertTribalFact(newFact, dbEvidence)
+			newFactID, _, err = cdb.UpsertTribalFact(newFact, dbEvidence)
 			if err != nil {
 				return NewErrorResultf("insert replacement fact: %v", err), nil
 			}
 
 		case "supersede":
 			// Mark old fact as superseded, record the correction, then
-			// insert the replacement. Each step uses its own transaction
+			// upsert the replacement. Each step uses its own transaction
 			// where applicable to avoid deadlocking the non-reentrant mutex.
 			if err = cdb.UpdateFactStatus(factID, "superseded"); err != nil {
 				return NewErrorResultf("supersede old fact: %v", err), nil
@@ -279,7 +279,7 @@ func tribalProposeFactHandler(pool *DBPool) ToolHandler {
 			if err != nil {
 				return NewErrorResultf("insert correction: %v", err), nil
 			}
-			newFactID, err = cdb.InsertTribalFact(newFact, dbEvidence)
+			newFactID, _, err = cdb.UpsertTribalFact(newFact, dbEvidence)
 			if err != nil {
 				return NewErrorResultf("insert replacement fact: %v", err), nil
 			}

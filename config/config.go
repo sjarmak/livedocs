@@ -71,7 +71,7 @@ type TribalConfig struct {
 	// budget allocated to a future critic loop. Default: 20.
 	CriticBudgetPercent int `yaml:"critic_budget_percent,omitempty"`
 
-	// ClusterDebugEnabled toggles the cluster_debug separate DB used for
+	// ClusterDebugEnabled toggles the cluster-debug sidecar DB used for
 	// Phase 5 calibration. Default: false.
 	ClusterDebugEnabled bool `yaml:"cluster_debug_enabled,omitempty"`
 }
@@ -210,7 +210,7 @@ func DefaultYAML(languages []string) string {
 		fmt.Sprintf("#   max_files_per_run: %d\n", DefaultTribalMaxFilesPerRun) +
 		"#   # Reserved share (0-100) of the tribal LLM budget for the critic loop.\n" +
 		fmt.Sprintf("#   critic_budget_percent: %d\n", DefaultTribalCriticBudgetPercent) +
-		"#   # Toggle the cluster_debug separate DB used for Phase 5 calibration.\n" +
+		"#   # Toggle the cluster-debug sidecar DB used for Phase 5 calibration.\n" +
 		"#   cluster_debug_enabled: false\n"
 	return header + string(data) + tribalDoc
 }

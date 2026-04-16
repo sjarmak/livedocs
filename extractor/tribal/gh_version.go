@@ -23,6 +23,7 @@ var ErrUnknownGhVersion = errors.New("unknown gh CLI version")
 // changes pr-list search ranking or pulls/comments pagination semantics,
 // either extend this list or bump to a newer pinned minimum.
 var knownGhVersions = []string{
+	"2.45.0",
 	"2.50.0",
 	"2.52.0",
 	"2.55.0",

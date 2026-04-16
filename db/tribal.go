@@ -21,6 +21,11 @@ type TribalFact struct {
 	Status           string
 	CreatedAt        string
 	LastVerified     string
+	// ClusterKey is the deterministic structural hash used by UpsertTribalFact
+	// to merge facts that differ only in cosmetic noise. Callers SHOULD NOT set
+	// this directly — UpsertTribalFact computes it from Body via the normalize
+	// package. InsertTribalFact leaves this field empty (backward compatible).
+	ClusterKey string
 	// Evidence is populated by query helpers; not stored directly in tribal_facts.
 	Evidence []TribalEvidence
 }

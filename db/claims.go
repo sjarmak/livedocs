@@ -74,6 +74,9 @@ type ClaimsDB struct {
 	txMu       sync.Mutex // serializes RunInTransaction to prevent concurrent c.exec swaps
 	enrichExec dbExecutor // defaults to db; swapped to tx inside RunEnrichmentTransaction
 	enrichMu   sync.Mutex // serializes RunEnrichmentTransaction independently of txMu
+	// clusterDebug is the optional sidecar database used by UpsertTribalFact
+	// to record calibration observations. nil when the feature is disabled.
+	clusterDebug *ClusterDebugDB
 }
 
 // OpenClaimsDB opens or creates a per-repo claims database at the given path.

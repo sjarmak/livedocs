@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/live-docs/live_docs/db"
 )
 
 func TestCollectorDisabledByDefault(t *testing.T) {
@@ -175,6 +177,144 @@ func TestDisabledCollectorFlushIsNoop(t *testing.T) {
 	c := NewCollector(CollectorConfig{})
 	if err := c.Flush(); err != nil {
 		t.Fatalf("flush on disabled collector should not error: %v", err)
+	}
+}
+
+// TestComputeCoverageBreadthMetrics verifies the two coverage-breadth gauges
+// return reasonable values on a fixture claims DB with a mix of never-mined
+// and fact-annotated source files.
+func TestComputeCoverageBreadthMetrics(t *testing.T) {
+	const repo = "cov-repo"
+	dir := t.TempDir()
+	path := filepath.Join(dir, "cov.db")
+	cdb, err := db.OpenClaimsDB(path)
+	if err != nil {
+		t.Fatalf("open claims db: %v", err)
+	}
+	defer cdb.Close()
+	if err := cdb.CreateSchema(); err != nil {
+		t.Fatalf("create schema: %v", err)
+	}
+	if err := cdb.CreateTribalSchema(); err != nil {
+		t.Fatalf("create tribal schema: %v", err)
+	}
+
+	// Reference clock: 2026-04-15T12:00:00Z (matches current session date).
+	now := time.Date(2026, 4, 15, 12, 0, 0, 0, time.UTC)
+	nowSec := now.Unix()
+
+	// 5 source files, all for the same repo:
+	//   sf0 — never-mined, indexed 3600 seconds ago (oldest age target).
+	//   sf1 — never-mined, indexed 600 seconds ago.
+	//   sf2 — mined, has 1 active tribal_fact attached.
+	//   sf3 — mined, no facts.
+	//   sf4 — mined, has 1 active tribal_fact attached.
+	//
+	// Expected:
+	//   NeverMinedOldestAgeSeconds = 3600 (sf0).
+	//   SourceFilesWithFactsFraction = 2/5 = 0.4.
+
+	insertSF := func(relPath string, agoSec int64, mined bool) int64 {
+		ts := time.Unix(nowSec-agoSec, 0).UTC().Format(time.RFC3339)
+		id, err := cdb.UpsertSourceFile(db.SourceFile{
+			Repo:             repo,
+			RelativePath:     relPath,
+			ContentHash:      "h-" + relPath,
+			ExtractorVersion: "test",
+			LastIndexed:      ts,
+		})
+		if err != nil {
+			t.Fatalf("upsert source file %q: %v", relPath, err)
+		}
+		if mined {
+			if err := cdb.SetPRIDSet(repo, relPath, []int{1}, "v1"); err != nil {
+				t.Fatalf("set pr id set %q: %v", relPath, err)
+			}
+		}
+		return id
+	}
+
+	insertSF("pkg/a/sf0.go", 3600, false)
+	insertSF("pkg/a/sf1.go", 600, false)
+	insertSF("pkg/b/sf2.go", 120, true)
+	insertSF("pkg/b/sf3.go", 120, true)
+	insertSF("pkg/c/sf4.go", 120, true)
+
+	// Attach one active tribal_fact to sf2 and sf4 (via symbols).
+	attachFact := func(relPath string, idx int) {
+		symID, err := cdb.UpsertSymbol(db.Symbol{
+			Repo:       repo,
+			ImportPath: relPath,
+			SymbolName: "sym_" + relPath,
+			Language:   "file",
+			Kind:       "file",
+			Visibility: "public",
+		})
+		if err != nil {
+			t.Fatalf("upsert symbol: %v", err)
+		}
+		_, err = cdb.InsertTribalFact(db.TribalFact{
+			SubjectID:        symID,
+			Kind:             "quirk",
+			Body:             "body",
+			SourceQuote:      "q",
+			Confidence:       0.9,
+			Corroboration:    1,
+			Extractor:        "test",
+			ExtractorVersion: "1",
+			StalenessHash:    "h-" + relPath,
+			Status:           "active",
+			CreatedAt:        time.Now().UTC().Format(time.RFC3339),
+			LastVerified:     time.Now().UTC().Format(time.RFC3339),
+		}, []db.TribalEvidence{{
+			SourceType:  "inline_marker",
+			SourceRef:   relPath,
+			ContentHash: "ev",
+		}})
+		if err != nil {
+			t.Fatalf("insert fact %d: %v", idx, err)
+		}
+	}
+	attachFact("pkg/b/sf2.go", 1)
+	attachFact("pkg/c/sf4.go", 2)
+
+	m, err := ComputeCoverageBreadthMetrics(cdb.DB(), repo, nowSec)
+	if err != nil {
+		t.Fatalf("compute metrics: %v", err)
+	}
+	if m.NeverMinedOldestAgeSeconds != 3600 {
+		t.Errorf("NeverMinedOldestAgeSeconds = %.1f, want 3600", m.NeverMinedOldestAgeSeconds)
+	}
+	wantFrac := 2.0 / 5.0
+	if m.SourceFilesWithFactsFraction < wantFrac-0.001 || m.SourceFilesWithFactsFraction > wantFrac+0.001 {
+		t.Errorf("SourceFilesWithFactsFraction = %.4f, want ~%.4f", m.SourceFilesWithFactsFraction, wantFrac)
+	}
+}
+
+// TestComputeCoverageBreadthMetricsEmpty verifies the gauges return
+// zero-value metrics on a fresh DB with no rows.
+func TestComputeCoverageBreadthMetricsEmpty(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "empty.db")
+	cdb, err := db.OpenClaimsDB(path)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer cdb.Close()
+	if err := cdb.CreateSchema(); err != nil {
+		t.Fatalf("schema: %v", err)
+	}
+	if err := cdb.CreateTribalSchema(); err != nil {
+		t.Fatalf("tribal schema: %v", err)
+	}
+	m, err := ComputeCoverageBreadthMetrics(cdb.DB(), "nope", time.Now().Unix())
+	if err != nil {
+		t.Fatalf("compute: %v", err)
+	}
+	if m.NeverMinedOldestAgeSeconds != 0 {
+		t.Errorf("NeverMinedOldestAgeSeconds = %.1f, want 0", m.NeverMinedOldestAgeSeconds)
+	}
+	if m.SourceFilesWithFactsFraction != 0 {
+		t.Errorf("SourceFilesWithFactsFraction = %.4f, want 0", m.SourceFilesWithFactsFraction)
 	}
 }
 

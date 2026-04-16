@@ -167,7 +167,7 @@ func ExtractCodeowners(cdb *db.ClaimsDB, repoRoot, repoName string) (int, error)
 				ContentHash: contentHash,
 			}}
 
-			if _, err := cdb.InsertTribalFact(fact, evidence); err != nil {
+			if _, _, err := cdb.UpsertTribalFact(fact, evidence); err != nil {
 				return inserted, fmt.Errorf("insert fact for pattern %s: %w", rule.Pattern, err)
 			}
 			inserted++
