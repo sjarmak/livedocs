@@ -50,9 +50,9 @@ jobs:
         uses: actions/cache@v4
         with:
           path: .livedocs
-          key: livedocs-claims-${{ runner.os }}-${{ hashFiles('**/*.go') }}
+          key: livedocs-claims-v2-${{ runner.os }}-${{ hashFiles('**/*.go') }}
           restore-keys: |
-            livedocs-claims-${{ runner.os }}-
+            livedocs-claims-v2-${{ runner.os }}-
 
       - name: Extract claims
         if: steps.db-cache.outputs.cache-hit != 'true'
