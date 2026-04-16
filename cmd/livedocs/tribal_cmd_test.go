@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/live-docs/live_docs/db"
 	"github.com/spf13/pflag"
 	_ "modernc.org/sqlite"
 )
@@ -754,5 +755,177 @@ func TestTribalCorrectionCLIFactNotFound(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "not found") {
 		t.Errorf("expected 'not found' in error, got: %v", err)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Body length limit tests
+// ---------------------------------------------------------------------------
+
+func TestValidateBodyLength(t *testing.T) {
+	tests := []struct {
+		name    string
+		body    string
+		wantErr bool
+		errMsg  string
+	}{
+		{name: "empty body", body: "", wantErr: false},
+		{name: "short body", body: "this is fine", wantErr: false},
+		{name: "exactly at limit", body: strings.Repeat("a", db.MaxBodyBytes), wantErr: false},
+		{name: "one byte over limit", body: strings.Repeat("a", db.MaxBodyBytes+1), wantErr: true, errMsg: "exceeds maximum"},
+		{name: "way over limit", body: strings.Repeat("x", db.MaxBodyBytes*2), wantErr: true, errMsg: "4096"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			err := validateBodyLength(tc.body)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatal("expected error, got nil")
+				}
+				if !strings.Contains(err.Error(), tc.errMsg) {
+					t.Errorf("expected error containing %q, got: %v", tc.errMsg, err)
+				}
+			} else {
+				if err != nil {
+					t.Errorf("unexpected error: %v", err)
+				}
+			}
+		})
+	}
+}
+
+func TestTribalCorrectBodyTooLong(t *testing.T) {
+	resetExtractFlags()
+	resetTribalCorrectionFlags()
+	dbPath := createTribalTestDB(t)
+
+	longBody := strings.Repeat("x", db.MaxBodyBytes+1)
+
+	buf := new(bytes.Buffer)
+	rootCmd.SetOut(buf)
+	rootCmd.SetErr(buf)
+	rootCmd.SetArgs([]string{
+		"tribal", "correct",
+		"--db", dbPath,
+		"--fact-id", "1",
+		"--body", longBody,
+		"--reason", "test",
+	})
+	err := rootCmd.Execute()
+	if err == nil {
+		t.Fatal("expected error for oversized body")
+	}
+	if !strings.Contains(err.Error(), "exceeds maximum") {
+		t.Errorf("expected 'exceeds maximum' in error, got: %v", err)
+	}
+}
+
+func TestTribalSupersedeBodyTooLong(t *testing.T) {
+	resetExtractFlags()
+	resetTribalCorrectionFlags()
+	dbPath := createTribalTestDB(t)
+
+	longBody := strings.Repeat("x", db.MaxBodyBytes+1)
+
+	buf := new(bytes.Buffer)
+	rootCmd.SetOut(buf)
+	rootCmd.SetErr(buf)
+	rootCmd.SetArgs([]string{
+		"tribal", "supersede",
+		"--db", dbPath,
+		"--fact-id", "1",
+		"--body", longBody,
+		"--reason", "test",
+	})
+	err := rootCmd.Execute()
+	if err == nil {
+		t.Fatal("expected error for oversized body")
+	}
+	if !strings.Contains(err.Error(), "exceeds maximum") {
+		t.Errorf("expected 'exceeds maximum' in error, got: %v", err)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Symlink resolution tests
+// ---------------------------------------------------------------------------
+
+func TestValidateDBPath_SymlinkResolution(t *testing.T) {
+	tmpDir := t.TempDir()
+	dataDir := filepath.Join(tmpDir, "data")
+	secretDir := filepath.Join(tmpDir, "secret")
+	if err := os.MkdirAll(dataDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(secretDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	secretDB := filepath.Join(secretDir, "stolen.claims.db")
+	if err := os.WriteFile(secretDB, []byte("fake"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Symlink inside dataDir pointing to secretDir.
+	symlinkDir := filepath.Join(dataDir, "escape")
+	if err := os.Symlink(secretDir, symlinkDir); err != nil {
+		t.Skipf("symlinks not supported: %v", err)
+	}
+
+	// Path appears inside dataDir but resolves outside.
+	escapePath := filepath.Join(symlinkDir, "stolen.claims.db")
+	err := ValidateDBPath(escapePath, dataDir)
+	if err == nil {
+		t.Fatal("expected error for symlink escape, got nil")
+	}
+	if !strings.Contains(err.Error(), "outside data directory") {
+		t.Errorf("expected 'outside data directory' error, got: %v", err)
+	}
+
+	// Valid symlink within dataDir should be accepted.
+	innerDir := filepath.Join(dataDir, "inner")
+	if err := os.MkdirAll(innerDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	innerDB := filepath.Join(innerDir, "ok.claims.db")
+	if err := os.WriteFile(innerDB, []byte("ok"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	innerLink := filepath.Join(dataDir, "link-to-inner")
+	if err := os.Symlink(innerDir, innerLink); err != nil {
+		t.Fatal(err)
+	}
+	linkedDB := filepath.Join(innerLink, "ok.claims.db")
+	if err := ValidateDBPath(linkedDB, dataDir); err != nil {
+		t.Fatalf("expected valid symlink within dataDir to pass, got: %v", err)
+	}
+}
+
+func TestValidateDBPath_DataDirSymlink(t *testing.T) {
+	tmpDir := t.TempDir()
+	realDataDir := filepath.Join(tmpDir, "real-data")
+	if err := os.MkdirAll(realDataDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	dbFile := filepath.Join(realDataDir, "repo.claims.db")
+	if err := os.WriteFile(dbFile, []byte("db"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	symlinkDataDir := filepath.Join(tmpDir, "link-data")
+	if err := os.Symlink(realDataDir, symlinkDataDir); err != nil {
+		t.Skipf("symlinks not supported: %v", err)
+	}
+
+	// dbPath uses real path, dataDir uses symlink.
+	if err := ValidateDBPath(dbFile, symlinkDataDir); err != nil {
+		t.Fatalf("expected path to pass when dataDir is symlinked, got: %v", err)
+	}
+
+	// dbPath uses symlink, dataDir uses real path.
+	linkedDB := filepath.Join(symlinkDataDir, "repo.claims.db")
+	if err := ValidateDBPath(linkedDB, realDataDir); err != nil {
+		t.Fatalf("expected path to pass when dbPath goes through symlinked dataDir, got: %v", err)
 	}
 }

@@ -53,6 +53,10 @@ type TribalCorrection struct {
 	CreatedAt string
 }
 
+// MaxBodyBytes is the maximum allowed length (in bytes) for user-supplied
+// tribal fact body text. Enforced at both CLI and MCP layers.
+const MaxBodyBytes = 4096
+
 // validFactKinds is the set of allowed tribal fact kinds.
 var validFactKinds = map[string]bool{
 	"ownership":   true,

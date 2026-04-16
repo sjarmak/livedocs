@@ -3,7 +3,9 @@ package mcpserver
 import (
 	"context"
 	"encoding/json"
+	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/live-docs/live_docs/db"
@@ -412,6 +414,113 @@ func TestTribalProposeFact_EvidenceMissingFields(t *testing.T) {
 				t.Errorf("expected error for %s", tc.name)
 			}
 		})
+	}
+}
+
+func TestTribalProposeFact_UnknownRepoRejected(t *testing.T) {
+	pool, _ := setupProposeTestDB(t)
+	handler := tribalProposeFactHandler(pool)
+
+	req := &tribalFakeRequest{args: map[string]any{
+		"symbol":          "MyHandler",
+		"repo":            "nonexistent-repo",
+		"kind":            "rationale",
+		"body":            "some body",
+		"source_quote":    "some quote",
+		"evidence":        validEvidence(),
+		"writer_identity": "alice@example.com",
+	}}
+
+	result, err := handler(context.Background(), req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !result.IsError() {
+		t.Fatal("expected error result for unknown repo")
+	}
+	if got := result.Text(); !strings.Contains(got, "not found") {
+		t.Errorf("error message should mention 'not found', got: %s", got)
+	}
+}
+
+func TestTribalProposeFact_UnknownRepoNoFileCreated(t *testing.T) {
+	pool, _ := setupProposeTestDB(t)
+	handler := tribalProposeFactHandler(pool)
+
+	req := &tribalFakeRequest{args: map[string]any{
+		"symbol":          "MyHandler",
+		"repo":            "attacker-repo",
+		"kind":            "rationale",
+		"body":            "some body",
+		"source_quote":    "some quote",
+		"evidence":        validEvidence(),
+		"writer_identity": "alice@example.com",
+	}}
+
+	handler(context.Background(), req)
+
+	dbPath := filepath.Join(pool.DataDir(), "attacker-repo.claims.db")
+	if _, err := os.Stat(dbPath); err == nil {
+		t.Fatal("claims.db file should NOT have been created for unknown repo")
+	}
+}
+
+func TestTribalProposeFact_KnownRepoAccepted(t *testing.T) {
+	pool, _ := setupProposeTestDB(t)
+	handler := tribalProposeFactHandler(pool)
+
+	req := &tribalFakeRequest{args: map[string]any{
+		"symbol":          "MyHandler",
+		"repo":            "test-repo",
+		"kind":            "rationale",
+		"body":            "known repo fact",
+		"source_quote":    "// quote",
+		"evidence":        validEvidence(),
+		"writer_identity": "alice@example.com",
+	}}
+
+	result, err := handler(context.Background(), req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.IsError() {
+		t.Fatalf("known repo should be accepted, got error: %s", result.Text())
+	}
+
+	var resp proposeFactResponse
+	if err := json.Unmarshal([]byte(result.Text()), &resp); err != nil {
+		t.Fatalf("unmarshal response: %v", err)
+	}
+	if resp.FactID <= 0 {
+		t.Errorf("expected positive fact_id, got %d", resp.FactID)
+	}
+}
+
+func TestTribalProposeFact_BodyTooLong(t *testing.T) {
+	pool, _ := setupProposeTestDB(t)
+	handler := tribalProposeFactHandler(pool)
+
+	longBody := strings.Repeat("x", db.MaxBodyBytes+1)
+
+	req := &tribalFakeRequest{args: map[string]any{
+		"symbol":          "MyHandler",
+		"repo":            "test-repo",
+		"kind":            "rationale",
+		"body":            longBody,
+		"source_quote":    "some quote",
+		"evidence":        validEvidence(),
+		"writer_identity": "alice@example.com",
+	}}
+
+	result, err := handler(context.Background(), req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !result.IsError() {
+		t.Fatal("expected error result for oversized body")
+	}
+	if got := result.Text(); !strings.Contains(got, "exceeds maximum") {
+		t.Errorf("error message should mention 'exceeds maximum', got: %s", got)
 	}
 }
 

@@ -143,10 +143,33 @@ func tribalProposeFactHandler(pool *DBPool) ToolHandler {
 			return NewErrorResultf("fact_id is required for action %q", action), nil
 		}
 
+		// --- Validate body length ---
+		if len(body) > db.MaxBodyBytes {
+			return NewErrorResultf("body length (%d bytes) exceeds maximum allowed (%d bytes)", len(body), db.MaxBodyBytes), nil
+		}
+
 		// --- Determine status ---
 		status := "quarantined"
 		if writerIdentity != "" {
 			status = "active"
+		}
+
+		// --- Verify repo exists in the data directory ---
+		// Reject unknown repos to prevent unauthenticated callers from creating
+		// arbitrary .claims.db files via pool.Open.
+		manifest, err := pool.Manifest()
+		if err != nil {
+			return NewErrorResultf("list repos: %v", err), nil
+		}
+		repoFound := false
+		for _, r := range manifest {
+			if r == repo {
+				repoFound = true
+				break
+			}
+		}
+		if !repoFound {
+			return NewErrorResultf("repo %q not found in data directory", repo), nil
 		}
 
 		// --- Open repo DB ---

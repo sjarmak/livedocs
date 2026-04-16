@@ -3,9 +3,11 @@ package main
 import (
 	"crypto/sha256"
 	"fmt"
+	"os"
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -14,7 +16,11 @@ import (
 
 // ValidateDBPath checks that the given path is a valid claims database path.
 // It requires the .claims.db suffix and, if dataDir is non-empty, ensures the
-// cleaned path is rooted under dataDir to prevent directory traversal.
+// path is rooted under dataDir to prevent directory traversal.
+//
+// Both dataDir and dbPath are resolved via filepath.EvalSymlinks (falling back
+// to filepath.Abs when the path does not yet exist) so that symlinks pointing
+// outside the data directory are correctly rejected.
 func ValidateDBPath(dbPath, dataDir string) error {
 	if dbPath == "" {
 		return fmt.Errorf("db path must not be empty")
@@ -25,24 +31,41 @@ func ValidateDBPath(dbPath, dataDir string) error {
 	}
 
 	if dataDir != "" {
-		absData, err := filepath.Abs(dataDir)
+		absData, err := resolveReal(dataDir)
 		if err != nil {
 			return fmt.Errorf("resolve data dir: %w", err)
 		}
-		absDB, err := filepath.Abs(dbPath)
+		absDB, err := resolveReal(dbPath)
 		if err != nil {
 			return fmt.Errorf("resolve db path: %w", err)
 		}
-		// Clean both paths to resolve any ".." components. filepath.Abs
-		// already calls Clean, but does not resolve symlinks. For the
-		// data-dir constraint the cleaned absolute paths are sufficient
-		// because we are guarding against user-supplied traversal, not
-		// filesystem-level symlink races (the DB layer opens the file).
 		if !strings.HasPrefix(absDB, absData+string(filepath.Separator)) && absDB != absData {
 			return fmt.Errorf("db path %q is outside data directory %q", dbPath, dataDir)
 		}
 	}
 
+	return nil
+}
+
+// resolveReal returns the real, absolute path for p by calling
+// filepath.EvalSymlinks. If p does not exist yet, it falls back to
+// filepath.Abs so that ValidateDBPath works for paths that will be created.
+func resolveReal(p string) (string, error) {
+	resolved, err := filepath.EvalSymlinks(p)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return filepath.Abs(p)
+		}
+		return "", err
+	}
+	return filepath.Abs(resolved)
+}
+
+// validateBodyLength returns an error if body exceeds db.MaxBodyBytes.
+func validateBodyLength(body string) error {
+	if len(body) > db.MaxBodyBytes {
+		return fmt.Errorf("--body length (%d bytes) exceeds maximum allowed (%d bytes)", len(body), db.MaxBodyBytes)
+	}
 	return nil
 }
 
@@ -156,6 +179,9 @@ var tribalCorrectCmd = &cobra.Command{
 		if err := ValidateDBPath(dbPath, ""); err != nil {
 			return err
 		}
+		if err := validateBodyLength(body); err != nil {
+			return err
+		}
 
 		cdb, err := db.OpenClaimsDB(dbPath)
 		if err != nil {
@@ -206,6 +232,9 @@ var tribalSupersedeCmd = &cobra.Command{
 		reason, _ := cmd.Flags().GetString("reason")
 
 		if err := ValidateDBPath(dbPath, ""); err != nil {
+			return err
+		}
+		if err := validateBodyLength(body); err != nil {
 			return err
 		}
 
@@ -329,4 +358,85 @@ func init() {
 	_ = tribalDeleteCmd.MarkFlagRequired("fact-id")
 	_ = tribalDeleteCmd.MarkFlagRequired("reason")
 	tribalCmd.AddCommand(tribalDeleteCmd)
+
+	// reverify flags
+	tribalReverifyCmd.Flags().Int("sample", 20, "maximum number of facts to reverify")
+	tribalReverifyCmd.Flags().String("max-age", "30d", "minimum age for a fact to be eligible (e.g. 30d, 720h)")
+	tribalReverifyCmd.Flags().Int("budget", 100, "maximum LLM calls allowed")
+	tribalReverifyCmd.Flags().Bool("dry-run", false, "show eligible facts without reverifying")
+	tribalCmd.AddCommand(tribalReverifyCmd)
+}
+
+var tribalReverifyCmd = &cobra.Command{
+	Use:   "reverify <db-path>",
+	Short: "Reverify aged LLM-extracted tribal facts via semantic check",
+	Long: `Samples active LLM-extracted facts older than --max-age, runs one semantic
+verification call per fact, and applies the verdict:
+  accept    → update last_verified to now
+  downgrade → multiply confidence by 0.6
+  reject    → set status to 'stale'
+
+Budget-tracked: stops after --budget LLM calls even if more facts remain.`,
+	Args: cobra.ExactArgs(1),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		dbPath := args[0]
+
+		if err := ValidateDBPath(dbPath, ""); err != nil {
+			return err
+		}
+
+		sampleSize, _ := cmd.Flags().GetInt("sample")
+		maxAgeStr, _ := cmd.Flags().GetString("max-age")
+		budget, _ := cmd.Flags().GetInt("budget")
+		dryRun, _ := cmd.Flags().GetBool("dry-run")
+
+		if sampleSize <= 0 {
+			return fmt.Errorf("--sample must be > 0, got %d", sampleSize)
+		}
+
+		maxAge, err := parseDuration(maxAgeStr)
+		if err != nil {
+			return fmt.Errorf("invalid --max-age %q: %w", maxAgeStr, err)
+		}
+
+		claimsDB, err := db.OpenClaimsDB(dbPath)
+		if err != nil {
+			return fmt.Errorf("open claims db: %w", err)
+		}
+		defer claimsDB.Close()
+
+		out := cmd.OutOrStdout()
+
+		if dryRun {
+			cutoff := time.Now().Add(-maxAge).UTC().Format(time.RFC3339)
+			facts, err := claimsDB.GetActiveLLMFactsOlderThan(cutoff)
+			if err != nil {
+				return fmt.Errorf("query facts: %w", err)
+			}
+			if sampleSize < len(facts) {
+				facts = facts[:sampleSize]
+			}
+			fmt.Fprintf(out, "Dry-run: would reverify %d facts (sample=%d, max-age=%s, budget=%d)\n",
+				len(facts), sampleSize, maxAgeStr, budget)
+			return nil
+		}
+
+		return fmt.Errorf("semantic verifier not yet wired; use --dry-run to preview eligible facts")
+	},
+}
+
+// parseDuration parses a duration string that supports "d" suffix for days
+// in addition to Go's standard time.ParseDuration suffixes.
+func parseDuration(s string) (time.Duration, error) {
+	if len(s) > 1 && s[len(s)-1] == 'd' {
+		var days int
+		if _, err := fmt.Sscanf(s, "%dd", &days); err != nil {
+			return 0, fmt.Errorf("parse days: %w", err)
+		}
+		if days <= 0 {
+			return 0, fmt.Errorf("days must be > 0, got %d", days)
+		}
+		return time.Duration(days) * 24 * time.Hour, nil
+	}
+	return time.ParseDuration(s)
 }
