@@ -55,14 +55,11 @@ jobs:
             livedocs-claims-${{ runner.os }}-
 
       - name: Extract claims
+        if: steps.db-cache.outputs.cache-hit != 'true'
         run: |
           set -euo pipefail
-          if [ -f .livedocs/claims.db ]; then
-            echo "claims.db restored from cache — skipping extraction"
-          else
-            mkdir -p .livedocs
-            livedocs extract . -o .livedocs/claims.db
-          fi
+          mkdir -p .livedocs
+          livedocs extract . -o .livedocs/claims.db
 
       # -- publish claims.db for agent consumption ----------------------------
       - name: Upload claims.db for agent consumption
