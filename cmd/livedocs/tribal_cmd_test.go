@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/spf13/pflag"
 	_ "modernc.org/sqlite"
 )
 
@@ -267,5 +268,336 @@ func main() {
 	}
 	if !strings.Contains(statusOut, "ownership") {
 		t.Errorf("tribal status missing 'ownership' kind, got: %q", statusOut)
+	}
+}
+
+// createTribalTestDB creates a temp claims DB with tribal schema and a single
+// active fact (id=1). Returns the DB path. The fact has subject_id=1,
+// kind='invariant', body='original body'.
+func createTribalTestDB(t *testing.T) string {
+	t.Helper()
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "test.claims.db")
+
+	sqlDB, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer sqlDB.Close()
+
+	_, err = sqlDB.Exec(`
+		CREATE TABLE IF NOT EXISTS symbols (
+			id INTEGER PRIMARY KEY, repo TEXT, import_path TEXT,
+			symbol_name TEXT, language TEXT, kind TEXT, visibility TEXT,
+			display_name TEXT, scip_symbol TEXT
+		);
+		INSERT INTO symbols (id, repo, import_path, symbol_name, language, kind, visibility)
+		VALUES (1, 'test-repo', 'pkg/foo', 'Foo', 'go', 'function', 'public');
+
+		CREATE TABLE IF NOT EXISTS claims (
+			id INTEGER PRIMARY KEY, subject_id INTEGER, predicate TEXT,
+			object_text TEXT, object_id INTEGER, source_file TEXT,
+			source_line INTEGER, confidence REAL, claim_tier TEXT,
+			extractor TEXT, extractor_version TEXT, last_verified TEXT
+		);
+
+		CREATE TABLE IF NOT EXISTS tribal_facts (
+			id INTEGER PRIMARY KEY, subject_id INTEGER NOT NULL,
+			kind TEXT NOT NULL CHECK(kind IN ('ownership','rationale','invariant','quirk','todo','deprecation')),
+			body TEXT NOT NULL, source_quote TEXT NOT NULL,
+			confidence REAL NOT NULL, corroboration INTEGER NOT NULL DEFAULT 1,
+			extractor TEXT NOT NULL, extractor_version TEXT NOT NULL, model TEXT,
+			staleness_hash TEXT NOT NULL,
+			status TEXT NOT NULL DEFAULT 'active' CHECK(status IN ('active','stale','quarantined','superseded','deleted')),
+			created_at TEXT NOT NULL, last_verified TEXT NOT NULL,
+			cluster_key TEXT NOT NULL DEFAULT ''
+		);
+		CREATE TABLE IF NOT EXISTS tribal_evidence (
+			id INTEGER PRIMARY KEY, fact_id INTEGER NOT NULL,
+			source_type TEXT NOT NULL CHECK(source_type IN ('blame','commit_msg','pr_comment','codeowners','inline_marker','runbook','correction')),
+			source_ref TEXT NOT NULL, author TEXT, authored_at TEXT,
+			content_hash TEXT NOT NULL
+		);
+		CREATE TABLE IF NOT EXISTS tribal_corrections (
+			id INTEGER PRIMARY KEY, fact_id INTEGER NOT NULL,
+			action TEXT NOT NULL CHECK(action IN ('correct','delete','supersede')),
+			new_body TEXT, reason TEXT NOT NULL, actor TEXT NOT NULL,
+			created_at TEXT NOT NULL
+		);
+
+		CREATE TABLE IF NOT EXISTS source_files (
+			id INTEGER PRIMARY KEY, repo TEXT NOT NULL, relative_path TEXT NOT NULL,
+			content_hash TEXT NOT NULL, extractor_version TEXT NOT NULL,
+			extracted_at TEXT NOT NULL, last_pr_id_set BLOB, pr_miner_version TEXT DEFAULT ''
+		);
+
+		INSERT INTO tribal_facts (id, subject_id, kind, body, source_quote,
+			confidence, corroboration, extractor, extractor_version, staleness_hash,
+			status, created_at, last_verified, cluster_key)
+		VALUES (1, 1, 'invariant', 'original body', 'quote here',
+			1.0, 1, 'test', 'v1', 'hash123',
+			'active', '2025-01-01T00:00:00Z', '2025-01-01T00:00:00Z', '');
+
+		INSERT INTO tribal_evidence (id, fact_id, source_type, source_ref, content_hash)
+		VALUES (1, 1, 'correction', 'test-ref', 'abc123');
+	`)
+	if err != nil {
+		t.Fatalf("create test schema: %v", err)
+	}
+	return dbPath
+}
+
+func TestTribalCorrectionCLICorrect(t *testing.T) {
+	resetExtractFlags()
+	dbPath := createTribalTestDB(t)
+
+	buf := new(bytes.Buffer)
+	rootCmd.SetOut(buf)
+	rootCmd.SetErr(buf)
+	rootCmd.SetArgs([]string{
+		"tribal", "correct",
+		"--db", dbPath,
+		"--fact-id", "1",
+		"--body", "corrected body text",
+		"--reason", "the original was wrong",
+	})
+	if err := rootCmd.Execute(); err != nil {
+		t.Fatalf("tribal correct failed: %v", err)
+	}
+
+	out := buf.String()
+	if !strings.Contains(out, "Corrected fact 1") {
+		t.Errorf("expected success message, got: %q", out)
+	}
+
+	// Verify the correction row was inserted.
+	sqlDB, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer sqlDB.Close()
+
+	var action, newBody, reason string
+	err = sqlDB.QueryRow("SELECT action, new_body, reason FROM tribal_corrections WHERE fact_id = 1").
+		Scan(&action, &newBody, &reason)
+	if err != nil {
+		t.Fatalf("query correction: %v", err)
+	}
+	if action != "correct" {
+		t.Errorf("expected action 'correct', got %q", action)
+	}
+	if newBody != "corrected body text" {
+		t.Errorf("expected new_body 'corrected body text', got %q", newBody)
+	}
+
+	// Verify the new replacement fact was created.
+	var newFactCount int
+	err = sqlDB.QueryRow("SELECT COUNT(*) FROM tribal_facts WHERE body = 'corrected body text'").
+		Scan(&newFactCount)
+	if err != nil {
+		t.Fatalf("query new fact: %v", err)
+	}
+	if newFactCount != 1 {
+		t.Errorf("expected 1 replacement fact, got %d", newFactCount)
+	}
+}
+
+func TestTribalCorrectionCLISupersede(t *testing.T) {
+	resetExtractFlags()
+	dbPath := createTribalTestDB(t)
+
+	buf := new(bytes.Buffer)
+	rootCmd.SetOut(buf)
+	rootCmd.SetErr(buf)
+	rootCmd.SetArgs([]string{
+		"tribal", "supersede",
+		"--db", dbPath,
+		"--fact-id", "1",
+		"--body", "superseded body text",
+		"--reason", "better understanding now",
+	})
+	if err := rootCmd.Execute(); err != nil {
+		t.Fatalf("tribal supersede failed: %v", err)
+	}
+
+	out := buf.String()
+	if !strings.Contains(out, "Superseded fact 1") {
+		t.Errorf("expected success message, got: %q", out)
+	}
+
+	// Verify the original fact status is 'superseded'.
+	sqlDB, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer sqlDB.Close()
+
+	var status string
+	err = sqlDB.QueryRow("SELECT status FROM tribal_facts WHERE id = 1").Scan(&status)
+	if err != nil {
+		t.Fatalf("query fact status: %v", err)
+	}
+	if status != "superseded" {
+		t.Errorf("expected status 'superseded', got %q", status)
+	}
+
+	// Verify the correction row was inserted.
+	var action string
+	err = sqlDB.QueryRow("SELECT action FROM tribal_corrections WHERE fact_id = 1").Scan(&action)
+	if err != nil {
+		t.Fatalf("query correction: %v", err)
+	}
+	if action != "supersede" {
+		t.Errorf("expected action 'supersede', got %q", action)
+	}
+
+	// Verify replacement fact exists.
+	var newFactCount int
+	err = sqlDB.QueryRow("SELECT COUNT(*) FROM tribal_facts WHERE body = 'superseded body text'").
+		Scan(&newFactCount)
+	if err != nil {
+		t.Fatalf("query new fact: %v", err)
+	}
+	if newFactCount != 1 {
+		t.Errorf("expected 1 replacement fact, got %d", newFactCount)
+	}
+}
+
+func TestTribalCorrectionCLIDelete(t *testing.T) {
+	resetExtractFlags()
+	dbPath := createTribalTestDB(t)
+
+	buf := new(bytes.Buffer)
+	rootCmd.SetOut(buf)
+	rootCmd.SetErr(buf)
+	rootCmd.SetArgs([]string{
+		"tribal", "delete",
+		"--db", dbPath,
+		"--fact-id", "1",
+		"--reason", "no longer relevant",
+	})
+	if err := rootCmd.Execute(); err != nil {
+		t.Fatalf("tribal delete failed: %v", err)
+	}
+
+	out := buf.String()
+	if !strings.Contains(out, "Deleted fact 1") {
+		t.Errorf("expected success message, got: %q", out)
+	}
+
+	// Verify the fact status is 'deleted'.
+	sqlDB, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer sqlDB.Close()
+
+	var status string
+	err = sqlDB.QueryRow("SELECT status FROM tribal_facts WHERE id = 1").Scan(&status)
+	if err != nil {
+		t.Fatalf("query fact status: %v", err)
+	}
+	if status != "deleted" {
+		t.Errorf("expected status 'deleted', got %q", status)
+	}
+
+	// Verify the correction row was inserted.
+	var action, reason string
+	err = sqlDB.QueryRow("SELECT action, reason FROM tribal_corrections WHERE fact_id = 1").
+		Scan(&action, &reason)
+	if err != nil {
+		t.Fatalf("query correction: %v", err)
+	}
+	if action != "delete" {
+		t.Errorf("expected action 'delete', got %q", action)
+	}
+	if reason != "no longer relevant" {
+		t.Errorf("expected reason 'no longer relevant', got %q", reason)
+	}
+
+	// Verify NO replacement fact was created (delete does not create a new fact).
+	var factCount int
+	err = sqlDB.QueryRow("SELECT COUNT(*) FROM tribal_facts").Scan(&factCount)
+	if err != nil {
+		t.Fatalf("query fact count: %v", err)
+	}
+	if factCount != 1 {
+		t.Errorf("expected exactly 1 fact (the original, now deleted), got %d", factCount)
+	}
+}
+
+// resetTribalCorrectionFlags resets all flag values on the tribal correction
+// subcommands so tests can be run in sequence without leaking state.
+func resetTribalCorrectionFlags() {
+	for _, flags := range []*pflag.FlagSet{tribalCorrectCmd.Flags(), tribalSupersedeCmd.Flags(), tribalDeleteCmd.Flags()} {
+		flags.VisitAll(func(f *pflag.Flag) {
+			f.Changed = false
+			_ = f.Value.Set(f.DefValue)
+		})
+	}
+}
+
+func TestTribalCorrectionCLIMissingFlags(t *testing.T) {
+	resetExtractFlags()
+
+	tests := []struct {
+		name string
+		args []string
+		want string
+	}{
+		{
+			name: "correct missing body",
+			args: []string{"tribal", "correct", "--db", "/tmp/x.db", "--fact-id", "1", "--reason", "r"},
+			want: "required flag",
+		},
+		{
+			name: "correct missing reason",
+			args: []string{"tribal", "correct", "--db", "/tmp/x.db", "--fact-id", "1", "--body", "b"},
+			want: "required flag",
+		},
+		{
+			name: "delete missing reason",
+			args: []string{"tribal", "delete", "--db", "/tmp/x.db", "--fact-id", "1"},
+			want: "required flag",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			resetTribalCorrectionFlags()
+			buf := new(bytes.Buffer)
+			rootCmd.SetOut(buf)
+			rootCmd.SetErr(buf)
+			rootCmd.SetArgs(tc.args)
+			err := rootCmd.Execute()
+			if err == nil {
+				t.Fatalf("expected error for %v", tc.args)
+			}
+			if !strings.Contains(err.Error(), tc.want) && !strings.Contains(buf.String(), tc.want) {
+				t.Errorf("expected error containing %q, got: %v / %s", tc.want, err, buf.String())
+			}
+		})
+	}
+}
+
+func TestTribalCorrectionCLIFactNotFound(t *testing.T) {
+	resetExtractFlags()
+	dbPath := createTribalTestDB(t)
+
+	buf := new(bytes.Buffer)
+	rootCmd.SetOut(buf)
+	rootCmd.SetErr(buf)
+	rootCmd.SetArgs([]string{
+		"tribal", "delete",
+		"--db", dbPath,
+		"--fact-id", "999",
+		"--reason", "does not exist",
+	})
+	err := rootCmd.Execute()
+	if err == nil {
+		t.Fatal("expected error for non-existent fact")
+	}
+	if !strings.Contains(err.Error(), "not found") {
+		t.Errorf("expected 'not found' in error, got: %v", err)
 	}
 }

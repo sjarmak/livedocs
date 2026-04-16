@@ -236,6 +236,22 @@ func (c *ClaimsDB) InsertTribalFact(fact TribalFact, evidence []TribalEvidence) 
 	return factID, nil
 }
 
+// GetTribalFactByID returns a single tribal fact by its ID, with evidence populated.
+// Returns an error if the fact is not found.
+func (c *ClaimsDB) GetTribalFactByID(factID int64) (TribalFact, error) {
+	facts, err := c.queryTribalFacts("id = ?", factID)
+	if err != nil {
+		return TribalFact{}, fmt.Errorf("get tribal fact by id: %w", err)
+	}
+	if len(facts) == 0 {
+		return TribalFact{}, fmt.Errorf("tribal fact %d not found", factID)
+	}
+	if err := c.populateEvidence(facts); err != nil {
+		return TribalFact{}, err
+	}
+	return facts[0], nil
+}
+
 // GetTribalFactsBySubject returns all tribal facts for a given symbol ID,
 // with their evidence rows populated.
 func (c *ClaimsDB) GetTribalFactsBySubject(subjectID int64) ([]TribalFact, error) {
