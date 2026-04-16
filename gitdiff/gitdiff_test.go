@@ -72,7 +72,7 @@ func TestParseNameStatus(t *testing.T) {
 				t.Fatalf("got %d changes, want %d", len(got), len(tt.want))
 			}
 			for i := range tt.want {
-				if got[i] != tt.want[i] {
+				if got[i].Status != tt.want[i].Status || got[i].Path != tt.want[i].Path || got[i].OldPath != tt.want[i].OldPath {
 					t.Errorf("change[%d]: got %+v, want %+v", i, got[i], tt.want[i])
 				}
 			}
@@ -316,6 +316,233 @@ func TestDiffBetween_FromEmptyTree(t *testing.T) {
 	}
 	if !byPath["foo.go"] || !byPath["bar.go"] {
 		t.Errorf("expected foo.go and bar.go in changes, got %+v", changes)
+	}
+}
+
+func TestParseUnifiedDiff(t *testing.T) {
+	tests := []struct {
+		name    string
+		input   string
+		want    []FileChange
+		wantErr bool
+	}{
+		{
+			name:  "empty input",
+			input: "",
+			want:  nil,
+		},
+		{
+			name: "single modified file with one hunk",
+			input: `diff --git a/handler.go b/handler.go
+index abc1234..def5678 100644
+--- a/handler.go
++++ b/handler.go
+@@ -10,6 +10,8 @@ func handler() {
+ 	existing line
++	new line 1
++	new line 2
+ 	another existing
+`,
+			want: []FileChange{
+				{
+					Status: StatusModified,
+					Path:   "handler.go",
+					Hunks: []Hunk{
+						{OldStart: 10, OldCount: 6, NewStart: 10, NewCount: 8},
+					},
+				},
+			},
+		},
+		{
+			name: "modified file with multiple hunks",
+			input: `diff --git a/server.go b/server.go
+index aaa..bbb 100644
+--- a/server.go
++++ b/server.go
+@@ -5,3 +5,4 @@ package server
+ line
++added
+ line
+@@ -50,7 +51,6 @@ func foo() {
+ line
+-removed
+ line
+`,
+			want: []FileChange{
+				{
+					Status: StatusModified,
+					Path:   "server.go",
+					Hunks: []Hunk{
+						{OldStart: 5, OldCount: 3, NewStart: 5, NewCount: 4},
+						{OldStart: 50, OldCount: 7, NewStart: 51, NewCount: 6},
+					},
+				},
+			},
+		},
+		{
+			name: "added file",
+			input: `diff --git a/new.go b/new.go
+new file mode 100644
+index 0000000..abc1234
+--- /dev/null
++++ b/new.go
+@@ -0,0 +1,10 @@
++package new
++
++func hello() {}
+`,
+			want: []FileChange{
+				{
+					Status: StatusAdded,
+					Path:   "new.go",
+					Hunks: []Hunk{
+						{OldStart: 0, OldCount: 0, NewStart: 1, NewCount: 10},
+					},
+				},
+			},
+		},
+		{
+			name: "deleted file",
+			input: `diff --git a/old.go b/old.go
+deleted file mode 100644
+index abc1234..0000000
+--- a/old.go
++++ /dev/null
+@@ -1,5 +0,0 @@
+-package old
+-
+-func bye() {}
+`,
+			want: []FileChange{
+				{
+					Status: StatusDeleted,
+					Path:   "old.go",
+					Hunks: []Hunk{
+						{OldStart: 1, OldCount: 5, NewStart: 0, NewCount: 0},
+					},
+				},
+			},
+		},
+		{
+			name: "renamed file",
+			input: `diff --git a/old_name.go b/new_name.go
+similarity index 95%
+rename from old_name.go
+rename to new_name.go
+index abc..def 100644
+--- a/old_name.go
++++ b/new_name.go
+@@ -10,3 +10,4 @@ func foo() {
+ line
++added
+ line
+`,
+			want: []FileChange{
+				{
+					Status:  StatusRenamed,
+					Path:    "new_name.go",
+					OldPath: "old_name.go",
+					Hunks: []Hunk{
+						{OldStart: 10, OldCount: 3, NewStart: 10, NewCount: 4},
+					},
+				},
+			},
+		},
+		{
+			name: "multiple files",
+			input: `diff --git a/a.go b/a.go
+index abc..def 100644
+--- a/a.go
++++ b/a.go
+@@ -1,3 +1,4 @@
+ line
++new
+ line
+diff --git a/b.go b/b.go
+index ghi..jkl 100644
+--- a/b.go
++++ b/b.go
+@@ -20,5 +20,5 @@ func bar() {
+ line
+-old
++new
+ line
+`,
+			want: []FileChange{
+				{
+					Status: StatusModified,
+					Path:   "a.go",
+					Hunks: []Hunk{
+						{OldStart: 1, OldCount: 3, NewStart: 1, NewCount: 4},
+					},
+				},
+				{
+					Status: StatusModified,
+					Path:   "b.go",
+					Hunks: []Hunk{
+						{OldStart: 20, OldCount: 5, NewStart: 20, NewCount: 5},
+					},
+				},
+			},
+		},
+		{
+			name: "hunk header without function context",
+			input: `diff --git a/simple.go b/simple.go
+index abc..def 100644
+--- a/simple.go
++++ b/simple.go
+@@ -3,4 +3,5 @@
+ line
++new
+ line
+`,
+			want: []FileChange{
+				{
+					Status: StatusModified,
+					Path:   "simple.go",
+					Hunks: []Hunk{
+						{OldStart: 3, OldCount: 4, NewStart: 3, NewCount: 5},
+					},
+				},
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := ParseUnifiedDiff(tt.input)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatal("expected error, got nil")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if len(got) != len(tt.want) {
+				t.Fatalf("got %d file changes, want %d\ngot: %+v", len(got), len(tt.want), got)
+			}
+			for i := range tt.want {
+				if got[i].Status != tt.want[i].Status {
+					t.Errorf("change[%d].Status = %q, want %q", i, got[i].Status, tt.want[i].Status)
+				}
+				if got[i].Path != tt.want[i].Path {
+					t.Errorf("change[%d].Path = %q, want %q", i, got[i].Path, tt.want[i].Path)
+				}
+				if got[i].OldPath != tt.want[i].OldPath {
+					t.Errorf("change[%d].OldPath = %q, want %q", i, got[i].OldPath, tt.want[i].OldPath)
+				}
+				if len(got[i].Hunks) != len(tt.want[i].Hunks) {
+					t.Fatalf("change[%d]: got %d hunks, want %d\ngot: %+v", i, len(got[i].Hunks), len(tt.want[i].Hunks), got[i].Hunks)
+				}
+				for j := range tt.want[i].Hunks {
+					if got[i].Hunks[j] != tt.want[i].Hunks[j] {
+						t.Errorf("change[%d].Hunks[%d] = %+v, want %+v", i, j, got[i].Hunks[j], tt.want[i].Hunks[j])
+					}
+				}
+			}
+		})
 	}
 }
 

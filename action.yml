@@ -64,7 +64,7 @@ runs:
         GH_TOKEN: ${{ inputs.github-token }}
       run: |
         if [ "$INPUT_VERSION" = "latest" ]; then
-          VERSION=$(gh api repos/live-docs/live_docs/releases/latest --jq '.tag_name' 2>/dev/null || echo "")
+          VERSION=$(gh api repos/sjarmak/livedocs/releases/latest --jq '.tag_name' 2>/dev/null || echo "")
           if [ -z "$VERSION" ]; then
             echo "::error::Failed to determine latest livedocs release version"
             exit 1
@@ -114,7 +114,7 @@ runs:
         echo "Downloading $ARCHIVE from release $VERSION"
 
         gh release download "$VERSION" \
-          --repo live-docs/live_docs \
+          --repo sjarmak/livedocs \
           --pattern "$ARCHIVE" \
           --dir /tmp
 

@@ -13,10 +13,11 @@ import (
 )
 
 var (
-	prbotDiffFile string
-	prbotDBPath   string
-	prbotRadius   int
-	prbotFormat   string
+	prbotDiffFile   string
+	prbotDBPath     string
+	prbotRadius     int
+	prbotFormat     string
+	prbotDiffFormat string
 )
 
 var prbotCmd = &cobra.Command{
@@ -32,7 +33,7 @@ a claims database path. The command prints the PR comment body to stdout.
 As a GitHub App webhook handler, this logic is invoked automatically
 on pull_request events.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		changes, err := loadChanges(prbotDiffFile)
+		changes, err := loadChanges(prbotDiffFile, prbotDiffFormat)
 		if err != nil {
 			return fmt.Errorf("load diff: %w", err)
 		}
@@ -63,20 +64,28 @@ on pull_request events.`,
 }
 
 func init() {
-	prbotCmd.Flags().StringVar(&prbotDiffFile, "diff-file", "", "path to git diff --name-status output file (required)")
+	prbotCmd.Flags().StringVar(&prbotDiffFile, "diff-file", "", "path to git diff output file (required)")
 	prbotCmd.Flags().StringVar(&prbotDBPath, "db", ".livedocs/claims.db", "path to claims database")
 	prbotCmd.Flags().IntVar(&prbotRadius, "radius", 5, "line radius for anchor matching")
 	prbotCmd.Flags().StringVar(&prbotFormat, "format", "markdown", "output format: markdown or json")
+	prbotCmd.Flags().StringVar(&prbotDiffFormat, "diff-format", "name-status", "diff input format: name-status or unified")
 	_ = prbotCmd.MarkFlagRequired("diff-file")
 }
 
-// loadChanges reads a git diff --name-status file and parses it.
-func loadChanges(path string) ([]gitdiff.FileChange, error) {
+// loadChanges reads a git diff file and parses it according to the specified format.
+func loadChanges(path, format string) ([]gitdiff.FileChange, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("read diff file %s: %w", path, err)
 	}
-	return gitdiff.ParseNameStatus(string(data))
+	switch format {
+	case "unified":
+		return gitdiff.ParseUnifiedDiff(string(data))
+	case "name-status":
+		return gitdiff.ParseNameStatus(string(data))
+	default:
+		return nil, fmt.Errorf("unknown diff format %q: use \"name-status\" or \"unified\"", format)
+	}
 }
 
 // loadClaims opens the claims database and loads all claims. It also

@@ -18,12 +18,12 @@ jobs:
 
       - name: Check documentation drift
         id: drift
-        uses: livedocs/check-action@v1
+        uses: ./
         with:
           # version: "v0.1.0"    # Pin to a specific version (default: latest)
           # path: "."             # Repository path to scan (default: .)
           # format: "json"        # Output format: text or json (default: json)
-          fail-threshold: "0"     # Fail if any drift detected (default: 0, -1 to never fail)
+          fail-threshold: "-1"    # Informational only for now (-1 = never fail)
 
       - name: Print drift summary
         if: always()

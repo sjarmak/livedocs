@@ -6,6 +6,8 @@ package gitdiff
 import (
 	"fmt"
 	"os/exec"
+	"regexp"
+	"strconv"
 	"strings"
 )
 
@@ -20,11 +22,21 @@ const (
 	StatusCopied   ChangeStatus = "C"
 )
 
+// Hunk represents a single diff hunk with its line range information.
+// These are parsed from unified diff @@ headers.
+type Hunk struct {
+	OldStart int // starting line in the old file
+	OldCount int // number of lines in the old file
+	NewStart int // starting line in the new file
+	NewCount int // number of lines in the new file
+}
+
 // FileChange represents a single file change between two commits.
 type FileChange struct {
 	Status  ChangeStatus
 	Path    string // current path (destination for renames/copies)
 	OldPath string // previous path (only for renames/copies)
+	Hunks   []Hunk // line-level hunk info (populated by ParseUnifiedDiff)
 }
 
 // emptyTreeSHA is the well-known SHA of the empty git tree object. It is used
@@ -119,6 +131,135 @@ func ParseNameStatus(output string) ([]FileChange, error) {
 	}
 
 	return changes, nil
+}
+
+// hunkRe matches unified diff hunk headers: @@ -old_start[,old_count] +new_start[,new_count] @@
+var hunkRe = regexp.MustCompile(`^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@`)
+
+// ParseUnifiedDiff parses the output of git diff (unified format) into
+// FileChange values with hunk-level line information. Each file's hunks
+// contain the old and new line ranges from the @@ headers.
+func ParseUnifiedDiff(output string) ([]FileChange, error) {
+	if output == "" {
+		return nil, nil
+	}
+
+	var changes []FileChange
+	var current *FileChange
+	lines := strings.Split(output, "\n")
+
+	for i := 0; i < len(lines); i++ {
+		line := lines[i]
+
+		// New file diff starts with "diff --git a/... b/..."
+		if strings.HasPrefix(line, "diff --git ") {
+			// Finalize previous file change.
+			if current != nil {
+				changes = append(changes, *current)
+			}
+			fc, err := parseDiffHeader(line, lines, &i)
+			if err != nil {
+				return nil, err
+			}
+			current = &fc
+			continue
+		}
+
+		// Parse hunk headers.
+		if current != nil && strings.HasPrefix(line, "@@") {
+			h, err := parseHunkHeader(line)
+			if err != nil {
+				return nil, err
+			}
+			current.Hunks = append(current.Hunks, h)
+			continue
+		}
+	}
+
+	// Finalize last file.
+	if current != nil {
+		changes = append(changes, *current)
+	}
+
+	return changes, nil
+}
+
+// parseDiffHeader parses the "diff --git" line and subsequent metadata lines
+// (new file, deleted file, rename from/to, --- , +++) to determine the file
+// change status and paths. The index i is advanced past consumed metadata lines.
+func parseDiffHeader(diffLine string, lines []string, i *int) (FileChange, error) {
+	// Extract paths from "diff --git a/path b/path"
+	parts := strings.SplitN(diffLine, " ", 4)
+	if len(parts) < 4 {
+		return FileChange{}, fmt.Errorf("gitdiff: malformed diff header: %q", diffLine)
+	}
+	// b-path is after the last " b/"
+	bIdx := strings.LastIndex(diffLine, " b/")
+	if bIdx == -1 {
+		return FileChange{}, fmt.Errorf("gitdiff: cannot find b/ path in: %q", diffLine)
+	}
+	bPath := diffLine[bIdx+3:]
+
+	fc := FileChange{
+		Status: StatusModified, // default, may be overridden
+		Path:   bPath,
+	}
+
+	// Scan ahead for metadata lines before the first hunk.
+	for *i+1 < len(lines) {
+		next := lines[*i+1]
+		switch {
+		case strings.HasPrefix(next, "new file mode"):
+			fc.Status = StatusAdded
+			*i++
+		case strings.HasPrefix(next, "deleted file mode"):
+			fc.Status = StatusDeleted
+			*i++
+		case strings.HasPrefix(next, "rename from "):
+			fc.OldPath = strings.TrimPrefix(next, "rename from ")
+			fc.Status = StatusRenamed
+			*i++
+		case strings.HasPrefix(next, "rename to "):
+			fc.Path = strings.TrimPrefix(next, "rename to ")
+			*i++
+		case strings.HasPrefix(next, "similarity index"),
+			strings.HasPrefix(next, "dissimilarity index"),
+			strings.HasPrefix(next, "index "),
+			strings.HasPrefix(next, "--- "),
+			strings.HasPrefix(next, "+++ "):
+			*i++
+		default:
+			return fc, nil
+		}
+	}
+
+	return fc, nil
+}
+
+// parseHunkHeader extracts line range information from a unified diff @@ header.
+func parseHunkHeader(line string) (Hunk, error) {
+	m := hunkRe.FindStringSubmatch(line)
+	if m == nil {
+		return Hunk{}, fmt.Errorf("gitdiff: malformed hunk header: %q", line)
+	}
+
+	oldStart, _ := strconv.Atoi(m[1])
+	oldCount := 1
+	if m[2] != "" {
+		oldCount, _ = strconv.Atoi(m[2])
+	}
+	newStart, _ := strconv.Atoi(m[3])
+	newCount := 1
+	if m[4] != "" {
+		newCount, _ = strconv.Atoi(m[4])
+	}
+
+	return Hunk{
+		OldStart: oldStart,
+		OldCount: oldCount,
+		NewStart: newStart,
+		NewCount: newCount,
+	}, nil
 }
 
 // Added returns only the changes with Added status.

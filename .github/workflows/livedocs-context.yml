@@ -78,8 +78,8 @@ jobs:
         run: |
           set -euo pipefail
           git fetch --no-tags --prune --depth=50 origin "$BASE" "$HEAD" 2>/dev/null || true
-          git diff --name-status "$BASE" "$HEAD" > /tmp/pr-diff.txt
-          echo "Diff: $(wc -l </tmp/pr-diff.txt) files"
+          git diff --unified "$BASE" "$HEAD" > /tmp/pr-diff.txt
+          echo "Diff: $(wc -l </tmp/pr-diff.txt) lines"
 
       - name: Run livedocs prbot
         run: |
@@ -87,6 +87,7 @@ jobs:
           livedocs prbot \
             --db .livedocs/claims.db \
             --diff-file /tmp/pr-diff.txt \
+            --diff-format unified \
             --format markdown \
             > /tmp/prbot.md || echo "_(livedocs prbot produced no output)_" > /tmp/prbot.md
           wc -l /tmp/prbot.md

@@ -132,13 +132,23 @@ func (idx *Index) Invalidate(changes []gitdiff.FileChange) []Anchor {
 			affected = append(affected, idx.markFile(ch.Path, StatusInvalid)...)
 
 		case gitdiff.StatusModified, gitdiff.StatusAdded, gitdiff.StatusCopied:
-			affected = append(affected, idx.markFile(ch.Path, StatusStale)...)
+			if len(ch.Hunks) > 0 {
+				// Line-level: only mark anchors overlapping changed hunks.
+				affected = append(affected, idx.markHunks(ch.Path, ch.Hunks, StatusStale)...)
+			} else {
+				// File-level fallback (name-status format, no hunk data).
+				affected = append(affected, idx.markFile(ch.Path, StatusStale)...)
+			}
 
 		case gitdiff.StatusRenamed:
 			// Old path is effectively deleted from the anchor perspective,
 			// but the code still exists at the new path, so mark stale not invalid.
 			affected = append(affected, idx.markFile(ch.OldPath, StatusStale)...)
-			affected = append(affected, idx.markFile(ch.Path, StatusStale)...)
+			if len(ch.Hunks) > 0 {
+				affected = append(affected, idx.markHunks(ch.Path, ch.Hunks, StatusStale)...)
+			} else {
+				affected = append(affected, idx.markFile(ch.Path, StatusStale)...)
+			}
 		}
 	}
 
@@ -154,6 +164,39 @@ func (idx *Index) markFile(file string, status Status) []Anchor {
 		if anchors[i].Status != status {
 			anchors[i].Status = status
 			changed = append(changed, anchors[i])
+		}
+	}
+	return changed
+}
+
+// markHunks sets anchors that overlap any of the given hunks to the specified
+// status. Uses each hunk's old-file line range [OldStart, OldStart+OldCount-1]
+// to check overlap with anchor line ranges. Returns only anchors whose status
+// actually changed.
+func (idx *Index) markHunks(file string, hunks []gitdiff.Hunk, status Status) []Anchor {
+	anchors := idx.byFile[file]
+	var changed []Anchor
+	for i := range anchors {
+		if anchors[i].Status == status {
+			continue
+		}
+		for _, h := range hunks {
+			hunkEnd := h.OldStart + h.OldCount - 1
+			if h.OldCount == 0 {
+				// Pure addition (e.g. new file or insert): use new-file range.
+				hunkEnd = h.NewStart + h.NewCount - 1
+				if anchors[i].Overlaps(h.NewStart, hunkEnd) {
+					anchors[i].Status = status
+					changed = append(changed, anchors[i])
+					break
+				}
+				continue
+			}
+			if anchors[i].Overlaps(h.OldStart, hunkEnd) {
+				anchors[i].Status = status
+				changed = append(changed, anchors[i])
+				break
+			}
 		}
 	}
 	return changed

@@ -343,6 +343,129 @@ func TestIndex_Summary(t *testing.T) {
 	}
 }
 
+func TestIndex_Invalidate_LineLevel(t *testing.T) {
+	// Three claims in handler.go at different line ranges.
+	// Only the one overlapping the hunk should be invalidated.
+	idx := NewIndex()
+	idx.Add(NewAnchor(1, "handler.go", 5, 15))  // overlaps hunk [10,20]
+	idx.Add(NewAnchor(2, "handler.go", 50, 70)) // does NOT overlap hunk [10,20]
+	idx.Add(NewAnchor(3, "handler.go", 18, 25)) // overlaps hunk [10,20]
+	idx.Add(NewAnchor(4, "server.go", 1, 20))   // different file, untouched
+
+	changes := []gitdiff.FileChange{
+		{
+			Status: gitdiff.StatusModified,
+			Path:   "handler.go",
+			Hunks: []gitdiff.Hunk{
+				{OldStart: 10, OldCount: 11, NewStart: 10, NewCount: 13},
+			},
+		},
+	}
+
+	stale := idx.Invalidate(changes)
+	if len(stale) != 2 {
+		t.Fatalf("Invalidate returned %d stale anchors, want 2 (claims 1 and 3): %+v", len(stale), stale)
+	}
+
+	staleIDs := map[int64]bool{}
+	for _, s := range stale {
+		staleIDs[s.ClaimID] = true
+		if s.Status != StatusStale {
+			t.Errorf("claim %d: expected StatusStale, got %q", s.ClaimID, s.Status)
+		}
+	}
+	if !staleIDs[1] || !staleIDs[3] {
+		t.Errorf("expected claims 1 and 3 stale, got %v", staleIDs)
+	}
+
+	// Claim 2 (lines 50-70) should remain verified.
+	hAnchors := idx.ForFile("handler.go")
+	for _, a := range hAnchors {
+		if a.ClaimID == 2 && a.Status != StatusVerified {
+			t.Errorf("claim 2 should remain verified, got %q", a.Status)
+		}
+	}
+
+	// server.go untouched.
+	sAnchors := idx.ForFile("server.go")
+	if sAnchors[0].Status != StatusVerified {
+		t.Errorf("server.go should remain verified, got %q", sAnchors[0].Status)
+	}
+}
+
+func TestIndex_Invalidate_LineLevel_MultipleHunks(t *testing.T) {
+	idx := NewIndex()
+	idx.Add(NewAnchor(1, "main.go", 5, 10))   // overlaps hunk 1 [3,12]
+	idx.Add(NewAnchor(2, "main.go", 30, 40))  // no overlap
+	idx.Add(NewAnchor(3, "main.go", 95, 105)) // overlaps hunk 2 [90,100]
+
+	changes := []gitdiff.FileChange{
+		{
+			Status: gitdiff.StatusModified,
+			Path:   "main.go",
+			Hunks: []gitdiff.Hunk{
+				{OldStart: 3, OldCount: 10, NewStart: 3, NewCount: 12},
+				{OldStart: 90, OldCount: 11, NewStart: 92, NewCount: 11},
+			},
+		},
+	}
+
+	stale := idx.Invalidate(changes)
+	if len(stale) != 2 {
+		t.Fatalf("expected 2 stale, got %d: %+v", len(stale), stale)
+	}
+	staleIDs := map[int64]bool{}
+	for _, s := range stale {
+		staleIDs[s.ClaimID] = true
+	}
+	if !staleIDs[1] || !staleIDs[3] {
+		t.Errorf("expected claims 1 and 3, got %v", staleIDs)
+	}
+}
+
+func TestIndex_Invalidate_LineLevel_WholeFileAnchor(t *testing.T) {
+	// Whole-file anchors (0,0) should always be invalidated when the file
+	// has hunks, since they conceptually cover every line.
+	idx := NewIndex()
+	idx.Add(NewAnchor(1, "main.go", 0, 0))   // whole-file
+	idx.Add(NewAnchor(2, "main.go", 50, 60)) // no overlap with hunk [10,20]
+
+	changes := []gitdiff.FileChange{
+		{
+			Status: gitdiff.StatusModified,
+			Path:   "main.go",
+			Hunks: []gitdiff.Hunk{
+				{OldStart: 10, OldCount: 11, NewStart: 10, NewCount: 13},
+			},
+		},
+	}
+
+	stale := idx.Invalidate(changes)
+	if len(stale) != 1 {
+		t.Fatalf("expected 1 stale (whole-file anchor), got %d: %+v", len(stale), stale)
+	}
+	if stale[0].ClaimID != 1 {
+		t.Errorf("expected claim 1 (whole-file), got claim %d", stale[0].ClaimID)
+	}
+}
+
+func TestIndex_Invalidate_FallbackFileLevel(t *testing.T) {
+	// When hunks are empty (name-status format), should fall back to
+	// file-level invalidation (existing behavior).
+	idx := NewIndex()
+	idx.Add(NewAnchor(1, "handler.go", 10, 30))
+	idx.Add(NewAnchor(2, "handler.go", 50, 70))
+
+	changes := []gitdiff.FileChange{
+		{Status: gitdiff.StatusModified, Path: "handler.go"},
+	}
+
+	stale := idx.Invalidate(changes)
+	if len(stale) != 2 {
+		t.Fatalf("file-level fallback: expected 2 stale, got %d", len(stale))
+	}
+}
+
 func TestBuildFromClaims_ZeroLine_IsWholeFile(t *testing.T) {
 	claims := []db.Claim{
 		{ID: 1, SourceFile: "main.go", SourceLine: 0},
