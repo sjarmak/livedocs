@@ -941,6 +941,10 @@ func runTribalExtraction(ctx context.Context, out io.Writer, claimsDB *db.Claims
 	if rankErr != nil {
 		return fmt.Errorf("rank files for tribal mining: %w", rankErr)
 	}
+	fmt.Fprintf(out, "Tribal: ranked %d files for mining (cap %d)\n", len(rankedFiles), maxFiles)
+	for i, p := range rankedFiles {
+		fmt.Fprintf(out, "  [%d] %s\n", i+1, p)
+	}
 	if rankedFilesTrace != nil {
 		rankedFilesTrace(append([]string(nil), rankedFiles...))
 	}
@@ -1112,6 +1116,10 @@ func runLLMTribalExtraction(ctx context.Context, out io.Writer, claimsDB *db.Cla
 	rankedFiles, rankErr := claimsDB.RankFilesForMining(repoName, maxFiles)
 	if rankErr != nil {
 		return fmt.Errorf("rank files for LLM tribal mining: %w", rankErr)
+	}
+	fmt.Fprintf(out, "LLM tribal: ranked %d files for mining (cap %d)\n", len(rankedFiles), maxFiles)
+	for i, p := range rankedFiles {
+		fmt.Fprintf(out, "  [%d] %s\n", i+1, p)
 	}
 	if rankedFilesTrace != nil {
 		rankedFilesTrace(append([]string(nil), rankedFiles...))
