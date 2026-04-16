@@ -91,8 +91,8 @@ brews:
 
 release:
   github:
-    owner: live-docs
-    name: live_docs
+    owner: sjarmak
+    name: livedocs
   draft: false
   prerelease: auto
   name_template: "v{{.Version}}"
