@@ -301,6 +301,83 @@ func (c *ClaimsDB) UpdateFactStatus(factID int64, status string) error {
 	return nil
 }
 
+// UpdateFactLastVerified updates the last_verified timestamp for a tribal fact.
+func (c *ClaimsDB) UpdateFactLastVerified(factID int64, lastVerified string) error {
+	result, err := c.exec.Exec(
+		"UPDATE tribal_facts SET last_verified = ? WHERE id = ?",
+		lastVerified, factID,
+	)
+	if err != nil {
+		return fmt.Errorf("update fact last_verified: %w", err)
+	}
+	n, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("check rows affected: %w", err)
+	}
+	if n == 0 {
+		return fmt.Errorf("update fact last_verified: fact %d not found", factID)
+	}
+	return nil
+}
+
+// UpdateFactConfidence updates the confidence score for a tribal fact.
+func (c *ClaimsDB) UpdateFactConfidence(factID int64, confidence float64) error {
+	result, err := c.exec.Exec(
+		"UPDATE tribal_facts SET confidence = ? WHERE id = ?",
+		confidence, factID,
+	)
+	if err != nil {
+		return fmt.Errorf("update fact confidence: %w", err)
+	}
+	n, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("check rows affected: %w", err)
+	}
+	if n == 0 {
+		return fmt.Errorf("update fact confidence: fact %d not found", factID)
+	}
+	return nil
+}
+
+// GetActiveLLMFactsOlderThan returns active tribal facts where model is non-empty
+// and last_verified is older than the given cutoff time. Results are ordered by
+// last_verified ASC (oldest first) for deterministic sampling — this uses a
+// dedicated query rather than queryTribalFacts to control the ORDER BY clause.
+func (c *ClaimsDB) GetActiveLLMFactsOlderThan(cutoff string) ([]TribalFact, error) {
+	query := `
+		SELECT id, subject_id, kind, body, source_quote, confidence,
+		       corroboration, extractor, extractor_version, model,
+		       staleness_hash, status, created_at, last_verified
+		FROM tribal_facts
+		WHERE status = 'active' AND model != '' AND model IS NOT NULL AND last_verified < ?
+		ORDER BY last_verified ASC
+	`
+	rows, err := c.exec.Query(query, cutoff)
+	if err != nil {
+		return nil, fmt.Errorf("get active LLM facts older than %s: %w", cutoff, err)
+	}
+	defer rows.Close()
+
+	var facts []TribalFact
+	for rows.Next() {
+		var f TribalFact
+		var model sql.NullString
+		err := rows.Scan(
+			&f.ID, &f.SubjectID, &f.Kind, &f.Body, &f.SourceQuote,
+			&f.Confidence, &f.Corroboration, &f.Extractor, &f.ExtractorVersion,
+			&model, &f.StalenessHash, &f.Status, &f.CreatedAt, &f.LastVerified,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("scan tribal fact: %w", err)
+		}
+		if model.Valid {
+			f.Model = model.String
+		}
+		facts = append(facts, f)
+	}
+	return facts, nil
+}
+
 // queryTribalFacts is a shared helper that queries tribal_facts with an
 // arbitrary WHERE clause.
 func (c *ClaimsDB) queryTribalFacts(where string, args ...interface{}) ([]TribalFact, error) {

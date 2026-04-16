@@ -50,19 +50,16 @@ jobs:
         uses: actions/cache@v4
         with:
           path: .livedocs
-          key: livedocs-claims-${{ runner.os }}-${{ hashFiles('**/*.go') }}
+          key: livedocs-claims-v2-${{ runner.os }}-${{ hashFiles('**/*.go') }}
           restore-keys: |
-            livedocs-claims-${{ runner.os }}-
+            livedocs-claims-v2-${{ runner.os }}-
 
       - name: Extract claims
+        if: steps.db-cache.outputs.cache-hit != 'true'
         run: |
           set -euo pipefail
-          if [ -f .livedocs/claims.db ]; then
-            echo "claims.db restored from cache — skipping extraction"
-          else
-            mkdir -p .livedocs
-            livedocs extract . -o .livedocs/claims.db
-          fi
+          mkdir -p .livedocs
+          livedocs extract . -o .livedocs/claims.db
 
       # -- publish claims.db for agent consumption ----------------------------
       - name: Upload claims.db for agent consumption

@@ -88,6 +88,16 @@ func (e *GoDeepExtractor) Extract(ctx context.Context, path string, lang string)
 	implClaims := e.extractImplements(pkgs, now)
 	claims = append(claims, implClaims...)
 
+	// Relativize source file paths so claims are portable across machines.
+	// go/packages returns absolute paths; prbot and anchor matching expect
+	// relative paths (matching git diff --name-status output).
+	prefix := absPath + string(filepath.Separator)
+	for i := range claims {
+		if strings.HasPrefix(claims[i].SourceFile, prefix) {
+			claims[i].SourceFile = claims[i].SourceFile[len(prefix):]
+		}
+	}
+
 	return claims, nil
 }
 

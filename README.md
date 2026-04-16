@@ -152,6 +152,41 @@ Add drift detection to your CI pipeline:
 
 See [action.yml](action.yml) for all inputs and outputs.
 
+## PR Context Pack (AI Review Assistant)
+
+Drop a single workflow file into any repo to get documentation-impact analysis on every PR. Assists **both human and agent reviewers**.
+
+### Install
+
+Copy [`workflows/livedocs-prbot.yml`](https://github.com/live-docs/live_docs/blob/main/examples/workflows/livedocs-prbot.yml) into your repo as `.github/workflows/livedocs-context.yml`. That's it.
+
+### What it does
+
+On every PR, the workflow:
+1. Extracts structural claims from your codebase (cached — subsequent runs are <30s)
+2. Computes documentation impact from the PR diff
+3. Posts an idempotent PR comment with findings
+4. Uploads `claims.db` as an artifact for agent consumption
+
+### Two surfaces
+
+- **Rendered PR comment** — what humans and `gh pr view` agents see
+- **Claims database artifact** — agents download with `gh run download` and query via `livedocs mcp --db claims.db` for the full structured claim surface
+
+### Optional: Sourcegraph enrichment
+
+Add `SRC_ACCESS_TOKEN` as a repo secret to enable cross-repo drift detection and semantic claim properties. Without it, the baseline docs-impact comment still works.
+
+### Agent consumption
+
+```bash
+# During an agentic coding session on a PR
+gh run download <run-id> --repo owner/repo --name livedocs-claims-pr-<number>
+livedocs mcp --db claims.db   # exposes MCP tools to your agent
+```
+
+The download command is pre-filled in the PR comment.
+
 ## Architecture
 
 ```
