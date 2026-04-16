@@ -1101,7 +1101,10 @@ func runLLMTribalExtraction(ctx context.Context, out io.Writer, claimsDB *db.Cla
 		fmt.Fprintf(out, "Using Anthropic API for LLM tribal extraction\n")
 	}
 
-	// 6. Create PR comment miner.
+	// 6. Create PR comment miner and wrap in TribalMiningService.
+	// The service owns cursor management, budget enforcement, error
+	// propagation, and fact upsert — callers never touch PRCommentMiner,
+	// DailyBudget, or cursor columns directly (premortem F7 mitigation).
 	miner := &tribal.PRCommentMiner{
 		RepoOwner:   owner,
 		RepoName:    repo,
@@ -1109,8 +1112,10 @@ func runLLMTribalExtraction(ctx context.Context, out io.Writer, claimsDB *db.Cla
 		Model:       cfg.Tribal.Model,
 		DailyBudget: cfg.Tribal.DailyBudget,
 	}
+	svc := tribal.NewTribalMiningService(claimsDB, miner, repoName,
+		tribal.WithMinerVersion(minerVersion))
 
-	// 6. Select files via the ranker. source_files is seeded by
+	// 7. Select files via the ranker. source_files is seeded by
 	// runTribalExtraction (always invoked in the LLM path), so the ranker
 	// has a complete candidate set.
 	rankedFiles, rankErr := claimsDB.RankFilesForMining(repoName, maxFiles)
@@ -1126,12 +1131,9 @@ func runLLMTribalExtraction(ctx context.Context, out io.Writer, claimsDB *db.Cla
 	}
 
 	var rationaleCount, invariantCount, quirkCount int
-	var budgetExceeded bool
 
+mineLoop:
 	for _, relPath := range rankedFiles {
-		if budgetExceeded {
-			break
-		}
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
@@ -1152,54 +1154,21 @@ func runLLMTribalExtraction(ctx context.Context, out io.Writer, claimsDB *db.Cla
 			continue
 		}
 
-		// Upsert a file-level symbol for tribal facts.
-		fileSymID, upErr := claimsDB.UpsertSymbol(db.Symbol{
-			Repo:       repoName,
-			ImportPath: relPath,
-			SymbolName: relPath,
-			Language:   "file",
-			Kind:       "file",
-			Visibility: "public",
-		})
-		if upErr != nil {
-			continue // skip this file
-		}
-
-		// Load the stored PR cursor for this file. A "needs_remine" sentinel
-		// forces a full re-mine by treating the cursor as empty.
-		cursor, storedVersion, getErr := claimsDB.GetPRIDSet(repoName, relPath)
-		if getErr != nil {
-			cursor = nil
-			storedVersion = ""
-		}
-		if storedVersion == db.PRMinerVersionNeedsRemine {
-			cursor = nil
-		}
-
-		// Extract PR comment facts for this file.
-		facts, seenPRs, extractErr := miner.ExtractForFile(ctx, relPath, cursor)
-		if extractErr != nil {
-			if errors.Is(extractErr, tribal.ErrCursorRegression) {
-				if mErr := claimsDB.MarkNeedsRemine(repoName, relPath); mErr != nil {
-					fmt.Fprintf(out, "LLM tribal: mark needs_remine failed for %s: %v\n", relPath, mErr)
-				}
-				continue
-			}
-			// Budget exceeded is a signal to stop mining further files.
-			if errors.Is(extractErr, tribal.ErrBudgetExceeded) || strings.Contains(extractErr.Error(), "budget exceeded") {
+		// Mine via the service — it handles symbol upsert, cursor,
+		// budget, error propagation, and fact upsert atomically.
+		result, mineErr := svc.MineFile(ctx, relPath, tribal.TriggerBatchSchedule)
+		if mineErr != nil {
+			var me *tribal.MiningError
+			if errors.As(mineErr, &me) && me.Code == "budget_exceeded" {
 				fmt.Fprintf(out, "LLM tribal: daily budget reached, stopping extraction\n")
-				budgetExceeded = true
-				continue
+				break mineLoop
 			}
-			// Other errors are non-fatal for individual files.
+			// Cursor regressions and other per-file errors are non-fatal.
 			continue
 		}
 
-		for _, fact := range facts {
-			// Patch the SubjectID — the miner leaves it as 0 so the caller
-			// owns the symbol mapping.
-			fact.SubjectID = fileSymID
-			if _, _, insertErr := claimsDB.UpsertTribalFact(fact, fact.Evidence); insertErr == nil {
+		if result != nil {
+			for _, fact := range result.Facts {
 				switch fact.Kind {
 				case "rationale":
 					rationaleCount++
@@ -1210,16 +1179,9 @@ func runLLMTribalExtraction(ctx context.Context, out io.Writer, claimsDB *db.Cla
 				}
 			}
 		}
-
-		// Persist the updated PR cursor so the next run skips these PRs.
-		if len(seenPRs) > 0 {
-			if setErr := claimsDB.SetPRIDSet(repoName, relPath, seenPRs, minerVersion); setErr != nil {
-				fmt.Fprintf(out, "LLM tribal: set pr id set failed for %s: %v\n", relPath, setErr)
-			}
-		}
 	}
 
-	// 7. Print LLM tribal summary.
+	// 8. Print LLM tribal summary.
 	total := rationaleCount + invariantCount + quirkCount
 	fmt.Fprintf(out, "\n## LLM Tribal Knowledge Summary (PR Comments)\n\n")
 	fmt.Fprintf(out, "- **Rationale facts**: %d\n", rationaleCount)

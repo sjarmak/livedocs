@@ -3,13 +3,48 @@ package main
 import (
 	"crypto/sha256"
 	"fmt"
+	"path/filepath"
 	"sort"
-	"time"
+	"strings"
 
 	"github.com/spf13/cobra"
 
 	"github.com/live-docs/live_docs/db"
 )
+
+// ValidateDBPath checks that the given path is a valid claims database path.
+// It requires the .claims.db suffix and, if dataDir is non-empty, ensures the
+// cleaned path is rooted under dataDir to prevent directory traversal.
+func ValidateDBPath(dbPath, dataDir string) error {
+	if dbPath == "" {
+		return fmt.Errorf("db path must not be empty")
+	}
+
+	if !strings.HasSuffix(dbPath, ".claims.db") {
+		return fmt.Errorf("db path %q must end with .claims.db", dbPath)
+	}
+
+	if dataDir != "" {
+		absData, err := filepath.Abs(dataDir)
+		if err != nil {
+			return fmt.Errorf("resolve data dir: %w", err)
+		}
+		absDB, err := filepath.Abs(dbPath)
+		if err != nil {
+			return fmt.Errorf("resolve db path: %w", err)
+		}
+		// Clean both paths to resolve any ".." components. filepath.Abs
+		// already calls Clean, but does not resolve symlinks. For the
+		// data-dir constraint the cleaned absolute paths are sufficient
+		// because we are guarding against user-supplied traversal, not
+		// filesystem-level symlink races (the DB layer opens the file).
+		if !strings.HasPrefix(absDB, absData+string(filepath.Separator)) && absDB != absData {
+			return fmt.Errorf("db path %q is outside data directory %q", dbPath, dataDir)
+		}
+	}
+
+	return nil
+}
 
 var tribalCmd = &cobra.Command{
 	Use:   "tribal",
@@ -24,6 +59,10 @@ var tribalStatusCmd = &cobra.Command{
 	Args:  cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		dbPath := args[0]
+
+		if err := ValidateDBPath(dbPath, ""); err != nil {
+			return err
+		}
 
 		claimsDB, err := db.OpenClaimsDB(dbPath)
 		if err != nil {
@@ -114,6 +153,10 @@ var tribalCorrectCmd = &cobra.Command{
 		body, _ := cmd.Flags().GetString("body")
 		reason, _ := cmd.Flags().GetString("reason")
 
+		if err := ValidateDBPath(dbPath, ""); err != nil {
+			return err
+		}
+
 		cdb, err := db.OpenClaimsDB(dbPath)
 		if err != nil {
 			return fmt.Errorf("open claims db: %w", err)
@@ -161,6 +204,10 @@ var tribalSupersedeCmd = &cobra.Command{
 		factID, _ := cmd.Flags().GetInt64("fact-id")
 		body, _ := cmd.Flags().GetString("body")
 		reason, _ := cmd.Flags().GetString("reason")
+
+		if err := ValidateDBPath(dbPath, ""); err != nil {
+			return err
+		}
 
 		cdb, err := db.OpenClaimsDB(dbPath)
 		if err != nil {
@@ -213,6 +260,10 @@ var tribalDeleteCmd = &cobra.Command{
 		dbPath, _ := cmd.Flags().GetString("db")
 		factID, _ := cmd.Flags().GetInt64("fact-id")
 		reason, _ := cmd.Flags().GetString("reason")
+
+		if err := ValidateDBPath(dbPath, ""); err != nil {
+			return err
+		}
 
 		cdb, err := db.OpenClaimsDB(dbPath)
 		if err != nil {
@@ -278,86 +329,4 @@ func init() {
 	_ = tribalDeleteCmd.MarkFlagRequired("fact-id")
 	_ = tribalDeleteCmd.MarkFlagRequired("reason")
 	tribalCmd.AddCommand(tribalDeleteCmd)
-
-	// reverify flags
-	tribalReverifyCmd.Flags().Int("sample", 20, "maximum number of facts to reverify")
-	tribalReverifyCmd.Flags().String("max-age", "30d", "minimum age for a fact to be eligible (e.g. 30d, 720h)")
-	tribalReverifyCmd.Flags().Int("budget", 100, "maximum LLM calls allowed")
-	tribalReverifyCmd.Flags().Bool("dry-run", false, "show eligible facts without reverifying")
-	tribalCmd.AddCommand(tribalReverifyCmd)
-}
-
-var tribalReverifyCmd = &cobra.Command{
-	Use:   "reverify <db-path>",
-	Short: "Reverify aged LLM-extracted tribal facts via semantic check",
-	Long: `Samples active LLM-extracted facts older than --max-age, runs one semantic
-verification call per fact, and applies the verdict:
-  accept    → update last_verified to now
-  downgrade → multiply confidence by 0.6
-  reject    → set status to 'stale'
-
-Budget-tracked: stops after --budget LLM calls even if more facts remain.`,
-	Args: cobra.ExactArgs(1),
-	RunE: func(cmd *cobra.Command, args []string) error {
-		dbPath := args[0]
-
-		sampleSize, _ := cmd.Flags().GetInt("sample")
-		maxAgeStr, _ := cmd.Flags().GetString("max-age")
-		budget, _ := cmd.Flags().GetInt("budget")
-		dryRun, _ := cmd.Flags().GetBool("dry-run")
-
-		if sampleSize <= 0 {
-			return fmt.Errorf("--sample must be > 0, got %d", sampleSize)
-		}
-
-		maxAge, err := parseDuration(maxAgeStr)
-		if err != nil {
-			return fmt.Errorf("invalid --max-age %q: %w", maxAgeStr, err)
-		}
-
-		claimsDB, err := db.OpenClaimsDB(dbPath)
-		if err != nil {
-			return fmt.Errorf("open claims db: %w", err)
-		}
-		defer claimsDB.Close()
-
-		out := cmd.OutOrStdout()
-
-		if dryRun {
-			// Dry-run: just show what would be sampled.
-			cutoff := time.Now().Add(-maxAge).UTC().Format(time.RFC3339)
-			facts, err := claimsDB.GetActiveLLMFactsOlderThan(cutoff)
-			if err != nil {
-				return fmt.Errorf("query facts: %w", err)
-			}
-			if sampleSize < len(facts) {
-				facts = facts[:sampleSize]
-			}
-			fmt.Fprintf(out, "Dry-run: would reverify %d facts (sample=%d, max-age=%s, budget=%d)\n",
-				len(facts), sampleSize, maxAgeStr, budget)
-			return nil
-		}
-
-		// For now, require a verifier to be injected. The real LLM verifier
-		// will be wired in a follow-up bead. This CLI path is for --dry-run
-		// and testing; production use requires the LLM verifier.
-		return fmt.Errorf("semantic verifier not yet wired; use --dry-run to preview eligible facts")
-	},
-}
-
-// parseDuration parses a duration string that supports "d" suffix for days
-// in addition to Go's standard time.ParseDuration suffixes.
-func parseDuration(s string) (time.Duration, error) {
-	if len(s) > 1 && s[len(s)-1] == 'd' {
-		// Parse as days.
-		var days int
-		if _, err := fmt.Sscanf(s, "%dd", &days); err != nil {
-			return 0, fmt.Errorf("parse days: %w", err)
-		}
-		if days <= 0 {
-			return 0, fmt.Errorf("days must be > 0, got %d", days)
-		}
-		return time.Duration(days) * 24 * time.Hour, nil
-	}
-	return time.ParseDuration(s)
 }

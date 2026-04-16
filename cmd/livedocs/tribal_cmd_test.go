@@ -13,6 +13,161 @@ import (
 	_ "modernc.org/sqlite"
 )
 
+func TestValidateDBPath(t *testing.T) {
+	tests := []struct {
+		name    string
+		dbPath  string
+		dataDir string
+		wantErr string
+	}{
+		{
+			name:   "valid path",
+			dbPath: "repo.claims.db",
+		},
+		{
+			name:   "valid absolute path",
+			dbPath: "/data/repos/my-repo.claims.db",
+		},
+		{
+			name:    "empty path",
+			dbPath:  "",
+			wantErr: "must not be empty",
+		},
+		{
+			name:    "wrong suffix .db",
+			dbPath:  "repo.db",
+			wantErr: "must end with .claims.db",
+		},
+		{
+			name:    "wrong suffix .sqlite",
+			dbPath:  "repo.sqlite",
+			wantErr: "must end with .claims.db",
+		},
+		{
+			name:    "no suffix",
+			dbPath:  "/etc/passwd",
+			wantErr: "must end with .claims.db",
+		},
+		{
+			name:    "directory traversal no suffix",
+			dbPath:  "../../../etc/passwd",
+			wantErr: "must end with .claims.db",
+		},
+		{
+			name:    "suffix embedded but not at end",
+			dbPath:  "repo.claims.db.bak",
+			wantErr: "must end with .claims.db",
+		},
+		{
+			name:    "data-dir traversal",
+			dbPath:  "../secret.claims.db",
+			dataDir: "/data/repos",
+			wantErr: "outside data directory",
+		},
+		{
+			name:    "data-dir valid",
+			dbPath:  "/data/repos/my-repo.claims.db",
+			dataDir: "/data/repos",
+		},
+		{
+			name:    "data-dir subdirectory valid",
+			dbPath:  "/data/repos/org/my-repo.claims.db",
+			dataDir: "/data/repos",
+		},
+		{
+			name:    "data-dir sibling rejected",
+			dbPath:  "/data/other/my-repo.claims.db",
+			dataDir: "/data/repos",
+			wantErr: "outside data directory",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			err := ValidateDBPath(tc.dbPath, tc.dataDir)
+			if tc.wantErr == "" {
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatalf("expected error containing %q, got nil", tc.wantErr)
+			}
+			if !strings.Contains(err.Error(), tc.wantErr) {
+				t.Errorf("expected error containing %q, got: %v", tc.wantErr, err)
+			}
+		})
+	}
+}
+
+func TestTribalCLIRejectsInvalidDBPath(t *testing.T) {
+	resetExtractFlags()
+
+	commands := []struct {
+		name string
+		args []string
+	}{
+		{
+			name: "correct rejects bad suffix",
+			args: []string{"tribal", "correct", "--db", "/tmp/evil.db", "--fact-id", "1", "--body", "b", "--reason", "r"},
+		},
+		{
+			name: "supersede rejects bad suffix",
+			args: []string{"tribal", "supersede", "--db", "/tmp/evil.db", "--fact-id", "1", "--body", "b", "--reason", "r"},
+		},
+		{
+			name: "delete rejects bad suffix",
+			args: []string{"tribal", "delete", "--db", "/tmp/evil.db", "--fact-id", "1", "--reason", "r"},
+		},
+		{
+			name: "status rejects bad suffix",
+			args: []string{"tribal", "status", "/tmp/evil.db"},
+		},
+	}
+
+	for _, tc := range commands {
+		t.Run(tc.name, func(t *testing.T) {
+			resetTribalCorrectionFlags()
+			buf := new(bytes.Buffer)
+			rootCmd.SetOut(buf)
+			rootCmd.SetErr(buf)
+			rootCmd.SetArgs(tc.args)
+			err := rootCmd.Execute()
+			if err == nil {
+				t.Fatal("expected validation error for invalid db path")
+			}
+			if !strings.Contains(err.Error(), ".claims.db") {
+				t.Errorf("expected error about .claims.db suffix, got: %v", err)
+			}
+		})
+	}
+}
+
+func TestTribalCLIAcceptsValidDBPath(t *testing.T) {
+	resetExtractFlags()
+	dbPath := createTribalTestDB(t)
+
+	// correct should work with a valid .claims.db path
+	resetTribalCorrectionFlags()
+	buf := new(bytes.Buffer)
+	rootCmd.SetOut(buf)
+	rootCmd.SetErr(buf)
+	rootCmd.SetArgs([]string{
+		"tribal", "correct",
+		"--db", dbPath,
+		"--fact-id", "1",
+		"--body", "validated body",
+		"--reason", "validation test",
+	})
+	if err := rootCmd.Execute(); err != nil {
+		t.Fatalf("tribal correct with valid path failed: %v", err)
+	}
+	if !strings.Contains(buf.String(), "Corrected fact 1") {
+		t.Errorf("expected success output, got: %q", buf.String())
+	}
+}
+
 func TestTribalFlagRegistered(t *testing.T) {
 	f := extractCmd.Flags().Lookup("tribal")
 	if f == nil {

@@ -3,6 +3,7 @@ package db
 import (
 	"database/sql"
 	"fmt"
+	"strings"
 )
 
 // TribalFact represents a tribal knowledge fact extracted from non-code sources.
@@ -239,7 +240,17 @@ func (c *ClaimsDB) InsertTribalFact(fact TribalFact, evidence []TribalEvidence) 
 // GetTribalFactByID returns a single tribal fact by its ID, with evidence populated.
 // Returns an error if the fact is not found.
 func (c *ClaimsDB) GetTribalFactByID(factID int64) (TribalFact, error) {
-	facts, err := c.queryTribalFacts("id = ?", factID)
+	rows, err := c.exec.Query(`
+		SELECT id, subject_id, kind, body, source_quote, confidence,
+		       corroboration, extractor, extractor_version, model,
+		       staleness_hash, status, created_at, last_verified, cluster_key
+		FROM tribal_facts WHERE id = ?
+		ORDER BY id
+	`, factID)
+	if err != nil {
+		return TribalFact{}, fmt.Errorf("get tribal fact by id: %w", err)
+	}
+	facts, err := scanTribalFactRows(rows)
 	if err != nil {
 		return TribalFact{}, fmt.Errorf("get tribal fact by id: %w", err)
 	}
@@ -255,7 +266,17 @@ func (c *ClaimsDB) GetTribalFactByID(factID int64) (TribalFact, error) {
 // GetTribalFactsBySubject returns all tribal facts for a given symbol ID,
 // with their evidence rows populated.
 func (c *ClaimsDB) GetTribalFactsBySubject(subjectID int64) ([]TribalFact, error) {
-	facts, err := c.queryTribalFacts("subject_id = ?", subjectID)
+	rows, err := c.exec.Query(`
+		SELECT id, subject_id, kind, body, source_quote, confidence,
+		       corroboration, extractor, extractor_version, model,
+		       staleness_hash, status, created_at, last_verified, cluster_key
+		FROM tribal_facts WHERE subject_id = ?
+		ORDER BY id
+	`, subjectID)
+	if err != nil {
+		return nil, fmt.Errorf("get tribal facts by subject: %w", err)
+	}
+	facts, err := scanTribalFactRows(rows)
 	if err != nil {
 		return nil, fmt.Errorf("get tribal facts by subject: %w", err)
 	}
@@ -268,7 +289,17 @@ func (c *ClaimsDB) GetTribalFactsBySubject(subjectID int64) ([]TribalFact, error
 // GetTribalFactsByKind returns all tribal facts of a given kind,
 // with their evidence rows populated.
 func (c *ClaimsDB) GetTribalFactsByKind(kind string) ([]TribalFact, error) {
-	facts, err := c.queryTribalFacts("kind = ?", kind)
+	rows, err := c.exec.Query(`
+		SELECT id, subject_id, kind, body, source_quote, confidence,
+		       corroboration, extractor, extractor_version, model,
+		       staleness_hash, status, created_at, last_verified, cluster_key
+		FROM tribal_facts WHERE kind = ?
+		ORDER BY id
+	`, kind)
+	if err != nil {
+		return nil, fmt.Errorf("get tribal facts by kind: %w", err)
+	}
+	facts, err := scanTribalFactRows(rows)
 	if err != nil {
 		return nil, fmt.Errorf("get tribal facts by kind: %w", err)
 	}
@@ -344,55 +375,25 @@ func (c *ClaimsDB) UpdateFactConfidence(factID int64, confidence float64) error 
 // last_verified ASC (oldest first) for deterministic sampling — this uses a
 // dedicated query rather than queryTribalFacts to control the ORDER BY clause.
 func (c *ClaimsDB) GetActiveLLMFactsOlderThan(cutoff string) ([]TribalFact, error) {
-	query := `
+	rows, err := c.exec.Query(`
 		SELECT id, subject_id, kind, body, source_quote, confidence,
 		       corroboration, extractor, extractor_version, model,
-		       staleness_hash, status, created_at, last_verified
+		       staleness_hash, status, created_at, last_verified, cluster_key
 		FROM tribal_facts
 		WHERE status = 'active' AND model != '' AND model IS NOT NULL AND last_verified < ?
 		ORDER BY last_verified ASC
-	`
-	rows, err := c.exec.Query(query, cutoff)
+	`, cutoff)
 	if err != nil {
 		return nil, fmt.Errorf("get active LLM facts older than %s: %w", cutoff, err)
 	}
-	defer rows.Close()
-
-	var facts []TribalFact
-	for rows.Next() {
-		var f TribalFact
-		var model sql.NullString
-		err := rows.Scan(
-			&f.ID, &f.SubjectID, &f.Kind, &f.Body, &f.SourceQuote,
-			&f.Confidence, &f.Corroboration, &f.Extractor, &f.ExtractorVersion,
-			&model, &f.StalenessHash, &f.Status, &f.CreatedAt, &f.LastVerified,
-		)
-		if err != nil {
-			return nil, fmt.Errorf("scan tribal fact: %w", err)
-		}
-		if model.Valid {
-			f.Model = model.String
-		}
-		facts = append(facts, f)
-	}
-	return facts, nil
+	return scanTribalFactRows(rows)
 }
 
-// queryTribalFacts is a shared helper that queries tribal_facts with an
-// arbitrary WHERE clause.
-func (c *ClaimsDB) queryTribalFacts(where string, args ...interface{}) ([]TribalFact, error) {
-	query := fmt.Sprintf(`
-		SELECT id, subject_id, kind, body, source_quote, confidence,
-		       corroboration, extractor, extractor_version, model,
-		       staleness_hash, status, created_at, last_verified
-		FROM tribal_facts WHERE %s
-		ORDER BY id
-	`, where)
-
-	rows, err := c.exec.Query(query, args...)
-	if err != nil {
-		return nil, err
-	}
+// scanTribalFactRows scans rows from a tribal_facts query into a slice of
+// TribalFact. The caller is responsible for issuing the query with a fully
+// literal SQL string and parameterized arguments — this helper only handles
+// the row-scanning logic. It closes the rows when done.
+func scanTribalFactRows(rows *sql.Rows) ([]TribalFact, error) {
 	defer rows.Close()
 
 	var facts []TribalFact
@@ -403,6 +404,7 @@ func (c *ClaimsDB) queryTribalFacts(where string, args ...interface{}) ([]Tribal
 			&f.ID, &f.SubjectID, &f.Kind, &f.Body, &f.SourceQuote,
 			&f.Confidence, &f.Corroboration, &f.Extractor, &f.ExtractorVersion,
 			&model, &f.StalenessHash, &f.Status, &f.CreatedAt, &f.LastVerified,
+			&f.ClusterKey,
 		)
 		if err != nil {
 			return nil, err
@@ -424,21 +426,32 @@ func (c *ClaimsDB) SymbolExistsByID(id int64) (bool, error) {
 }
 
 // GetTribalFactsByStatuses returns all tribal facts matching any of the given
-// statuses, with their evidence rows populated.
+// statuses, with their evidence rows populated. The placeholder list is built
+// from the length of the statuses slice — no caller-supplied strings are
+// interpolated into the SQL.
 func (c *ClaimsDB) GetTribalFactsByStatuses(statuses ...string) ([]TribalFact, error) {
 	if len(statuses) == 0 {
 		return nil, nil
 	}
-	placeholders := ""
+	// placeholders is purely "?,?,?" — only literal characters, never user input.
+	placeholders := strings.TrimSuffix(strings.Repeat("?,", len(statuses)), ",")
+
 	args := make([]interface{}, len(statuses))
 	for i, s := range statuses {
-		if i > 0 {
-			placeholders += ", "
-		}
-		placeholders += "?"
 		args[i] = s
 	}
-	facts, err := c.queryTribalFacts(fmt.Sprintf("status IN (%s)", placeholders), args...)
+
+	rows, err := c.exec.Query(
+		"SELECT id, subject_id, kind, body, source_quote, confidence,"+
+			" corroboration, extractor, extractor_version, model,"+
+			" staleness_hash, status, created_at, last_verified, cluster_key"+
+			" FROM tribal_facts WHERE status IN ("+placeholders+")"+
+			" ORDER BY id",
+		args...)
+	if err != nil {
+		return nil, fmt.Errorf("get tribal facts by statuses: %w", err)
+	}
+	facts, err := scanTribalFactRows(rows)
 	if err != nil {
 		return nil, fmt.Errorf("get tribal facts by statuses: %w", err)
 	}
