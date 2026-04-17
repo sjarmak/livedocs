@@ -17,6 +17,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 
@@ -299,8 +300,8 @@ func (s *TribalMiningService) resolveSymbolFiles(symbolName string) ([]string, e
 		if p == "" {
 			continue
 		}
-		// Only include file-like paths (contain a dot for extension).
-		if !strings.Contains(p, ".") {
+		// Only include paths with recognized source file extensions.
+		if !isSourceFile(p) {
 			continue
 		}
 		if _, ok := seen[p]; ok {
@@ -310,4 +311,18 @@ func (s *TribalMiningService) resolveSymbolFiles(symbolName string) ([]string, e
 		paths = append(paths, p)
 	}
 	return paths, nil
+}
+
+// isSourceFile returns true if path ends with a recognized source file extension.
+// This replaces the old strings.Contains(p, ".") heuristic which incorrectly
+// matched Go import paths containing dots (e.g. "k8s.io/client-go/tools/cache").
+func isSourceFile(path string) bool {
+	ext := strings.ToLower(filepath.Ext(path))
+	switch ext {
+	case ".go", ".ts", ".tsx", ".js", ".jsx", ".py", ".sh",
+		".rs", ".rb", ".java", ".kt", ".swift",
+		".c", ".cpp", ".h", ".hpp", ".cs", ".php":
+		return true
+	}
+	return false
 }

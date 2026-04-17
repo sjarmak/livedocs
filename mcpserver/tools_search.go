@@ -46,6 +46,9 @@ func SearchSymbolsHandler(pool *DBPool, index *RoutingIndex) ToolHandler {
 
 		// Single-repo mode: search only the specified repo.
 		if repoFilter != "" {
+			if result, err := requireRepoExists(pool, repoFilter); result != nil {
+				return result, err
+			}
 			return searchSingleRepo(pool, repoFilter, query)
 		}
 

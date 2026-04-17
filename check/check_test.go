@@ -62,6 +62,203 @@ func TestFindMarkdownFiles(t *testing.T) {
 	}
 }
 
+func TestFindDocFiles_DefaultPatterns(t *testing.T) {
+	dir := t.TempDir()
+
+	// Create doc files that should be included.
+	os.MkdirAll(filepath.Join(dir, "pkg"), 0755)
+	os.WriteFile(filepath.Join(dir, "README.md"), []byte("# Root"), 0644)
+	os.WriteFile(filepath.Join(dir, "CLAUDE.md"), []byte("# Claude"), 0644)
+	os.WriteFile(filepath.Join(dir, "AGENTS.md"), []byte("# Agents"), 0644)
+	os.WriteFile(filepath.Join(dir, "CONTRIBUTING.md"), []byte("# Contributing"), 0644)
+	os.WriteFile(filepath.Join(dir, "CHANGELOG.md"), []byte("# Changelog"), 0644)
+	os.WriteFile(filepath.Join(dir, "pkg", "README.md"), []byte("# Pkg"), 0644)
+
+	// Create non-doc markdown files that should NOT be included.
+	os.MkdirAll(filepath.Join(dir, "docs", "design"), 0755)
+	os.MkdirAll(filepath.Join(dir, ".brainstorm"), 0755)
+	os.WriteFile(filepath.Join(dir, "docs", "design", "proposal.md"), []byte("# Proposal"), 0644)
+	os.WriteFile(filepath.Join(dir, ".brainstorm", "ideas.md"), []byte("# Ideas"), 0644)
+	os.WriteFile(filepath.Join(dir, "pkg", "DESIGN.md"), []byte("# Design"), 0644)
+	os.WriteFile(filepath.Join(dir, "notes.md"), []byte("# Notes"), 0644)
+
+	opts := FindOptions{}
+	files, err := FindDocFiles(dir, opts)
+	if err != nil {
+		t.Fatalf("FindDocFiles: %v", err)
+	}
+
+	// Should find: README.md, CLAUDE.md, AGENTS.md, CONTRIBUTING.md, CHANGELOG.md, pkg/README.md
+	if len(files) != 6 {
+		t.Errorf("expected 6 doc files, got %d:", len(files))
+		for _, f := range files {
+			rel, _ := filepath.Rel(dir, f)
+			t.Logf("  %s", rel)
+		}
+	}
+
+	// Verify non-doc files are excluded.
+	for _, f := range files {
+		rel, _ := filepath.Rel(dir, f)
+		if rel == filepath.Join("docs", "design", "proposal.md") ||
+			rel == filepath.Join(".brainstorm", "ideas.md") ||
+			rel == filepath.Join("pkg", "DESIGN.md") ||
+			rel == "notes.md" {
+			t.Errorf("should not include non-doc file %s", rel)
+		}
+	}
+}
+
+func TestFindDocFiles_AllMarkdown(t *testing.T) {
+	dir := t.TempDir()
+
+	os.WriteFile(filepath.Join(dir, "README.md"), []byte("# Root"), 0644)
+	os.WriteFile(filepath.Join(dir, "notes.md"), []byte("# Notes"), 0644)
+	os.WriteFile(filepath.Join(dir, "DESIGN.md"), []byte("# Design"), 0644)
+
+	opts := FindOptions{AllMarkdown: true}
+	files, err := FindDocFiles(dir, opts)
+	if err != nil {
+		t.Fatalf("FindDocFiles: %v", err)
+	}
+
+	if len(files) != 3 {
+		t.Errorf("expected 3 files with AllMarkdown, got %d: %v", len(files), files)
+	}
+}
+
+func TestFindDocFiles_LivedocsIgnore(t *testing.T) {
+	dir := t.TempDir()
+
+	// Create doc files.
+	os.MkdirAll(filepath.Join(dir, "pkg"), 0755)
+	os.MkdirAll(filepath.Join(dir, "internal"), 0755)
+	os.WriteFile(filepath.Join(dir, "README.md"), []byte("# Root"), 0644)
+	os.WriteFile(filepath.Join(dir, "pkg", "README.md"), []byte("# Pkg"), 0644)
+	os.WriteFile(filepath.Join(dir, "internal", "README.md"), []byte("# Internal"), 0644)
+
+	// Create .livedocsignore to exclude internal/.
+	os.WriteFile(filepath.Join(dir, ".livedocsignore"), []byte("internal/\n"), 0644)
+
+	opts := FindOptions{}
+	files, err := FindDocFiles(dir, opts)
+	if err != nil {
+		t.Fatalf("FindDocFiles: %v", err)
+	}
+
+	// Should find README.md and pkg/README.md but NOT internal/README.md.
+	if len(files) != 2 {
+		t.Errorf("expected 2 doc files, got %d:", len(files))
+		for _, f := range files {
+			rel, _ := filepath.Rel(dir, f)
+			t.Logf("  %s", rel)
+		}
+	}
+
+	for _, f := range files {
+		rel, _ := filepath.Rel(dir, f)
+		if rel == filepath.Join("internal", "README.md") {
+			t.Errorf("should have been excluded by .livedocsignore: %s", rel)
+		}
+	}
+}
+
+func TestFindDocFiles_ExcludePatterns(t *testing.T) {
+	dir := t.TempDir()
+
+	os.MkdirAll(filepath.Join(dir, "pkg"), 0755)
+	os.MkdirAll(filepath.Join(dir, "generated"), 0755)
+	os.WriteFile(filepath.Join(dir, "README.md"), []byte("# Root"), 0644)
+	os.WriteFile(filepath.Join(dir, "pkg", "README.md"), []byte("# Pkg"), 0644)
+	os.WriteFile(filepath.Join(dir, "generated", "README.md"), []byte("# Gen"), 0644)
+
+	opts := FindOptions{ExcludePatterns: []string{"generated/"}}
+	files, err := FindDocFiles(dir, opts)
+	if err != nil {
+		t.Fatalf("FindDocFiles: %v", err)
+	}
+
+	if len(files) != 2 {
+		t.Errorf("expected 2 doc files, got %d:", len(files))
+		for _, f := range files {
+			rel, _ := filepath.Rel(dir, f)
+			t.Logf("  %s", rel)
+		}
+	}
+}
+
+func TestFindDocFiles_IncludePatterns(t *testing.T) {
+	dir := t.TempDir()
+
+	os.WriteFile(filepath.Join(dir, "README.md"), []byte("# Root"), 0644)
+	os.WriteFile(filepath.Join(dir, "GUIDE.md"), []byte("# Guide"), 0644)
+	os.WriteFile(filepath.Join(dir, "notes.md"), []byte("# Notes"), 0644)
+
+	// Include patterns override defaults: only scan GUIDE.md files.
+	opts := FindOptions{IncludePatterns: []string{"GUIDE.md"}}
+	files, err := FindDocFiles(dir, opts)
+	if err != nil {
+		t.Fatalf("FindDocFiles: %v", err)
+	}
+
+	if len(files) != 1 {
+		t.Errorf("expected 1 file, got %d:", len(files))
+		for _, f := range files {
+			rel, _ := filepath.Rel(dir, f)
+			t.Logf("  %s", rel)
+		}
+	}
+}
+
+func TestParseIgnoreFile(t *testing.T) {
+	tests := []struct {
+		name    string
+		content string
+		want    int
+	}{
+		{"empty", "", 0},
+		{"comments and blanks", "# comment\n\n# another\n", 0},
+		{"patterns", "docs/\n.brainstorm/\n*.draft.md\n", 3},
+		{"mixed", "# ignore these\ndocs/design/\n\n# but not this\n.claude/\n", 2},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			patterns := parseIgnorePatterns(tt.content)
+			if len(patterns) != tt.want {
+				t.Errorf("got %d patterns, want %d: %v", len(patterns), tt.want, patterns)
+			}
+		})
+	}
+}
+
+func TestFindDocFiles_LivedocsIgnoreWithGlobPatterns(t *testing.T) {
+	dir := t.TempDir()
+
+	os.MkdirAll(filepath.Join(dir, "docs", "design"), 0755)
+	os.MkdirAll(filepath.Join(dir, ".claude", "worktrees", "agent-123"), 0755)
+	os.WriteFile(filepath.Join(dir, "README.md"), []byte("# Root"), 0644)
+	os.WriteFile(filepath.Join(dir, "docs", "design", "README.md"), []byte("# Design"), 0644)
+	os.WriteFile(filepath.Join(dir, ".claude", "worktrees", "agent-123", "README.md"), []byte("# Worktree"), 0644)
+
+	// Exclude docs/design/ and .claude/worktrees/.
+	ignoreContent := "docs/design/\n.claude/worktrees/\n"
+	os.WriteFile(filepath.Join(dir, ".livedocsignore"), []byte(ignoreContent), 0644)
+
+	opts := FindOptions{}
+	files, err := FindDocFiles(dir, opts)
+	if err != nil {
+		t.Fatalf("FindDocFiles: %v", err)
+	}
+
+	if len(files) != 1 {
+		t.Errorf("expected 1 file, got %d:", len(files))
+		for _, f := range files {
+			rel, _ := filepath.Rel(dir, f)
+			t.Logf("  %s", rel)
+		}
+	}
+}
+
 func TestDiscoverTargets(t *testing.T) {
 	dir := t.TempDir()
 	os.MkdirAll(filepath.Join(dir, "pkg"), 0755)

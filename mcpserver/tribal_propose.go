@@ -155,21 +155,8 @@ func tribalProposeFactHandler(pool *DBPool) ToolHandler {
 		}
 
 		// --- Verify repo exists in the data directory ---
-		// Reject unknown repos to prevent unauthenticated callers from creating
-		// arbitrary .claims.db files via pool.Open.
-		manifest, err := pool.Manifest()
-		if err != nil {
-			return NewErrorResultf("list repos: %v", err), nil
-		}
-		repoFound := false
-		for _, r := range manifest {
-			if r == repo {
-				repoFound = true
-				break
-			}
-		}
-		if !repoFound {
-			return NewErrorResultf("repo %q not found in data directory", repo), nil
+		if result, err := requireRepoExists(pool, repo); result != nil {
+			return result, err
 		}
 
 		// --- Open repo DB ---

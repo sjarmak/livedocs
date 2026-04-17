@@ -337,6 +337,95 @@ func TestTribalMiningService_MineSymbol(t *testing.T) {
 	}
 }
 
+func TestIsSourceFile(t *testing.T) {
+	tests := []struct {
+		path string
+		want bool
+	}{
+		// Accepted: real source file paths
+		{"cmd/main.go", true},
+		{"pkg/handler.go", true},
+		{"lib/utils.ts", true},
+		{"components/App.tsx", true},
+		{"scripts/build.py", true},
+		{"scripts/deploy.sh", true},
+		{"main.go", true},
+
+		// Rejected: Go import paths with dots (the bug this fixes)
+		{"k8s.io/client-go/tools/cache", false},
+		{"github.com/org/repo", false},
+		{"golang.org/x/tools/go/ast", false},
+		{"sigs.k8s.io/controller-runtime", false},
+
+		// Rejected: no extension
+		{"pkg/controller/replicaset", false},
+		{"cmd/kubelet", false},
+		{"", false},
+
+		// Rejected: unsupported extensions
+		{"data/config.xml", false},
+		{"assets/image.png", false},
+
+		// Edge cases
+		{"k8s.io/api/core/v1/types.go", true},     // import path with dots BUT ends in .go
+		{".hidden/file.go", true},                   // dotfile directory
+		{"path/to/file.JS", true},                   // case insensitive
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.path, func(t *testing.T) {
+			got := isSourceFile(tt.path)
+			if got != tt.want {
+				t.Errorf("isSourceFile(%q) = %v, want %v", tt.path, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestResolveSymbolFiles_FiltersNonFilePaths(t *testing.T) {
+	cdb := newTestClaimsDB(t)
+
+	// Insert symbols: one with a real file path, one with a Go import path (dot but not a file).
+	for _, sym := range []db.Symbol{
+		{Repo: "repo", ImportPath: "pkg/handler.go", SymbolName: "HandleRequest", Language: "go", Kind: "func", Visibility: "public"},
+		{Repo: "repo", ImportPath: "k8s.io/client-go/tools/cache", SymbolName: "Store", Language: "go", Kind: "interface", Visibility: "public"},
+		{Repo: "repo", ImportPath: "pkg/controller", SymbolName: "Run", Language: "go", Kind: "func", Visibility: "public"},
+	} {
+		if _, err := cdb.UpsertSymbol(sym); err != nil {
+			t.Fatalf("upsert symbol: %v", err)
+		}
+	}
+
+	svc := NewTribalMiningService(cdb, nil, "repo")
+
+	// HandleRequest should resolve to the .go file only.
+	paths, err := svc.resolveSymbolFiles("HandleRequest")
+	if err != nil {
+		t.Fatalf("resolveSymbolFiles: %v", err)
+	}
+	if len(paths) != 1 || paths[0] != "pkg/handler.go" {
+		t.Errorf("got paths %v, want [pkg/handler.go]", paths)
+	}
+
+	// Store lives at k8s.io/client-go/tools/cache — should resolve to zero files.
+	paths, err = svc.resolveSymbolFiles("Store")
+	if err != nil {
+		t.Fatalf("resolveSymbolFiles: %v", err)
+	}
+	if len(paths) != 0 {
+		t.Errorf("got paths %v for import path, want none", paths)
+	}
+
+	// Run lives at pkg/controller (no extension) — should resolve to zero files.
+	paths, err = svc.resolveSymbolFiles("Run")
+	if err != nil {
+		t.Fatalf("resolveSymbolFiles: %v", err)
+	}
+	if len(paths) != 0 {
+		t.Errorf("got paths %v for extensionless path, want none", paths)
+	}
+}
+
 func TestMiningError_Structured(t *testing.T) {
 	me := &MiningError{
 		Code:    "rate_limited",

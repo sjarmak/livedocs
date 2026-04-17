@@ -147,6 +147,10 @@ func ListPackagesHandler(pool *DBPool, sc *StalenessChecker) ToolHandler {
 		}
 		prefix := req.GetString("prefix", "")
 
+		if result, err := requireRepoExists(pool, repoName); result != nil {
+			return result, err
+		}
+
 		cdb, err := pool.Open(repoName)
 		if err != nil {
 			return NewErrorResultf("open repo %s: %v", repoName, err), nil
@@ -239,6 +243,10 @@ func DescribePackageHandler(pool *DBPool, sc *StalenessChecker) ToolHandler {
 			return NewErrorResult("missing required parameter 'import_path'"), nil
 		}
 
+		if result, err := requireRepoExists(pool, repoName); result != nil {
+			return result, err
+		}
+
 		cdb, err := pool.Open(repoName)
 		if err != nil {
 			return NewErrorResultf("open repo %s: %v", repoName, err), nil
@@ -324,6 +332,20 @@ When repo roots are configured, performs lazy staleness detection and re-extract
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+// requireRepoExists checks whether a claims DB exists for the given repo name.
+// If the repo does not exist, it returns a non-nil ToolResult with a clear error
+// message. If the repo exists, it returns (nil, nil) and the caller should proceed.
+func requireRepoExists(pool *DBPool, repoName string) (ToolResult, error) {
+	exists, err := pool.RepoExists(repoName)
+	if err != nil {
+		return NewErrorResultf("check repo %s: %v", repoName, err), nil
+	}
+	if !exists {
+		return NewErrorResultf("repo %q not found: no claims database exists. Use list_repos to see available repositories or request_extraction to index a new one.", repoName), nil
+	}
+	return nil, nil
+}
 
 // buildSemanticSections queries for "purpose" and "usage_pattern" claims
 // for symbols in the given import path and formats them as Markdown sections.

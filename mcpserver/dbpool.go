@@ -170,6 +170,23 @@ func (p *DBPool) evictLRU() {
 	delete(p.conns, entry.repoName)
 }
 
+// RepoExists reports whether a claims database file exists for the given repo
+// name. It validates the name to prevent path traversal, then checks the
+// filesystem without opening the database.
+func (p *DBPool) RepoExists(repoName string) (bool, error) {
+	if err := validateRepoName(repoName); err != nil {
+		return false, err
+	}
+	_, err := os.Stat(p.dbPath(repoName))
+	if err == nil {
+		return true, nil
+	}
+	if os.IsNotExist(err) {
+		return false, nil
+	}
+	return false, fmt.Errorf("check repo %s: %w", repoName, err)
+}
+
 // Manifest returns the list of repo names available in the data directory,
 // derived from the filesystem without opening any databases. Names are sorted
 // alphabetically.

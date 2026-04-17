@@ -403,6 +403,43 @@ func TestDBPool_LastAccessWithCustomClock(t *testing.T) {
 	}
 }
 
+func TestDBPool_RepoExists(t *testing.T) {
+	dir := createTestDBDir(t, []string{"alpha", "beta"})
+	pool := NewDBPool(dir, DefaultMaxOpenDBs)
+	defer pool.Close()
+
+	tests := []struct {
+		name     string
+		repo     string
+		want     bool
+		wantErr  bool
+	}{
+		{name: "existing repo", repo: "alpha", want: true},
+		{name: "another existing repo", repo: "beta", want: true},
+		{name: "non-existent repo", repo: "gamma", want: false},
+		{name: "empty name", repo: "", wantErr: true},
+		{name: "path traversal", repo: "../etc", wantErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := pool.RepoExists(tt.repo)
+			if tt.wantErr {
+				if err == nil {
+					t.Error("expected error, got nil")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if got != tt.want {
+				t.Errorf("RepoExists(%q) = %v, want %v", tt.repo, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestDBPool_NoInvalidationWhenStatFails(t *testing.T) {
 	dir := t.TempDir()
 	pool := NewDBPool(dir, DefaultMaxOpenDBs)

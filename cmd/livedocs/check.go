@@ -23,6 +23,9 @@ var (
 	checkCrossRepo      bool
 	checkDocMap         string
 	checkDocsDir        string
+	checkAllMarkdown    bool
+	checkExclude        []string
+	checkInclude        []string
 )
 
 var checkCmd = &cobra.Command{
@@ -70,10 +73,18 @@ func init() {
 	checkCmd.Flags().BoolVar(&checkCrossRepo, "cross-repo", false, "run cross-repo semantic drift detection using doc-map")
 	checkCmd.Flags().StringVar(&checkDocMap, "doc-map", "", "path to doc-map.yaml (required with --cross-repo)")
 	checkCmd.Flags().StringVar(&checkDocsDir, "docs-dir", "", "directory containing documentation files (for --cross-repo)")
+	checkCmd.Flags().BoolVar(&checkAllMarkdown, "all-markdown", false, "scan all *.md files (legacy behavior)")
+	checkCmd.Flags().StringSliceVar(&checkExclude, "exclude", nil, "exclude patterns (directory/ or glob)")
+	checkCmd.Flags().StringSliceVar(&checkInclude, "include", nil, "include only files matching these patterns (overrides defaults)")
 }
 
 func runFullCheck(cmd *cobra.Command, path string) error {
-	result, err := check.Run(cmd.Context(), path)
+	opts := check.FindOptions{
+		AllMarkdown:     checkAllMarkdown,
+		ExcludePatterns: checkExclude,
+		IncludePatterns: checkInclude,
+	}
+	result, err := check.RunWithOptions(cmd.Context(), path, opts)
 	if err != nil {
 		return fmt.Errorf("check failed: %w", err)
 	}
