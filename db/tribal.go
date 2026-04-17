@@ -2,8 +2,11 @@ package db
 
 import (
 	"database/sql"
+	"errors"
 	"fmt"
 	"strings"
+
+	"modernc.org/sqlite"
 )
 
 // TribalFact represents a tribal knowledge fact extracted from non-code sources.
@@ -53,9 +56,30 @@ type TribalCorrection struct {
 	CreatedAt string
 }
 
-// MaxBodyBytes is the maximum allowed length (in bytes) for user-supplied
-// tribal fact body text. Enforced at both CLI and MCP layers.
-const MaxBodyBytes = 4096
+// TribalFeedback represents a user-reported issue with a tribal fact.
+// Feedback is the lightweight labeling mechanism that feeds the S4 gate
+// hallucination rate calculation.
+type TribalFeedback struct {
+	ID        int64
+	FactID    int64
+	Reason    string
+	Details   string
+	Reporter  string
+	CreatedAt string
+}
+
+// validFeedbackReasons is the set of allowed tribal feedback reasons.
+var validFeedbackReasons = map[string]bool{
+	"wrong":      true,
+	"stale":      true,
+	"misleading": true,
+	"offensive":  true,
+}
+
+// ValidFeedbackReason reports whether reason is a recognised feedback reason.
+func ValidFeedbackReason(reason string) bool {
+	return validFeedbackReasons[reason]
+}
 
 // validFactKinds is the set of allowed tribal fact kinds.
 var validFactKinds = map[string]bool{
@@ -141,6 +165,16 @@ CREATE TABLE IF NOT EXISTS tribal_corrections (
     actor           TEXT NOT NULL,
     created_at      TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS tribal_feedback (
+    id              INTEGER PRIMARY KEY,
+    fact_id         INTEGER NOT NULL REFERENCES tribal_facts(id),
+    reason          TEXT NOT NULL CHECK(reason IN ('wrong','stale','misleading','offensive')),
+    details         TEXT,
+    reporter        TEXT NOT NULL,
+    created_at      TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_tribal_feedback_fact ON tribal_feedback(fact_id);
 `
 	_, err := c.exec.Exec(schema)
 	if err != nil {
@@ -666,4 +700,193 @@ func (c *ClaimsDB) InsertTribalCorrection(correction TribalCorrection) (int64, e
 		return 0, fmt.Errorf("get tribal correction id: %w", err)
 	}
 	return id, nil
+}
+
+// InsertTribalFeedback inserts a feedback row into tribal_feedback.
+// Returns the feedback ID on success. The Reason field must be one of
+// wrong, stale, misleading, or offensive.
+func (c *ClaimsDB) InsertTribalFeedback(fb TribalFeedback) (int64, error) {
+	if fb.FactID <= 0 {
+		return 0, fmt.Errorf("insert tribal feedback: fact_id must be positive")
+	}
+	if !validFeedbackReasons[fb.Reason] {
+		return 0, fmt.Errorf("insert tribal feedback: invalid reason %q", fb.Reason)
+	}
+	if fb.Reporter == "" {
+		return 0, fmt.Errorf("insert tribal feedback: reporter is required")
+	}
+	if fb.CreatedAt == "" {
+		return 0, fmt.Errorf("insert tribal feedback: created_at is required")
+	}
+
+	result, err := c.exec.Exec(`
+		INSERT INTO tribal_feedback (fact_id, reason, details, reporter, created_at)
+		VALUES (?, ?, ?, ?, ?)
+	`, fb.FactID, fb.Reason,
+		nullableString(fb.Details), fb.Reporter, fb.CreatedAt)
+	if err != nil {
+		return 0, fmt.Errorf("insert tribal feedback: %w", err)
+	}
+
+	id, err := result.LastInsertId()
+	if err != nil {
+		return 0, fmt.Errorf("get tribal feedback id: %w", err)
+	}
+	return id, nil
+}
+
+// GetTribalFeedbackByFact returns all feedback rows for a given fact ID.
+func (c *ClaimsDB) GetTribalFeedbackByFact(factID int64) ([]TribalFeedback, error) {
+	rows, err := c.exec.Query(`
+		SELECT id, fact_id, reason, details, reporter, created_at
+		FROM tribal_feedback WHERE fact_id = ?
+		ORDER BY id
+	`, factID)
+	if err != nil {
+		return nil, fmt.Errorf("get tribal feedback by fact: %w", err)
+	}
+	defer rows.Close()
+
+	var result []TribalFeedback
+	for rows.Next() {
+		var fb TribalFeedback
+		var details sql.NullString
+		if err := rows.Scan(&fb.ID, &fb.FactID, &fb.Reason, &details, &fb.Reporter, &fb.CreatedAt); err != nil {
+			return nil, fmt.Errorf("scan tribal feedback: %w", err)
+		}
+		fb.Details = details.String
+		result = append(result, fb)
+	}
+	return result, rows.Err()
+}
+
+// S4GateStats holds aggregated statistics for the S4 gate status calculation.
+type S4GateStats struct {
+	TotalFeedback     int
+	TotalCorrections  int
+	WrongReports      int
+	StaleReports      int
+	MisleadingReports int
+	OffensiveReports  int
+	DeleteCorrections int
+	SupersedeCorrections int
+	TotalLabeledFacts int
+	HallucinationRate float64
+}
+
+// GetS4GateStats aggregates tribal_feedback and tribal_corrections into
+// S4 gate statistics. The hallucination rate is computed as:
+//
+//	(wrong_reports + delete_corrections + supersede_corrections) / total_labeled_facts
+//
+// where total_labeled_facts is the number of distinct fact IDs appearing
+// in either tribal_feedback or tribal_corrections.
+func (c *ClaimsDB) GetS4GateStats() (S4GateStats, error) {
+	var stats S4GateStats
+
+	// Count feedback by reason.
+	rows, err := c.exec.Query(`
+		SELECT reason, COUNT(*) FROM tribal_feedback GROUP BY reason
+	`)
+	if err != nil {
+		if IsMissingTableErr(err) {
+			return stats, nil
+		}
+		return stats, fmt.Errorf("count feedback by reason: %w", err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var reason string
+		var count int
+		if err := rows.Scan(&reason, &count); err != nil {
+			return stats, fmt.Errorf("scan feedback count: %w", err)
+		}
+		stats.TotalFeedback += count
+		switch reason {
+		case "wrong":
+			stats.WrongReports = count
+		case "stale":
+			stats.StaleReports = count
+		case "misleading":
+			stats.MisleadingReports = count
+		case "offensive":
+			stats.OffensiveReports = count
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return stats, fmt.Errorf("feedback rows: %w", err)
+	}
+
+	// Count corrections by action.
+	rows2, err := c.exec.Query(`
+		SELECT action, COUNT(*) FROM tribal_corrections GROUP BY action
+	`)
+	if err != nil {
+		if IsMissingTableErr(err) {
+			return stats, nil
+		}
+		return stats, fmt.Errorf("count corrections by action: %w", err)
+	}
+	defer rows2.Close()
+
+	for rows2.Next() {
+		var action string
+		var count int
+		if err := rows2.Scan(&action, &count); err != nil {
+			return stats, fmt.Errorf("scan correction count: %w", err)
+		}
+		stats.TotalCorrections += count
+		switch action {
+		case "delete":
+			stats.DeleteCorrections = count
+		case "supersede":
+			stats.SupersedeCorrections = count
+		}
+	}
+	if err := rows2.Err(); err != nil {
+		return stats, fmt.Errorf("correction rows: %w", err)
+	}
+
+	// Count distinct labeled facts.
+	err = c.exec.QueryRow(`
+		SELECT COUNT(*) FROM (
+			SELECT DISTINCT fact_id FROM tribal_feedback
+			UNION
+			SELECT DISTINCT fact_id FROM tribal_corrections
+		)
+	`).Scan(&stats.TotalLabeledFacts)
+	if err != nil {
+		if IsMissingTableErr(err) {
+			return stats, nil
+		}
+		return stats, fmt.Errorf("count labeled facts: %w", err)
+	}
+
+	// Compute hallucination rate, capped at 1.0. Multiple signals per fact
+	// (e.g., a wrong report + a delete correction on the same fact) can push
+	// the raw ratio above 1.0, but the rate represents a proportion.
+	if stats.TotalLabeledFacts > 0 {
+		hallucinations := stats.WrongReports + stats.DeleteCorrections + stats.SupersedeCorrections
+		stats.HallucinationRate = float64(hallucinations) / float64(stats.TotalLabeledFacts)
+		if stats.HallucinationRate > 1.0 {
+			stats.HallucinationRate = 1.0
+		}
+	}
+
+	return stats, nil
+}
+
+// IsMissingTableErr reports whether err indicates a missing SQLite table.
+// Uses errors.As against the modernc sqlite driver's typed error to avoid
+// matching unrelated errors.
+func IsMissingTableErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	var sqliteErr *sqlite.Error
+	if !errors.As(err, &sqliteErr) {
+		return false
+	}
+	return strings.Contains(sqliteErr.Error(), "no such table")
 }

@@ -136,6 +136,37 @@ func TestTribalSchema(t *testing.T) {
 		}
 	}
 
+	// Verify tribal_feedback table exists with correct columns.
+	rows4, err := db.DB().Query("PRAGMA table_info(tribal_feedback)")
+	if err != nil {
+		t.Fatalf("pragma tribal_feedback: %v", err)
+	}
+	defer rows4.Close()
+
+	feedbackCols := map[string]bool{
+		"id": false, "fact_id": false, "reason": false,
+		"details": false, "reporter": false, "created_at": false,
+	}
+	for rows4.Next() {
+		var cid int
+		var name, typ string
+		var notnull, pk int
+		var dflt interface{}
+		if err := rows4.Scan(&cid, &name, &typ, &notnull, &dflt, &pk); err != nil {
+			t.Fatalf("scan column: %v", err)
+		}
+		if _, ok := feedbackCols[name]; ok {
+			feedbackCols[name] = true
+		} else {
+			t.Errorf("unexpected column in tribal_feedback: %s", name)
+		}
+	}
+	for col, found := range feedbackCols {
+		if !found {
+			t.Errorf("missing column in tribal_feedback: %s", col)
+		}
+	}
+
 	// Idempotency: calling CreateTribalSchema again should not error.
 	if err := db.CreateTribalSchema(); err != nil {
 		t.Fatalf("create tribal schema twice: %v", err)
@@ -853,4 +884,161 @@ func snapshotSqliteMaster(t *testing.T, db *ClaimsDB) string {
 		out += typ + "|" + name + "|" + tbl + "|" + sqlText + "\n"
 	}
 	return out
+}
+
+func TestInsertTribalFeedback(t *testing.T) {
+	cdb := tribalDB(t)
+	subjectID := insertTestSymbol(t, cdb, "FeedbackTarget")
+
+	// Insert a fact to attach feedback to.
+	factID, err := cdb.InsertTribalFact(TribalFact{
+		SubjectID:        subjectID,
+		Kind:             "invariant",
+		Body:             "test fact",
+		SourceQuote:      "test quote",
+		Confidence:       0.9,
+		Corroboration:    1,
+		Extractor:        "test",
+		ExtractorVersion: "v1",
+		StalenessHash:    "hash",
+		Status:           "active",
+		CreatedAt:        "2025-01-01T00:00:00Z",
+		LastVerified:     "2025-01-01T00:00:00Z",
+	}, []TribalEvidence{{
+		SourceType:  "commit_msg",
+		SourceRef:   "ref",
+		ContentHash: "hash",
+	}})
+	if err != nil {
+		t.Fatalf("insert fact: %v", err)
+	}
+
+	// Insert feedback.
+	fbID, err := cdb.InsertTribalFeedback(TribalFeedback{
+		FactID:    factID,
+		Reason:    "wrong",
+		Details:   "this is incorrect",
+		Reporter:  "test-user",
+		CreatedAt: "2025-02-01T00:00:00Z",
+	})
+	if err != nil {
+		t.Fatalf("insert feedback: %v", err)
+	}
+	if fbID == 0 {
+		t.Error("expected non-zero feedback ID")
+	}
+
+	// Query feedback.
+	fbs, err := cdb.GetTribalFeedbackByFact(factID)
+	if err != nil {
+		t.Fatalf("get feedback: %v", err)
+	}
+	if len(fbs) != 1 {
+		t.Fatalf("expected 1 feedback row, got %d", len(fbs))
+	}
+	if fbs[0].Reason != "wrong" {
+		t.Errorf("expected reason 'wrong', got %q", fbs[0].Reason)
+	}
+	if fbs[0].Details != "this is incorrect" {
+		t.Errorf("expected details 'this is incorrect', got %q", fbs[0].Details)
+	}
+	if fbs[0].Reporter != "test-user" {
+		t.Errorf("expected reporter 'test-user', got %q", fbs[0].Reporter)
+	}
+}
+
+func TestInsertTribalFeedback_InvalidReason(t *testing.T) {
+	cdb := tribalDB(t)
+
+	_, err := cdb.InsertTribalFeedback(TribalFeedback{
+		FactID:    1,
+		Reason:    "invalid",
+		Reporter:  "test",
+		CreatedAt: "2025-02-01T00:00:00Z",
+	})
+	if err == nil {
+		t.Fatal("expected error for invalid reason")
+	}
+}
+
+func TestInsertTribalFeedback_MissingReporter(t *testing.T) {
+	cdb := tribalDB(t)
+
+	_, err := cdb.InsertTribalFeedback(TribalFeedback{
+		FactID:    1,
+		Reason:    "wrong",
+		Reporter:  "",
+		CreatedAt: "2025-02-01T00:00:00Z",
+	})
+	if err == nil {
+		t.Fatal("expected error for missing reporter")
+	}
+}
+
+func TestGetS4GateStats(t *testing.T) {
+	cdb := tribalDB(t)
+	subjectID := insertTestSymbol(t, cdb, "S4Target")
+
+	// Insert two facts.
+	factID1, err := cdb.InsertTribalFact(TribalFact{
+		SubjectID: subjectID, Kind: "invariant", Body: "fact 1", SourceQuote: "q1",
+		Confidence: 0.9, Corroboration: 1, Extractor: "test", ExtractorVersion: "v1",
+		StalenessHash: "h1", Status: "active", CreatedAt: "2025-01-01T00:00:00Z", LastVerified: "2025-01-01T00:00:00Z",
+	}, []TribalEvidence{{SourceType: "commit_msg", SourceRef: "r1", ContentHash: "h1"}})
+	if err != nil {
+		t.Fatalf("insert fact 1: %v", err)
+	}
+
+	factID2, err := cdb.InsertTribalFact(TribalFact{
+		SubjectID: subjectID, Kind: "rationale", Body: "fact 2", SourceQuote: "q2",
+		Confidence: 0.8, Corroboration: 1, Extractor: "test", ExtractorVersion: "v1",
+		StalenessHash: "h2", Status: "active", CreatedAt: "2025-01-01T00:00:00Z", LastVerified: "2025-01-01T00:00:00Z",
+	}, []TribalEvidence{{SourceType: "commit_msg", SourceRef: "r2", ContentHash: "h2"}})
+	if err != nil {
+		t.Fatalf("insert fact 2: %v", err)
+	}
+
+	// Add feedback.
+	_, err = cdb.InsertTribalFeedback(TribalFeedback{FactID: factID1, Reason: "wrong", Reporter: "u1", CreatedAt: "2025-02-01T00:00:00Z"})
+	if err != nil {
+		t.Fatalf("insert feedback: %v", err)
+	}
+	_, err = cdb.InsertTribalFeedback(TribalFeedback{FactID: factID1, Reason: "stale", Reporter: "u2", CreatedAt: "2025-02-02T00:00:00Z"})
+	if err != nil {
+		t.Fatalf("insert feedback: %v", err)
+	}
+
+	// Add a correction.
+	_, err = cdb.InsertTribalCorrection(TribalCorrection{FactID: factID2, Action: "delete", Reason: "obsolete", Actor: "admin", CreatedAt: "2025-02-03T00:00:00Z"})
+	if err != nil {
+		t.Fatalf("insert correction: %v", err)
+	}
+
+	stats, err := cdb.GetS4GateStats()
+	if err != nil {
+		t.Fatalf("get S4 gate stats: %v", err)
+	}
+
+	if stats.TotalFeedback != 2 {
+		t.Errorf("expected 2 total feedback, got %d", stats.TotalFeedback)
+	}
+	if stats.WrongReports != 1 {
+		t.Errorf("expected 1 wrong report, got %d", stats.WrongReports)
+	}
+	if stats.StaleReports != 1 {
+		t.Errorf("expected 1 stale report, got %d", stats.StaleReports)
+	}
+	if stats.TotalCorrections != 1 {
+		t.Errorf("expected 1 total correction, got %d", stats.TotalCorrections)
+	}
+	if stats.DeleteCorrections != 1 {
+		t.Errorf("expected 1 delete correction, got %d", stats.DeleteCorrections)
+	}
+	if stats.TotalLabeledFacts != 2 {
+		t.Errorf("expected 2 labeled facts, got %d", stats.TotalLabeledFacts)
+	}
+	// Hallucination rate: (1 wrong + 1 delete) / 2 = 1.0
+	if stats.HallucinationRate != 1.0 {
+		t.Errorf("expected hallucination rate 1.0, got %f", stats.HallucinationRate)
+	}
 }

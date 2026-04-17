@@ -9,7 +9,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/live-docs/live_docs/db"
 	"github.com/spf13/pflag"
 	_ "modernc.org/sqlite"
 )
@@ -758,174 +757,205 @@ func TestTribalCorrectionCLIFactNotFound(t *testing.T) {
 	}
 }
 
-// ---------------------------------------------------------------------------
-// Body length limit tests
-// ---------------------------------------------------------------------------
+// createTribalTestDBWithFeedback creates a temp claims DB with tribal schema,
+// a fact, feedback rows, and correction rows for S4 gate testing.
+func createTribalTestDBWithFeedback(t *testing.T) string {
+	t.Helper()
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "s4gate.claims.db")
 
-func TestValidateBodyLength(t *testing.T) {
-	tests := []struct {
-		name    string
-		body    string
-		wantErr bool
-		errMsg  string
-	}{
-		{name: "empty body", body: "", wantErr: false},
-		{name: "short body", body: "this is fine", wantErr: false},
-		{name: "exactly at limit", body: strings.Repeat("a", db.MaxBodyBytes), wantErr: false},
-		{name: "one byte over limit", body: strings.Repeat("a", db.MaxBodyBytes+1), wantErr: true, errMsg: "exceeds maximum"},
-		{name: "way over limit", body: strings.Repeat("x", db.MaxBodyBytes*2), wantErr: true, errMsg: "4096"},
+	sqlDB, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("open db: %v", err)
 	}
+	defer sqlDB.Close()
 
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			err := validateBodyLength(tc.body)
-			if tc.wantErr {
-				if err == nil {
-					t.Fatal("expected error, got nil")
-				}
-				if !strings.Contains(err.Error(), tc.errMsg) {
-					t.Errorf("expected error containing %q, got: %v", tc.errMsg, err)
-				}
-			} else {
-				if err != nil {
-					t.Errorf("unexpected error: %v", err)
-				}
-			}
-		})
+	_, err = sqlDB.Exec(`
+		CREATE TABLE IF NOT EXISTS symbols (
+			id INTEGER PRIMARY KEY, repo TEXT, import_path TEXT,
+			symbol_name TEXT, language TEXT, kind TEXT, visibility TEXT,
+			display_name TEXT, scip_symbol TEXT
+		);
+		INSERT INTO symbols (id, repo, import_path, symbol_name, language, kind, visibility)
+		VALUES (1, 'test-repo', 'pkg/foo', 'Foo', 'go', 'function', 'public');
+		INSERT INTO symbols (id, repo, import_path, symbol_name, language, kind, visibility)
+		VALUES (2, 'test-repo', 'pkg/bar', 'Bar', 'go', 'function', 'public');
+
+		CREATE TABLE IF NOT EXISTS claims (
+			id INTEGER PRIMARY KEY, subject_id INTEGER, predicate TEXT,
+			object_text TEXT, object_id INTEGER, source_file TEXT,
+			source_line INTEGER, confidence REAL, claim_tier TEXT,
+			extractor TEXT, extractor_version TEXT, last_verified TEXT
+		);
+
+		CREATE TABLE IF NOT EXISTS tribal_facts (
+			id INTEGER PRIMARY KEY, subject_id INTEGER NOT NULL,
+			kind TEXT NOT NULL CHECK(kind IN ('ownership','rationale','invariant','quirk','todo','deprecation')),
+			body TEXT NOT NULL, source_quote TEXT NOT NULL,
+			confidence REAL NOT NULL, corroboration INTEGER NOT NULL DEFAULT 1,
+			extractor TEXT NOT NULL, extractor_version TEXT NOT NULL, model TEXT,
+			staleness_hash TEXT NOT NULL,
+			status TEXT NOT NULL DEFAULT 'active' CHECK(status IN ('active','stale','quarantined','superseded','deleted')),
+			created_at TEXT NOT NULL, last_verified TEXT NOT NULL,
+			cluster_key TEXT NOT NULL DEFAULT ''
+		);
+		CREATE TABLE IF NOT EXISTS tribal_evidence (
+			id INTEGER PRIMARY KEY, fact_id INTEGER NOT NULL,
+			source_type TEXT NOT NULL CHECK(source_type IN ('blame','commit_msg','pr_comment','codeowners','inline_marker','runbook','correction')),
+			source_ref TEXT NOT NULL, author TEXT, authored_at TEXT,
+			content_hash TEXT NOT NULL
+		);
+		CREATE TABLE IF NOT EXISTS tribal_corrections (
+			id INTEGER PRIMARY KEY, fact_id INTEGER NOT NULL,
+			action TEXT NOT NULL CHECK(action IN ('correct','delete','supersede')),
+			new_body TEXT, reason TEXT NOT NULL, actor TEXT NOT NULL,
+			created_at TEXT NOT NULL
+		);
+		CREATE TABLE IF NOT EXISTS tribal_feedback (
+			id INTEGER PRIMARY KEY, fact_id INTEGER NOT NULL,
+			reason TEXT NOT NULL CHECK(reason IN ('wrong','stale','misleading','offensive')),
+			details TEXT, reporter TEXT NOT NULL, created_at TEXT NOT NULL
+		);
+
+		CREATE TABLE IF NOT EXISTS source_files (
+			id INTEGER PRIMARY KEY, repo TEXT NOT NULL, relative_path TEXT NOT NULL,
+			content_hash TEXT NOT NULL, extractor_version TEXT NOT NULL,
+			extracted_at TEXT NOT NULL, last_pr_id_set BLOB, pr_miner_version TEXT DEFAULT ''
+		);
+
+		-- Two facts.
+		INSERT INTO tribal_facts (id, subject_id, kind, body, source_quote,
+			confidence, corroboration, extractor, extractor_version, staleness_hash,
+			status, created_at, last_verified, cluster_key)
+		VALUES (1, 1, 'invariant', 'fact one', 'quote one',
+			1.0, 1, 'test', 'v1', 'hash1',
+			'active', '2025-01-01T00:00:00Z', '2025-01-01T00:00:00Z', '');
+		INSERT INTO tribal_facts (id, subject_id, kind, body, source_quote,
+			confidence, corroboration, extractor, extractor_version, staleness_hash,
+			status, created_at, last_verified, cluster_key)
+		VALUES (2, 2, 'rationale', 'fact two', 'quote two',
+			0.8, 1, 'test', 'v1', 'hash2',
+			'active', '2025-01-01T00:00:00Z', '2025-01-01T00:00:00Z', '');
+
+		INSERT INTO tribal_evidence (fact_id, source_type, source_ref, content_hash)
+		VALUES (1, 'correction', 'test-ref', 'abc1');
+		INSERT INTO tribal_evidence (fact_id, source_type, source_ref, content_hash)
+		VALUES (2, 'correction', 'test-ref', 'abc2');
+
+		-- Feedback: 2 wrong, 1 stale, 1 misleading on fact 1.
+		INSERT INTO tribal_feedback (fact_id, reason, reporter, created_at) VALUES (1, 'wrong', 'user1', '2025-02-01T00:00:00Z');
+		INSERT INTO tribal_feedback (fact_id, reason, reporter, created_at) VALUES (1, 'wrong', 'user2', '2025-02-02T00:00:00Z');
+		INSERT INTO tribal_feedback (fact_id, reason, reporter, created_at) VALUES (1, 'stale', 'user3', '2025-02-03T00:00:00Z');
+		INSERT INTO tribal_feedback (fact_id, reason, reporter, created_at) VALUES (1, 'misleading', 'user4', '2025-02-04T00:00:00Z');
+
+		-- Correction: 1 delete on fact 2.
+		INSERT INTO tribal_corrections (fact_id, action, reason, actor, created_at)
+		VALUES (2, 'delete', 'no longer relevant', 'admin', '2025-02-05T00:00:00Z');
+	`)
+	if err != nil {
+		t.Fatalf("create test schema: %v", err)
 	}
+	return dbPath
 }
 
-func TestTribalCorrectBodyTooLong(t *testing.T) {
+func TestTribalS4GateStatus(t *testing.T) {
 	resetExtractFlags()
-	resetTribalCorrectionFlags()
-	dbPath := createTribalTestDB(t)
-
-	longBody := strings.Repeat("x", db.MaxBodyBytes+1)
+	dbPath := createTribalTestDBWithFeedback(t)
 
 	buf := new(bytes.Buffer)
 	rootCmd.SetOut(buf)
 	rootCmd.SetErr(buf)
-	rootCmd.SetArgs([]string{
-		"tribal", "correct",
-		"--db", dbPath,
-		"--fact-id", "1",
-		"--body", longBody,
-		"--reason", "test",
-	})
-	err := rootCmd.Execute()
-	if err == nil {
-		t.Fatal("expected error for oversized body")
+	rootCmd.SetArgs([]string{"tribal", "s4-gate-status", dbPath})
+	if err := rootCmd.Execute(); err != nil {
+		t.Fatalf("tribal s4-gate-status failed: %v", err)
 	}
-	if !strings.Contains(err.Error(), "exceeds maximum") {
-		t.Errorf("expected 'exceeds maximum' in error, got: %v", err)
+
+	out := buf.String()
+
+	// Check header.
+	if !strings.Contains(out, "S4 Gate Status") {
+		t.Error("output missing 'S4 Gate Status' header")
+	}
+
+	// Check feedback counts.
+	if !strings.Contains(out, "wrong: 2") {
+		t.Errorf("expected 'wrong: 2', got: %q", out)
+	}
+	if !strings.Contains(out, "stale: 1") {
+		t.Errorf("expected 'stale: 1', got: %q", out)
+	}
+	if !strings.Contains(out, "misleading: 1") {
+		t.Errorf("expected 'misleading: 1', got: %q", out)
+	}
+
+	// Check corrections.
+	if !strings.Contains(out, "delete: 1") {
+		t.Errorf("expected 'delete: 1', got: %q", out)
+	}
+
+	// Hallucinations = wrong_reports(2) + delete_corrections(1) = 3, distinct facts = 2.
+	// Raw ratio 3/2 = 1.5, capped at 1.0 = 100%.
+	if !strings.Contains(out, "100.00%") {
+		t.Errorf("expected hallucination rate '100.00%%', got: %q", out)
+	}
+
+	// Check threshold not reached.
+	if !strings.Contains(out, "NOT reached") {
+		t.Errorf("expected 'NOT reached' message, got: %q", out)
+	}
+	if !strings.Contains(out, "2/50") {
+		t.Errorf("expected '2/50 labeled facts', got: %q", out)
 	}
 }
 
-func TestTribalSupersedeBodyTooLong(t *testing.T) {
+func TestTribalS4GateStatus_EmptyDB(t *testing.T) {
 	resetExtractFlags()
-	resetTribalCorrectionFlags()
-	dbPath := createTribalTestDB(t)
 
-	longBody := strings.Repeat("x", db.MaxBodyBytes+1)
+	// Create a DB with tribal schema but no feedback or corrections.
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "empty-s4.claims.db")
+	sqlDB, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	_, err = sqlDB.Exec(`
+		CREATE TABLE IF NOT EXISTS symbols (id INTEGER PRIMARY KEY, repo TEXT, import_path TEXT, symbol_name TEXT, language TEXT, kind TEXT, visibility TEXT, display_name TEXT, scip_symbol TEXT);
+		CREATE TABLE IF NOT EXISTS claims (id INTEGER PRIMARY KEY, subject_id INTEGER, predicate TEXT, object_text TEXT, object_id INTEGER, source_file TEXT, source_line INTEGER, confidence REAL, claim_tier TEXT, extractor TEXT, extractor_version TEXT, last_verified TEXT);
+		CREATE TABLE IF NOT EXISTS tribal_facts (id INTEGER PRIMARY KEY, subject_id INTEGER NOT NULL, kind TEXT NOT NULL, body TEXT NOT NULL, source_quote TEXT NOT NULL, confidence REAL NOT NULL, corroboration INTEGER NOT NULL DEFAULT 1, extractor TEXT NOT NULL, extractor_version TEXT NOT NULL, model TEXT, staleness_hash TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'active', created_at TEXT NOT NULL, last_verified TEXT NOT NULL, cluster_key TEXT NOT NULL DEFAULT '');
+		CREATE TABLE IF NOT EXISTS tribal_evidence (id INTEGER PRIMARY KEY, fact_id INTEGER NOT NULL, source_type TEXT NOT NULL, source_ref TEXT NOT NULL, author TEXT, authored_at TEXT, content_hash TEXT NOT NULL);
+		CREATE TABLE IF NOT EXISTS tribal_corrections (id INTEGER PRIMARY KEY, fact_id INTEGER NOT NULL, action TEXT NOT NULL, new_body TEXT, reason TEXT NOT NULL, actor TEXT NOT NULL, created_at TEXT NOT NULL);
+		CREATE TABLE IF NOT EXISTS tribal_feedback (id INTEGER PRIMARY KEY, fact_id INTEGER NOT NULL, reason TEXT NOT NULL, details TEXT, reporter TEXT NOT NULL, created_at TEXT NOT NULL);
+	`)
+	if err != nil {
+		t.Fatalf("create schema: %v", err)
+	}
+	sqlDB.Close()
 
 	buf := new(bytes.Buffer)
 	rootCmd.SetOut(buf)
 	rootCmd.SetErr(buf)
-	rootCmd.SetArgs([]string{
-		"tribal", "supersede",
-		"--db", dbPath,
-		"--fact-id", "1",
-		"--body", longBody,
-		"--reason", "test",
-	})
-	err := rootCmd.Execute()
-	if err == nil {
-		t.Fatal("expected error for oversized body")
+	rootCmd.SetArgs([]string{"tribal", "s4-gate-status", dbPath})
+	if err := rootCmd.Execute(); err != nil {
+		t.Fatalf("tribal s4-gate-status failed: %v", err)
 	}
-	if !strings.Contains(err.Error(), "exceeds maximum") {
-		t.Errorf("expected 'exceeds maximum' in error, got: %v", err)
+
+	out := buf.String()
+	if !strings.Contains(out, "0.00%") {
+		t.Errorf("expected '0.00%%' for empty DB, got: %q", out)
+	}
+	if !strings.Contains(out, "0/50") {
+		t.Errorf("expected '0/50' for empty DB, got: %q", out)
 	}
 }
 
-// ---------------------------------------------------------------------------
-// Symlink resolution tests
-// ---------------------------------------------------------------------------
-
-func TestValidateDBPath_SymlinkResolution(t *testing.T) {
-	tmpDir := t.TempDir()
-	dataDir := filepath.Join(tmpDir, "data")
-	secretDir := filepath.Join(tmpDir, "secret")
-	if err := os.MkdirAll(dataDir, 0o755); err != nil {
-		t.Fatal(err)
+func TestTribalS4GateStatusCommandRegistered(t *testing.T) {
+	var hasS4Gate bool
+	for _, cmd := range tribalCmd.Commands() {
+		if cmd.Name() == "s4-gate-status" {
+			hasS4Gate = true
+		}
 	}
-	if err := os.MkdirAll(secretDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-
-	secretDB := filepath.Join(secretDir, "stolen.claims.db")
-	if err := os.WriteFile(secretDB, []byte("fake"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	// Symlink inside dataDir pointing to secretDir.
-	symlinkDir := filepath.Join(dataDir, "escape")
-	if err := os.Symlink(secretDir, symlinkDir); err != nil {
-		t.Skipf("symlinks not supported: %v", err)
-	}
-
-	// Path appears inside dataDir but resolves outside.
-	escapePath := filepath.Join(symlinkDir, "stolen.claims.db")
-	err := ValidateDBPath(escapePath, dataDir)
-	if err == nil {
-		t.Fatal("expected error for symlink escape, got nil")
-	}
-	if !strings.Contains(err.Error(), "outside data directory") {
-		t.Errorf("expected 'outside data directory' error, got: %v", err)
-	}
-
-	// Valid symlink within dataDir should be accepted.
-	innerDir := filepath.Join(dataDir, "inner")
-	if err := os.MkdirAll(innerDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	innerDB := filepath.Join(innerDir, "ok.claims.db")
-	if err := os.WriteFile(innerDB, []byte("ok"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	innerLink := filepath.Join(dataDir, "link-to-inner")
-	if err := os.Symlink(innerDir, innerLink); err != nil {
-		t.Fatal(err)
-	}
-	linkedDB := filepath.Join(innerLink, "ok.claims.db")
-	if err := ValidateDBPath(linkedDB, dataDir); err != nil {
-		t.Fatalf("expected valid symlink within dataDir to pass, got: %v", err)
-	}
-}
-
-func TestValidateDBPath_DataDirSymlink(t *testing.T) {
-	tmpDir := t.TempDir()
-	realDataDir := filepath.Join(tmpDir, "real-data")
-	if err := os.MkdirAll(realDataDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	dbFile := filepath.Join(realDataDir, "repo.claims.db")
-	if err := os.WriteFile(dbFile, []byte("db"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	symlinkDataDir := filepath.Join(tmpDir, "link-data")
-	if err := os.Symlink(realDataDir, symlinkDataDir); err != nil {
-		t.Skipf("symlinks not supported: %v", err)
-	}
-
-	// dbPath uses real path, dataDir uses symlink.
-	if err := ValidateDBPath(dbFile, symlinkDataDir); err != nil {
-		t.Fatalf("expected path to pass when dataDir is symlinked, got: %v", err)
-	}
-
-	// dbPath uses symlink, dataDir uses real path.
-	linkedDB := filepath.Join(symlinkDataDir, "repo.claims.db")
-	if err := ValidateDBPath(linkedDB, realDataDir); err != nil {
-		t.Fatalf("expected path to pass when dbPath goes through symlinked dataDir, got: %v", err)
+	if !hasS4Gate {
+		t.Error("s4-gate-status subcommand not registered on tribal command")
 	}
 }

@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+
+	"github.com/live-docs/live_docs/db"
 )
 
 // tribalSearchResponse is the JSON response for the tribal_search tool.
@@ -48,7 +50,7 @@ func TribalSearchHandler(pool *DBPool) ToolHandler {
 
 			facts, err := cdb.SearchTribalFactsBM25(repoName, query, kind, limit-resp.Total)
 			if err != nil {
-				if isMissingTableErr(err) {
+				if db.IsMissingTableErr(err) {
 					continue
 				}
 				return NewErrorResultf("tribal_search: search repo %s: %v", repoName, err), nil

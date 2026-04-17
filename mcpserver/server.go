@@ -163,6 +163,7 @@ func (s *Server) registerMultiRepoTools(pool *DBPool, runner ExtractionRunner) {
 		TribalWhyThisWayToolDef(pool),
 		TribalSearchToolDef(pool),
 		TribalProposeFactToolDef(pool),
+		TribalReportFactToolDef(pool),
 	}
 
 	if runner != nil {
