@@ -56,6 +56,10 @@ type TribalCorrection struct {
 	CreatedAt string
 }
 
+// MaxBodyBytes is the maximum allowed length (in bytes) for user-supplied
+// tribal fact body text. Enforced at both CLI and MCP layers.
+const MaxBodyBytes = 4096
+
 // TribalFeedback represents a user-reported issue with a tribal fact.
 // Feedback is the lightweight labeling mechanism that feeds the S4 gate
 // hallucination rate calculation.

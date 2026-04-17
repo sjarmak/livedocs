@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/live-docs/live_docs/db"
 	"github.com/spf13/pflag"
 	_ "modernc.org/sqlite"
 )
@@ -754,6 +755,43 @@ func TestTribalCorrectionCLIFactNotFound(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "not found") {
 		t.Errorf("expected 'not found' in error, got: %v", err)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Body length limit tests
+// ---------------------------------------------------------------------------
+
+func TestValidateBodyLength(t *testing.T) {
+	tests := []struct {
+		name    string
+		body    string
+		wantErr bool
+		errMsg  string
+	}{
+		{name: "empty body", body: "", wantErr: false},
+		{name: "short body", body: "this is fine", wantErr: false},
+		{name: "exactly at limit", body: strings.Repeat("a", db.MaxBodyBytes), wantErr: false},
+		{name: "one byte over limit", body: strings.Repeat("a", db.MaxBodyBytes+1), wantErr: true, errMsg: "exceeds maximum"},
+		{name: "way over limit", body: strings.Repeat("x", db.MaxBodyBytes*2), wantErr: true, errMsg: "4096"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			err := validateBodyLength(tc.body)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatal("expected error, got nil")
+				}
+				if !strings.Contains(err.Error(), tc.errMsg) {
+					t.Errorf("expected error containing %q, got: %v", tc.errMsg, err)
+				}
+			} else {
+				if err != nil {
+					t.Errorf("unexpected error: %v", err)
+				}
+			}
+		})
 	}
 }
 
