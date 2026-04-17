@@ -6,13 +6,17 @@ package mcpserver
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"strings"
 
 	"github.com/live-docs/live_docs/db"
-	"modernc.org/sqlite"
 )
+
+// corroborationDegradedThreshold is the corroboration level below which
+// LLM-extracted facts are served with degraded=true. Intentionally higher
+// than the gate threshold (2) in appendFilteredFact: the gate excludes
+// completely uncorroborated facts, while degraded flags "served but uncertain."
+const corroborationDegradedThreshold = 3
 
 // ---------------------------------------------------------------------------
 // Provenance envelope types
@@ -39,6 +43,10 @@ type tribalFactEnvelope struct {
 	Extractor     string                   `json:"extractor"`
 	Model         string                   `json:"model"`
 	LastVerified  string                   `json:"last_verified"`
+	// Degraded is true when the fact is an LLM-extracted fact with
+	// corroboration < 3. Consumers should treat degraded facts with
+	// reduced trust until S4 validation is available.
+	Degraded bool `json:"degraded,omitempty"`
 }
 
 // tribalResponse is the JSON response for tribal tools.
@@ -74,6 +82,9 @@ func validateProvenanceEnvelope(fact db.TribalFact) error {
 }
 
 // factToEnvelope converts a validated TribalFact into a tribalFactEnvelope.
+// LLM-extracted facts (model != "") with corroboration < 3 are marked as
+// degraded per the S4 gate failsafe: until S4 ships, these facts should
+// only be served at explicit opt-in or with the degraded flag set.
 func factToEnvelope(fact db.TribalFact) tribalFactEnvelope {
 	evidence := make([]tribalEvidenceEnvelope, 0, len(fact.Evidence))
 	for _, ev := range fact.Evidence {
@@ -88,6 +99,11 @@ func factToEnvelope(fact db.TribalFact) tribalFactEnvelope {
 	if fact.ExtractorVersion != "" {
 		extractor = fact.Extractor + "@" + fact.ExtractorVersion
 	}
+	// S4 failsafe: LLM facts below the degraded threshold are flagged.
+	// corroborationDegradedThreshold (3) > corroboration gate (2) intentionally:
+	// gate excludes uncorroborated facts entirely; degraded marks "uncertain but
+	// served" facts so consumers can distinguish quality tiers.
+	degraded := fact.Model != "" && fact.Corroboration < corroborationDegradedThreshold
 	return tribalFactEnvelope{
 		Body:          fact.Body,
 		SourceQuote:   fact.SourceQuote,
@@ -99,6 +115,7 @@ func factToEnvelope(fact db.TribalFact) tribalFactEnvelope {
 		Extractor:     extractor,
 		Model:         fact.Model,
 		LastVerified:  fact.LastVerified,
+		Degraded:      degraded,
 	}
 }
 
@@ -165,7 +182,7 @@ func queryTribalFactsForSymbol(
 
 		symbols, err := cdb.SearchSymbolsByName(symbolName)
 		if err != nil {
-			if isMissingTableErr(err) {
+			if db.IsMissingTableErr(err) {
 				continue
 			}
 			return resp, fmt.Errorf("search symbols in repo %s: %w", repoName, err)
@@ -182,7 +199,7 @@ func queryTribalFactsForSymbol(
 		for _, sym := range symbols {
 			facts, err := cdb.GetTribalFactsBySubject(sym.ID)
 			if err != nil {
-				if isMissingTableErr(err) {
+				if db.IsMissingTableErr(err) {
 					continue
 				}
 				return resp, fmt.Errorf("get tribal facts for symbol %d in repo %s: %w", sym.ID, repoName, err)
@@ -206,7 +223,7 @@ func queryTribalFactsForSymbol(
 		if pass1QueriedOK && !pass1FoundFacts {
 			importPaths, err := cdb.GetImportPathsForSymbolName(symbolName)
 			if err != nil {
-				if isMissingTableErr(err) {
+				if db.IsMissingTableErr(err) {
 					continue
 				}
 				return resp, fmt.Errorf("get import paths in repo %s: %w", repoName, err)
@@ -218,7 +235,7 @@ func queryTribalFactsForSymbol(
 				}
 				facts, err := cdb.GetTribalFactsByPathPrefix(repoName, escapeLike(dirPrefix))
 				if err != nil {
-					if isMissingTableErr(err) {
+					if db.IsMissingTableErr(err) {
 						continue
 					}
 					return resp, fmt.Errorf("get facts by path prefix in repo %s: %w", repoName, err)
@@ -270,27 +287,6 @@ func escapeLike(s string) string {
 	return s
 }
 
-// isMissingTableErr reports whether err indicates a missing SQLite table —
-// the one error class the tribal query loop is allowed to swallow (repos
-// without the tribal schema are valid, just empty). All other errors must
-// propagate to the caller.
-//
-// Uses errors.As against the modernc sqlite driver's typed error to avoid
-// matching unrelated errors (e.g., an I/O error whose path happens to
-// contain "no such table").
-func isMissingTableErr(err error) bool {
-	if err == nil {
-		return false
-	}
-	var sqliteErr *sqlite.Error
-	if !errors.As(err, &sqliteErr) {
-		return false
-	}
-	// SQLite reports "no such table" with code SQLITE_ERROR (1) and embeds
-	// the phrase in the message. Type assertion above ensures this is
-	// actually a SQLite driver error.
-	return strings.Contains(sqliteErr.Error(), "no such table")
-}
 
 // appendFilteredFact applies kind, confidence, status, and corroboration-gate
 // filters to a tribal fact, validates its provenance envelope, and appends it

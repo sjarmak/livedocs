@@ -296,8 +296,69 @@ var tribalDeleteCmd = &cobra.Command{
 	},
 }
 
+// ---------------------------------------------------------------------------
+// tribal s4-gate-status
+// ---------------------------------------------------------------------------
+
+var tribalS4GateStatusCmd = &cobra.Command{
+	Use:   "s4-gate-status <db-path>",
+	Short: "Show S4 gate hallucination rate from feedback and corrections",
+	Long: `Aggregates tribal_feedback reports and tribal_corrections into a running
+hallucination rate. Used to determine when the S4 critic gate threshold has
+been reached (>= 50 labeled facts with measurable hallucination rate).
+
+Hallucination rubric: wrong feedback reports, delete corrections, and
+supersede corrections each count as a hallucination label.`,
+	Args: cobra.ExactArgs(1),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		dbPath := args[0]
+
+		if err := ValidateDBPath(dbPath, ""); err != nil {
+			return err
+		}
+
+		claimsDB, err := db.OpenClaimsDB(dbPath)
+		if err != nil {
+			return fmt.Errorf("open claims db: %w", err)
+		}
+		defer claimsDB.Close()
+
+		stats, err := claimsDB.GetS4GateStats()
+		if err != nil {
+			return fmt.Errorf("get S4 gate stats: %w", err)
+		}
+
+		out := cmd.OutOrStdout()
+
+		fmt.Fprintf(out, "## S4 Gate Status\n\n")
+		fmt.Fprintf(out, "Database: %s\n\n", dbPath)
+		fmt.Fprintf(out, "### Feedback Reports\n")
+		fmt.Fprintf(out, "- wrong: %d\n", stats.WrongReports)
+		fmt.Fprintf(out, "- stale: %d\n", stats.StaleReports)
+		fmt.Fprintf(out, "- misleading: %d\n", stats.MisleadingReports)
+		fmt.Fprintf(out, "- offensive: %d\n", stats.OffensiveReports)
+		fmt.Fprintf(out, "- total: %d\n\n", stats.TotalFeedback)
+		fmt.Fprintf(out, "### Corrections\n")
+		fmt.Fprintf(out, "- delete: %d\n", stats.DeleteCorrections)
+		fmt.Fprintf(out, "- supersede: %d\n", stats.SupersedeCorrections)
+		fmt.Fprintf(out, "- total: %d\n\n", stats.TotalCorrections)
+		fmt.Fprintf(out, "### Hallucination Rate\n")
+		fmt.Fprintf(out, "- labeled facts: %d\n", stats.TotalLabeledFacts)
+		fmt.Fprintf(out, "- hallucination rate: %.2f%%\n", stats.HallucinationRate*100)
+
+		if stats.TotalLabeledFacts >= 50 {
+			fmt.Fprintf(out, "\nS4 gate threshold reached (>= 50 labeled facts).\n")
+		} else {
+			fmt.Fprintf(out, "\nS4 gate threshold NOT reached (%d/50 labeled facts).\n", stats.TotalLabeledFacts)
+		}
+
+		return nil
+	},
+}
+
 func init() {
 	tribalCmd.AddCommand(tribalStatusCmd)
+	tribalCmd.AddCommand(tribalS4GateStatusCmd)
 
 	// correct flags
 	tribalCorrectCmd.Flags().String("db", "", "Path to claims database")

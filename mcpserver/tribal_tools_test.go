@@ -675,7 +675,7 @@ func TestValidateProvenanceEnvelope(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// Pure function tests — importPathToLocalDir, escapeLike, isMissingTableErr
+// Pure function tests — importPathToLocalDir, escapeLike
 // ---------------------------------------------------------------------------
 
 func TestImportPathToLocalDir(t *testing.T) {
@@ -756,9 +756,9 @@ func TestIsMissingTableErr(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := isMissingTableErr(tc.err)
+			got := db.IsMissingTableErr(tc.err)
 			if got != tc.want {
-				t.Errorf("isMissingTableErr(%v) = %v, want %v", tc.err, got, tc.want)
+				t.Errorf("IsMissingTableErr(%v) = %v, want %v", tc.err, got, tc.want)
 			}
 		})
 	}

@@ -756,3 +756,206 @@ func TestTribalCorrectionCLIFactNotFound(t *testing.T) {
 		t.Errorf("expected 'not found' in error, got: %v", err)
 	}
 }
+
+// createTribalTestDBWithFeedback creates a temp claims DB with tribal schema,
+// a fact, feedback rows, and correction rows for S4 gate testing.
+func createTribalTestDBWithFeedback(t *testing.T) string {
+	t.Helper()
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "s4gate.claims.db")
+
+	sqlDB, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer sqlDB.Close()
+
+	_, err = sqlDB.Exec(`
+		CREATE TABLE IF NOT EXISTS symbols (
+			id INTEGER PRIMARY KEY, repo TEXT, import_path TEXT,
+			symbol_name TEXT, language TEXT, kind TEXT, visibility TEXT,
+			display_name TEXT, scip_symbol TEXT
+		);
+		INSERT INTO symbols (id, repo, import_path, symbol_name, language, kind, visibility)
+		VALUES (1, 'test-repo', 'pkg/foo', 'Foo', 'go', 'function', 'public');
+		INSERT INTO symbols (id, repo, import_path, symbol_name, language, kind, visibility)
+		VALUES (2, 'test-repo', 'pkg/bar', 'Bar', 'go', 'function', 'public');
+
+		CREATE TABLE IF NOT EXISTS claims (
+			id INTEGER PRIMARY KEY, subject_id INTEGER, predicate TEXT,
+			object_text TEXT, object_id INTEGER, source_file TEXT,
+			source_line INTEGER, confidence REAL, claim_tier TEXT,
+			extractor TEXT, extractor_version TEXT, last_verified TEXT
+		);
+
+		CREATE TABLE IF NOT EXISTS tribal_facts (
+			id INTEGER PRIMARY KEY, subject_id INTEGER NOT NULL,
+			kind TEXT NOT NULL CHECK(kind IN ('ownership','rationale','invariant','quirk','todo','deprecation')),
+			body TEXT NOT NULL, source_quote TEXT NOT NULL,
+			confidence REAL NOT NULL, corroboration INTEGER NOT NULL DEFAULT 1,
+			extractor TEXT NOT NULL, extractor_version TEXT NOT NULL, model TEXT,
+			staleness_hash TEXT NOT NULL,
+			status TEXT NOT NULL DEFAULT 'active' CHECK(status IN ('active','stale','quarantined','superseded','deleted')),
+			created_at TEXT NOT NULL, last_verified TEXT NOT NULL,
+			cluster_key TEXT NOT NULL DEFAULT ''
+		);
+		CREATE TABLE IF NOT EXISTS tribal_evidence (
+			id INTEGER PRIMARY KEY, fact_id INTEGER NOT NULL,
+			source_type TEXT NOT NULL CHECK(source_type IN ('blame','commit_msg','pr_comment','codeowners','inline_marker','runbook','correction')),
+			source_ref TEXT NOT NULL, author TEXT, authored_at TEXT,
+			content_hash TEXT NOT NULL
+		);
+		CREATE TABLE IF NOT EXISTS tribal_corrections (
+			id INTEGER PRIMARY KEY, fact_id INTEGER NOT NULL,
+			action TEXT NOT NULL CHECK(action IN ('correct','delete','supersede')),
+			new_body TEXT, reason TEXT NOT NULL, actor TEXT NOT NULL,
+			created_at TEXT NOT NULL
+		);
+		CREATE TABLE IF NOT EXISTS tribal_feedback (
+			id INTEGER PRIMARY KEY, fact_id INTEGER NOT NULL,
+			reason TEXT NOT NULL CHECK(reason IN ('wrong','stale','misleading','offensive')),
+			details TEXT, reporter TEXT NOT NULL, created_at TEXT NOT NULL
+		);
+
+		CREATE TABLE IF NOT EXISTS source_files (
+			id INTEGER PRIMARY KEY, repo TEXT NOT NULL, relative_path TEXT NOT NULL,
+			content_hash TEXT NOT NULL, extractor_version TEXT NOT NULL,
+			extracted_at TEXT NOT NULL, last_pr_id_set BLOB, pr_miner_version TEXT DEFAULT ''
+		);
+
+		-- Two facts.
+		INSERT INTO tribal_facts (id, subject_id, kind, body, source_quote,
+			confidence, corroboration, extractor, extractor_version, staleness_hash,
+			status, created_at, last_verified, cluster_key)
+		VALUES (1, 1, 'invariant', 'fact one', 'quote one',
+			1.0, 1, 'test', 'v1', 'hash1',
+			'active', '2025-01-01T00:00:00Z', '2025-01-01T00:00:00Z', '');
+		INSERT INTO tribal_facts (id, subject_id, kind, body, source_quote,
+			confidence, corroboration, extractor, extractor_version, staleness_hash,
+			status, created_at, last_verified, cluster_key)
+		VALUES (2, 2, 'rationale', 'fact two', 'quote two',
+			0.8, 1, 'test', 'v1', 'hash2',
+			'active', '2025-01-01T00:00:00Z', '2025-01-01T00:00:00Z', '');
+
+		INSERT INTO tribal_evidence (fact_id, source_type, source_ref, content_hash)
+		VALUES (1, 'correction', 'test-ref', 'abc1');
+		INSERT INTO tribal_evidence (fact_id, source_type, source_ref, content_hash)
+		VALUES (2, 'correction', 'test-ref', 'abc2');
+
+		-- Feedback: 2 wrong, 1 stale, 1 misleading on fact 1.
+		INSERT INTO tribal_feedback (fact_id, reason, reporter, created_at) VALUES (1, 'wrong', 'user1', '2025-02-01T00:00:00Z');
+		INSERT INTO tribal_feedback (fact_id, reason, reporter, created_at) VALUES (1, 'wrong', 'user2', '2025-02-02T00:00:00Z');
+		INSERT INTO tribal_feedback (fact_id, reason, reporter, created_at) VALUES (1, 'stale', 'user3', '2025-02-03T00:00:00Z');
+		INSERT INTO tribal_feedback (fact_id, reason, reporter, created_at) VALUES (1, 'misleading', 'user4', '2025-02-04T00:00:00Z');
+
+		-- Correction: 1 delete on fact 2.
+		INSERT INTO tribal_corrections (fact_id, action, reason, actor, created_at)
+		VALUES (2, 'delete', 'no longer relevant', 'admin', '2025-02-05T00:00:00Z');
+	`)
+	if err != nil {
+		t.Fatalf("create test schema: %v", err)
+	}
+	return dbPath
+}
+
+func TestTribalS4GateStatus(t *testing.T) {
+	resetExtractFlags()
+	dbPath := createTribalTestDBWithFeedback(t)
+
+	buf := new(bytes.Buffer)
+	rootCmd.SetOut(buf)
+	rootCmd.SetErr(buf)
+	rootCmd.SetArgs([]string{"tribal", "s4-gate-status", dbPath})
+	if err := rootCmd.Execute(); err != nil {
+		t.Fatalf("tribal s4-gate-status failed: %v", err)
+	}
+
+	out := buf.String()
+
+	// Check header.
+	if !strings.Contains(out, "S4 Gate Status") {
+		t.Error("output missing 'S4 Gate Status' header")
+	}
+
+	// Check feedback counts.
+	if !strings.Contains(out, "wrong: 2") {
+		t.Errorf("expected 'wrong: 2', got: %q", out)
+	}
+	if !strings.Contains(out, "stale: 1") {
+		t.Errorf("expected 'stale: 1', got: %q", out)
+	}
+	if !strings.Contains(out, "misleading: 1") {
+		t.Errorf("expected 'misleading: 1', got: %q", out)
+	}
+
+	// Check corrections.
+	if !strings.Contains(out, "delete: 1") {
+		t.Errorf("expected 'delete: 1', got: %q", out)
+	}
+
+	// Hallucinations = wrong_reports(2) + delete_corrections(1) = 3, distinct facts = 2.
+	// Raw ratio 3/2 = 1.5, capped at 1.0 = 100%.
+	if !strings.Contains(out, "100.00%") {
+		t.Errorf("expected hallucination rate '100.00%%', got: %q", out)
+	}
+
+	// Check threshold not reached.
+	if !strings.Contains(out, "NOT reached") {
+		t.Errorf("expected 'NOT reached' message, got: %q", out)
+	}
+	if !strings.Contains(out, "2/50") {
+		t.Errorf("expected '2/50 labeled facts', got: %q", out)
+	}
+}
+
+func TestTribalS4GateStatus_EmptyDB(t *testing.T) {
+	resetExtractFlags()
+
+	// Create a DB with tribal schema but no feedback or corrections.
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "empty-s4.claims.db")
+	sqlDB, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	_, err = sqlDB.Exec(`
+		CREATE TABLE IF NOT EXISTS symbols (id INTEGER PRIMARY KEY, repo TEXT, import_path TEXT, symbol_name TEXT, language TEXT, kind TEXT, visibility TEXT, display_name TEXT, scip_symbol TEXT);
+		CREATE TABLE IF NOT EXISTS claims (id INTEGER PRIMARY KEY, subject_id INTEGER, predicate TEXT, object_text TEXT, object_id INTEGER, source_file TEXT, source_line INTEGER, confidence REAL, claim_tier TEXT, extractor TEXT, extractor_version TEXT, last_verified TEXT);
+		CREATE TABLE IF NOT EXISTS tribal_facts (id INTEGER PRIMARY KEY, subject_id INTEGER NOT NULL, kind TEXT NOT NULL, body TEXT NOT NULL, source_quote TEXT NOT NULL, confidence REAL NOT NULL, corroboration INTEGER NOT NULL DEFAULT 1, extractor TEXT NOT NULL, extractor_version TEXT NOT NULL, model TEXT, staleness_hash TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'active', created_at TEXT NOT NULL, last_verified TEXT NOT NULL, cluster_key TEXT NOT NULL DEFAULT '');
+		CREATE TABLE IF NOT EXISTS tribal_evidence (id INTEGER PRIMARY KEY, fact_id INTEGER NOT NULL, source_type TEXT NOT NULL, source_ref TEXT NOT NULL, author TEXT, authored_at TEXT, content_hash TEXT NOT NULL);
+		CREATE TABLE IF NOT EXISTS tribal_corrections (id INTEGER PRIMARY KEY, fact_id INTEGER NOT NULL, action TEXT NOT NULL, new_body TEXT, reason TEXT NOT NULL, actor TEXT NOT NULL, created_at TEXT NOT NULL);
+		CREATE TABLE IF NOT EXISTS tribal_feedback (id INTEGER PRIMARY KEY, fact_id INTEGER NOT NULL, reason TEXT NOT NULL, details TEXT, reporter TEXT NOT NULL, created_at TEXT NOT NULL);
+	`)
+	if err != nil {
+		t.Fatalf("create schema: %v", err)
+	}
+	sqlDB.Close()
+
+	buf := new(bytes.Buffer)
+	rootCmd.SetOut(buf)
+	rootCmd.SetErr(buf)
+	rootCmd.SetArgs([]string{"tribal", "s4-gate-status", dbPath})
+	if err := rootCmd.Execute(); err != nil {
+		t.Fatalf("tribal s4-gate-status failed: %v", err)
+	}
+
+	out := buf.String()
+	if !strings.Contains(out, "0.00%") {
+		t.Errorf("expected '0.00%%' for empty DB, got: %q", out)
+	}
+	if !strings.Contains(out, "0/50") {
+		t.Errorf("expected '0/50' for empty DB, got: %q", out)
+	}
+}
+
+func TestTribalS4GateStatusCommandRegistered(t *testing.T) {
+	var hasS4Gate bool
+	for _, cmd := range tribalCmd.Commands() {
+		if cmd.Name() == "s4-gate-status" {
+			hasS4Gate = true
+		}
+	}
+	if !hasS4Gate {
+		t.Error("s4-gate-status subcommand not registered on tribal command")
+	}
+}
