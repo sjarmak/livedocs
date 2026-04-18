@@ -225,22 +225,26 @@ func buildTribalMineResponse(symbol, repo string, results []*tribal.MiningResult
 }
 
 // logMiningFailures emits one log line per MiningResult that recorded
-// per-fact upsert failures. FailedErrors content is quoted with %q to
-// defeat log-injection via embedded newlines or control characters in
-// wrapped DB error messages. The first retained error is logged for
-// debuggability; FailedCount is the authoritative total.
+// per-fact upsert failures. FailedErrors carries sanitized canonical
+// category strings (m7v.21) rather than raw error objects, so no
+// log-injection escaping is required for the category value itself;
+// repo and path are still %q-quoted since they originate from caller
+// input. The first retained category is surfaced for quick triage;
+// FailedCount is the authoritative total. Raw error details are logged
+// by the mining service at capture time — this log line intentionally
+// does not attempt to reconstruct them.
 func logMiningFailures(repo string, results []*tribal.MiningResult) {
 	for _, r := range results {
 		if r == nil || r.FailedCount == 0 {
 			continue
 		}
-		first := ""
-		if len(r.FailedErrors) > 0 && r.FailedErrors[0] != nil {
-			first = r.FailedErrors[0].Error()
+		firstCategory := ""
+		if len(r.FailedErrors) > 0 {
+			firstCategory = r.FailedErrors[0]
 		}
 		log.Printf(
-			"tribal_mine_on_demand: partial upsert failure repo=%q path=%q failed_count=%d retained_errors=%d first_error=%q",
-			repo, r.Path, r.FailedCount, len(r.FailedErrors), first,
+			"tribal_mine_on_demand: partial upsert failure repo=%q path=%q failed_count=%d retained_errors=%d first_category=%q",
+			repo, r.Path, r.FailedCount, len(r.FailedErrors), firstCategory,
 		)
 	}
 }
