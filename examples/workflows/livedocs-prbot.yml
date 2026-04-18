@@ -80,10 +80,52 @@ jobs:
           ARCH=$(uname -m)
           case "$ARCH" in x86_64) ARCH=amd64 ;; aarch64) ARCH=arm64 ;; esac
 
-          ARCHIVE="livedocs_${VERSION_BARE}_${OS}_${ARCH}.tar.gz"
+          # goreleaser publishes tar.gz on linux and zip on darwin — mirror that.
+          case "$OS" in
+            linux)  EXT="tar.gz" ;;
+            darwin) EXT="zip" ;;
+            *)
+              echo "ERROR: Unsupported OS: $OS" >&2
+              exit 1
+              ;;
+          esac
+
+          ARCHIVE="livedocs_${VERSION_BARE}_${OS}_${ARCH}.${EXT}"
+
+          # Download the archive and the release-wide checksums.txt from the
+          # same release tag. goreleaser publishes a sha256 checksums.txt
+          # covering every archive.
           gh release download "$VERSION" --repo sjarmak/livedocs \
-            --pattern "$ARCHIVE" --dir /tmp
-          tar -xzf "/tmp/$ARCHIVE" -C ~/.livedocs-bin livedocs
+            --pattern "$ARCHIVE" --pattern "checksums.txt" --dir /tmp
+
+          # Verify integrity BEFORE extracting. Two guards are required:
+          #   1. Our archive MUST be listed in checksums.txt. We assert this
+          #      explicitly with `grep -F` — `sha256sum --ignore-missing` will
+          #      silently return 0 if the file we care about is absent from
+          #      the checksum list, which would be a bypass.
+          #   2. `sha256sum -c` must confirm the hash matches. Under
+          #      `set -euo pipefail` any non-zero exit aborts the job and the
+          #      cache write, so an attacker-swapped tarball cannot poison
+          #      downstream runs.
+          #
+          # --ignore-missing covers the expected case: the release-wide
+          # checksums.txt lists archives for every os/arch, and we only
+          # downloaded one.
+          #
+          # NOTE: This is an integrity check, not authenticity. A compromised
+          # release repository could publish a matching tarball + checksum
+          # together. For authenticity we'd need signed releases (cosign/GPG).
+          if ! grep -qF "  ${ARCHIVE}" /tmp/checksums.txt; then
+            echo "ERROR: ${ARCHIVE} is not listed in checksums.txt — refusing to install." >&2
+            exit 1
+          fi
+          ( cd /tmp && sha256sum --ignore-missing -c checksums.txt )
+
+          if [ "$EXT" = "tar.gz" ]; then
+            tar -xzf "/tmp/$ARCHIVE" -C ~/.livedocs-bin livedocs
+          else
+            unzip -o "/tmp/$ARCHIVE" livedocs -d ~/.livedocs-bin
+          fi
           chmod +x ~/.livedocs-bin/livedocs
 
       - name: Add livedocs to PATH
