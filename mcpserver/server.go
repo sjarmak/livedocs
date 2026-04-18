@@ -27,6 +27,7 @@ import (
 	"github.com/sjarmak/livedocs/db"
 	"github.com/sjarmak/livedocs/drift"
 	"github.com/sjarmak/livedocs/extractor"
+	"github.com/sjarmak/livedocs/extractor/tribal"
 )
 
 // Config holds the configuration for the MCP server.
@@ -54,6 +55,19 @@ type Config struct {
 	// request using the caller's LLM client, command runner, and budget.
 	// If nil, the tool is not registered.
 	MiningFactory MiningServiceFactory
+	// MineRateLimiter, when non-nil, enforces a per-session token-bucket
+	// rate limit on tribal_mine_on_demand (live_docs-m7v.22). Sharing
+	// one KeyedLimiter across the tool handler and any other caller
+	// gives a single place to tune admission (e.g. the singleflight
+	// dedup boundary tracked by live_docs-m7v.17 can wrap the same
+	// primitive to cap per-key frequency). If nil, the handler admits
+	// all requests subject to DailyBudget only.
+	MineRateLimiter *tribal.KeyedLimiter
+	// MineLogger, when non-nil, receives per-attempt accounting lines
+	// from the rate-limited handler. Defaults to the standard library
+	// logger so existing deployments keep getting stderr output without
+	// any config change.
+	MineLogger MineLogger
 }
 
 // Server wraps the MCP server and its dependencies.
@@ -113,7 +127,7 @@ func New(cfg Config) (*Server, error) {
 			s.staleness = NewStalenessChecker(cfg.RepoRoots, cfg.ExtractorRegistry)
 		}
 
-		s.registerMultiRepoTools(pool, cfg.ExtractionRunner, cfg.MiningFactory)
+		s.registerMultiRepoTools(pool, cfg.ExtractionRunner, cfg.MiningFactory, cfg.MineRateLimiter, cfg.MineLogger)
 	}
 
 	s.telemetry = NewCollector(CollectorConfig{
@@ -153,7 +167,16 @@ func (s *Server) buildRegistry() ToolRegistry {
 // Builds a routing index for cross-repo symbol search.
 // If runner is non-nil, the request_extraction tool is also registered.
 // If factory is non-nil, the tribal_mine_on_demand tool is also registered.
-func (s *Server) registerMultiRepoTools(pool *DBPool, runner ExtractionRunner, factory MiningServiceFactory) {
+// If limiter is non-nil, the tribal_mine_on_demand tool is wrapped with the
+// per-session rate limiter (live_docs-m7v.22); logger receives per-attempt
+// accounting lines.
+func (s *Server) registerMultiRepoTools(
+	pool *DBPool,
+	runner ExtractionRunner,
+	factory MiningServiceFactory,
+	limiter *tribal.KeyedLimiter,
+	logger MineLogger,
+) {
 	// Build routing index for search_symbols fan-out optimization.
 	index := NewRoutingIndex()
 	// Best-effort: if Build fails, search falls back to all repos.
@@ -178,7 +201,7 @@ func (s *Server) registerMultiRepoTools(pool *DBPool, runner ExtractionRunner, f
 	}
 
 	if factory != nil {
-		defs = append(defs, TribalMineOnDemandToolDef(pool, factory))
+		defs = append(defs, TribalMineOnDemandToolDef(pool, factory, limiter, logger))
 	}
 
 	for _, def := range defs {
