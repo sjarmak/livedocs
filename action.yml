@@ -78,9 +78,21 @@ runs:
 
     - name: Cache livedocs binary
       uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5.0.5
+      id: bin-cache
       with:
         path: /usr/local/bin/livedocs
         key: livedocs-${{ runner.os }}-${{ runner.arch }}-${{ steps.version.outputs.version }}
+
+    # Install cosign so we can verify the authenticity of checksums.txt
+    # (signed at release time via GitHub Actions OIDC keyless signing —
+    # see https://github.com/sjarmak/livedocs/blob/main/.goreleaser.yaml).
+    # Without this we can only verify integrity (bytes match checksum),
+    # not authenticity (checksum came from our release pipeline).
+    - name: Install Cosign
+      if: steps.bin-cache.outputs.cache-hit != 'true'
+      uses: sigstore/cosign-installer@7e8b541eb2e61bf99390e1afd4be13a184e9ebc5  # v3.10.1
+      with:
+        cosign-release: "v2.5.0"
 
     - name: Download livedocs binary
       shell: bash
@@ -115,16 +127,57 @@ runs:
         ARCHIVE="livedocs_${VERSION_BARE}_${OS}_${ARCH}.${EXT}"
         echo "Downloading $ARCHIVE from release $VERSION"
 
-        # Download the archive and the release-wide checksums.txt in the
-        # same invocation. goreleaser publishes a sha256 checksums.txt
-        # covering every archive (linux tar.gz + darwin zip).
+        # Download the archive, the release-wide checksums.txt, and the
+        # cosign signature + certificate for checksums.txt from the same
+        # release. goreleaser publishes a sha256 checksums.txt covering
+        # every archive (linux tar.gz + darwin zip) AND a cosign keyless
+        # signature over checksums.txt.
         gh release download "$VERSION" \
           --repo sjarmak/livedocs \
           --pattern "$ARCHIVE" \
           --pattern "checksums.txt" \
+          --pattern "checksums.txt.sig" \
+          --pattern "checksums.txt.pem" \
           --dir /tmp
 
-        # Verify integrity BEFORE extracting or installing. Two guards:
+        # Fail closed if the signing artifacts are missing from the release.
+        # gh release download silently succeeds when a pattern matches zero
+        # assets, so we must verify the files actually landed.
+        for required in checksums.txt checksums.txt.sig checksums.txt.pem; do
+          if [ ! -s "/tmp/$required" ]; then
+            echo "::error::release $VERSION is missing $required — refusing to install."
+            exit 1
+          fi
+        done
+
+        # AUTHENTICITY: verify checksums.txt was signed by our release
+        # pipeline (not some attacker who got write access to the release
+        # repo and swapped both the tarball and the checksums.txt).
+        #
+        # --certificate-identity-regexp pins the signing identity to this
+        # repo's release workflow on tag refs ONLY. Without this pin, any
+        # cosign keyless signature from any GitHub workflow would validate
+        # — an obvious bypass. The regex is anchored start ('^') and end
+        # ('$') and only accepts refs/tags/v* (not branches, not PRs, not
+        # namespaces an attacker could spoof on a fork).
+        #
+        # --certificate-oidc-issuer pins the issuer to GitHub's official
+        # token service; there is exactly one correct value for GitHub-
+        # hosted runners.
+        #
+        # If cosign verify-blob returns non-zero the step aborts (set -e)
+        # BEFORE the integrity check, extraction, or sudo mv — there is no
+        # fallback-to-unsigned path.
+        cosign verify-blob \
+          --certificate /tmp/checksums.txt.pem \
+          --signature /tmp/checksums.txt.sig \
+          --certificate-identity-regexp '^https://github\.com/sjarmak/livedocs/\.github/workflows/release\.yml@refs/tags/v.*$' \
+          --certificate-oidc-issuer 'https://token.actions.githubusercontent.com' \
+          /tmp/checksums.txt
+
+        # INTEGRITY: now that checksums.txt is authenticated, verify the
+        # archive bytes match the signed checksum list. Two guards are
+        # still required:
         #   1. Our archive MUST be listed in checksums.txt. Asserted
         #      explicitly with `grep -F` — `sha256sum --ignore-missing`
         #      silently returns 0 when the target is absent from the
@@ -136,10 +189,6 @@ runs:
         #
         # --ignore-missing is correct here: the release-wide checksums.txt
         # lists archives for every os/arch, and we only downloaded one.
-        #
-        # NOTE: This is an integrity check, not authenticity. A compromised
-        # release repository could publish a matching tarball + checksum
-        # together. For authenticity we'd need signed releases (cosign/GPG).
         if ! grep -qF "  ${ARCHIVE}" /tmp/checksums.txt; then
           echo "::error::${ARCHIVE} is not listed in checksums.txt — refusing to install."
           exit 1
@@ -154,7 +203,7 @@ runs:
 
         chmod +x /tmp/livedocs
         sudo mv /tmp/livedocs /usr/local/bin/livedocs
-        rm -f "/tmp/$ARCHIVE" /tmp/checksums.txt
+        rm -f "/tmp/$ARCHIVE" /tmp/checksums.txt /tmp/checksums.txt.sig /tmp/checksums.txt.pem
 
     - name: Cache claims database
       uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5.0.5

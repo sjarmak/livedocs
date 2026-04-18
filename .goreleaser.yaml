@@ -66,6 +66,42 @@ checksum:
   name_template: "checksums.txt"
   algorithm: sha256
 
+# Cosign keyless signing of checksums.txt.
+#
+# checksums.txt already chains integrity to every archive (goreleaser writes
+# sha256 of every tar.gz/zip into it), so signing just that one file is
+# sufficient: consumers verify the cosign signature of checksums.txt, then
+# verify each archive's sha256 against the verified checksums.txt.
+#
+# Keyless mode: cosign requests a short-lived signing certificate from Fulcio
+# using the GitHub Actions OIDC token. No long-lived key material. The
+# resulting signature + cert are recorded in the Rekor transparency log.
+#
+# Requires:
+#   - cosign binary on PATH in the release execution environment
+#     (installed on the host runner and bind-mounted into goreleaser-cross —
+#     see .github/workflows/release.yml).
+#   - permissions: id-token: write on the signing workflow so the runner can
+#     fetch an OIDC token.
+#   - ACTIONS_ID_TOKEN_REQUEST_TOKEN + ACTIONS_ID_TOKEN_REQUEST_URL passed
+#     through to the container (see release.yml).
+#
+# Outputs alongside checksums.txt in the GitHub Release:
+#   - checksums.txt.sig  (the signature)
+#   - checksums.txt.pem  (the Fulcio-issued signing certificate)
+signs:
+  - id: checksums-cosign-keyless
+    cmd: cosign
+    artifacts: checksum
+    signature: "${artifact}.sig"
+    certificate: "${artifact}.pem"
+    args:
+      - "sign-blob"
+      - "--yes"
+      - "--output-signature=${signature}"
+      - "--output-certificate=${certificate}"
+      - "${artifact}"
+
 changelog:
   sort: asc
   filters:

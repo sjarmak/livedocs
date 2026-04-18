@@ -5,12 +5,19 @@ on:
     tags:
       - "v*"
 
-permissions:
-  contents: write
+permissions: {}
 
 jobs:
   release:
     runs-on: ubuntu-latest
+    permissions:
+      # contents: write — required for creating the GitHub Release + uploading assets.
+      contents: write
+      # id-token: write — required for cosign keyless signing. The runner fetches
+      # a short-lived OIDC token from GitHub's token service and exchanges it with
+      # Fulcio for a signing certificate. Scoped to this job (least privilege) so
+      # future jobs added to this workflow don't silently inherit OIDC issuance.
+      id-token: write
     env:
       GORELEASER_CROSS_VERSION: v1.23.0
     steps:
@@ -25,15 +32,47 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f  # v3.12.0
 
+      # Install cosign on the host runner. goreleaser-cross does not ship
+      # cosign, so we install it here and bind-mount the binary into the
+      # container below. Pinned to an SHA + release to avoid supply-chain
+      # surprises (Dependabot bumps both in lockstep — see .github/dependabot.yml).
+      - name: Install Cosign
+        uses: sigstore/cosign-installer@7e8b541eb2e61bf99390e1afd4be13a184e9ebc5  # v3.10.1
+        with:
+          cosign-release: "v2.5.0"
+
       - name: Run GoReleaser with goreleaser-cross
         run: |
+          set -euo pipefail
+
+          # Resolve cosign path on the host so we can mount it into the
+          # container. Fail closed if cosign isn't on PATH — without it the
+          # signs: block in .goreleaser.yaml will silently fail inside the
+          # container and we'd ship an unsigned release.
+          COSIGN_BIN="$(command -v cosign)"
+          if [ -z "$COSIGN_BIN" ]; then
+            echo "::error::cosign not found on host after install step"
+            exit 1
+          fi
+
+          # OIDC env vars are injected by GitHub Actions when permissions.id-token: write
+          # is set. They must be present BEFORE we launch the container, otherwise
+          # cosign keyless signing will fail inside goreleaser-cross.
+          if [ -z "${ACTIONS_ID_TOKEN_REQUEST_TOKEN:-}" ] || [ -z "${ACTIONS_ID_TOKEN_REQUEST_URL:-}" ]; then
+            echo "::error::ACTIONS_ID_TOKEN_REQUEST_{TOKEN,URL} missing — is permissions.id-token: write set?"
+            exit 1
+          fi
+
           docker run \
             --rm \
             --privileged \
             -e CGO_ENABLED=1 \
             -e GITHUB_TOKEN="${{ secrets.GITHUB_TOKEN }}" \
             -e HOMEBREW_TAP_GITHUB_TOKEN="${{ secrets.HOMEBREW_TAP_GITHUB_TOKEN }}" \
+            -e ACTIONS_ID_TOKEN_REQUEST_TOKEN="${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
+            -e ACTIONS_ID_TOKEN_REQUEST_URL="${ACTIONS_ID_TOKEN_REQUEST_URL}" \
             -v /var/run/docker.sock:/var/run/docker.sock \
+            -v "${COSIGN_BIN}:/usr/local/bin/cosign:ro" \
             -v "${{ github.workspace }}:/go/src/github.com/sjarmak/livedocs" \
             -w /go/src/github.com/sjarmak/livedocs \
             ghcr.io/goreleaser/goreleaser-cross:${GORELEASER_CROSS_VERSION} \
