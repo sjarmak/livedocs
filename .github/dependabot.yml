@@ -1,0 +1,41 @@
+# Dependabot configuration for auto-bumping SHA-pinned GitHub Actions.
+#
+# All third-party actions in this repo are pinned to 40-char commit SHAs
+# with a `# vX.Y.Z` trailing comment (see
+# https://docs.github.com/actions/security-guides/security-hardening-for-github-actions#using-third-party-actions).
+# Dependabot reads the version comment to know which tag to track and opens
+# PRs that bump both the SHA and the comment when a new release is cut.
+#
+# For the github-actions ecosystem, directory "/" covers:
+#   - workflow files under .github/workflows/
+#   - the repo-root composite action.yml
+# GitHub does NOT traverse examples/workflows/ via the root entry, so a
+# second update entry rooted at /examples/workflows/ is required to keep
+# the example template's SHA pins bumped automatically.
+version: 2
+
+updates:
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "chore(ci)"
+      include: "scope"
+    labels:
+      - "dependencies"
+      - "github-actions"
+
+  - package-ecosystem: "github-actions"
+    directory: "/examples/workflows/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "chore(ci)"
+      include: "scope"
+    labels:
+      - "dependencies"
+      - "github-actions"
+      - "examples"

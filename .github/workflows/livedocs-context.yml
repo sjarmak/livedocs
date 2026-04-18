@@ -25,12 +25,12 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
         with:
           fetch-depth: 50
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff  # v5.6.0
         with:
           go-version-file: go.mod
           cache: true
@@ -47,7 +47,7 @@ jobs:
       # -- claims.db: cached per source-tree hash -----------------------------
       - name: Cache claims database
         id: db-cache
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830  # v4.3.0
         with:
           path: .livedocs
           key: livedocs-claims-v2-${{ runner.os }}-${{ hashFiles('**/*.go') }}
@@ -63,7 +63,7 @@ jobs:
 
       # -- publish claims.db for agent consumption ----------------------------
       - name: Upload claims.db for agent consumption
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
         with:
           name: livedocs-claims-pr-${{ github.event.pull_request.number }}
           path: .livedocs/claims.db
@@ -94,7 +94,7 @@ jobs:
 
       # -- post / update PR comment -------------------------------------------
       - name: Post context-pack comment
-        uses: actions/github-script@v7
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b  # v7.1.0
         with:
           github-token: ${{ github.token }}
           script: |
