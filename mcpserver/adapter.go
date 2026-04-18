@@ -164,6 +164,24 @@ func WrapRequest(req mcp.CallToolRequest) ToolRequest {
 	return &requestAdapter{raw: req}
 }
 
+// SessionIDFromContext returns the MCP client's session identifier for the
+// current request, or an empty string if no session is associated with ctx
+// (stdio single-client mode, transports that do not install a session,
+// or test contexts). Callers MUST treat the session ID as an opaque
+// bucket key — never as an authorization principal. See
+// extractor/tribal/limiter.go for the threat model covering ID forgery.
+//
+// This is the ONLY helper that reaches into mcp-go for session identity;
+// the rest of mcpserver depends on this adapter to preserve the CLAUDE.md
+// invariant that all mcp-go imports stay in adapter.go.
+func SessionIDFromContext(ctx context.Context) string {
+	sess := server.ClientSessionFromContext(ctx)
+	if sess == nil {
+		return ""
+	}
+	return sess.SessionID()
+}
+
 // WrapResult creates a ToolResult from an *mcp.CallToolResult.
 func WrapResult(res *mcp.CallToolResult) ToolResult {
 	return &resultAdapter{raw: res}
