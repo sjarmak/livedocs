@@ -25,7 +25,17 @@ import (
 	"sync/atomic"
 
 	"github.com/sjarmak/livedocs/db"
+	"golang.org/x/sync/singleflight"
 )
+
+// ErrMineThrottled is returned (wrapped in a MiningError with
+// Code="mine_throttled") when MineFile's optional per-key rate limiter
+// denies the request. It is deliberately distinct from ErrBudgetExceeded:
+// the former signals a short-window throttle that callers may retry after
+// backoff, while the latter signals a daily cap that will not clear until
+// the budget window rolls over. Distinguishing them prevents callers from
+// treating a transient rate-limit denial as a day-long outage.
+var ErrMineThrottled = errors.New("mine throttled")
 
 // Trigger is an enum identifying the caller of the mining service.
 // Used ONLY for telemetry, never for behavior branching.
@@ -70,6 +80,8 @@ func (e *MiningError) SafeMessage() string {
 		return "failed to register file symbol"
 	case "extraction_failed":
 		return "PR comment extraction failed for file"
+	case "mine_throttled":
+		return "per-file mining rate limit reached; retry shortly"
 	default:
 		return e.Code
 	}
@@ -149,6 +161,22 @@ type TribalMiningService struct {
 	// Readers (e.g. MCP pool) can poll this to detect invalidation.
 	// TTL-based caching is banned for tribal facts.
 	factsGeneration int64
+
+	// mineFileGroup dedups concurrent MineFile calls for the same relPath.
+	// Without it, N goroutines asking for the same file each load the cursor,
+	// each call ExtractForFile, each upsert — charging the DailyBudget N times
+	// for a single unit of work (live_docs-m7v.17). Waiters receive the
+	// first caller's (result, err) pair; see the MineFile doc-comment for
+	// the shared-result-read-only contract.
+	mineFileGroup singleflight.Group
+
+	// mineLimiter optionally bounds the rate at which DISTINCT relPaths may
+	// enter the singleflight group, to prevent an adversarial caller from
+	// enumerating synthetic relPaths and bloating the internal singleflight
+	// map beyond reason. Nil means unbounded (backward compatible). Callers
+	// wire one with WithMineLimiter. See extractor/tribal/limiter.go for
+	// the LRU-bounded token-bucket implementation.
+	mineLimiter *KeyedLimiter
 }
 
 // PRMinerConfig configures the PR comment miner that the service owns.
@@ -184,6 +212,25 @@ func WithMinerVersion(v string) ServiceOption {
 // it is a test seam; production callers always use the default (claimsDB).
 func withFactUpserter(u factUpserter) ServiceOption {
 	return func(s *TribalMiningService) { s.upserter = u }
+}
+
+// WithMineLimiter installs a per-relPath rate limiter at the MineFile entry.
+// When the limiter denies a request, MineFile returns a MiningError with
+// Code="mine_throttled" WITHOUT entering singleflight or calling the miner,
+// which bounds the singleflight map's key-space against adversarial callers
+// enumerating synthetic relPaths.
+//
+// Passing nil (or omitting the option) disables rate limiting; this is the
+// backward-compatible default for in-process CLI callers where the
+// singleflight key-space equals the repo file count. Exposed callers that
+// accept untrusted relPath values (e.g. MCP handlers) should install one.
+//
+// The limiter's Allow() method is used (non-blocking); denials surface as a
+// synchronous MiningError. Do not share the same KeyedLimiter across
+// multiple TribalMiningService instances if you expect distinct DailyBudget
+// accounting per instance.
+func WithMineLimiter(lim *KeyedLimiter) ServiceOption {
+	return func(s *TribalMiningService) { s.mineLimiter = lim }
 }
 
 // NewTribalMiningService creates the shared orchestration layer.
@@ -258,7 +305,87 @@ func (s *TribalMiningService) bumpGeneration() {
 //
 // The caller is responsible for selecting WHICH files to mine (prioritization
 // is invariant #5 — delegated to the caller).
+//
+// Concurrent-call semantics (live_docs-m7v.17):
+// MineFile uses a singleflight.Group keyed by relPath to dedup concurrent
+// requests for the same file. When N goroutines call MineFile(relPath)
+// simultaneously, the miner's ExtractForFile runs ONCE and all N callers
+// receive the same *MiningResult and error. This is a correctness fix:
+// without dedup, every caller would independently load the cursor, fetch PR
+// comments, call the LLM, and upsert — charging the DailyBudget N times
+// for a single unit of work.
+//
+// Shared-result read-only contract:
+// Because N callers receive a pointer to the SAME *MiningResult, callers
+// MUST treat the returned value as read-only. Mutating Facts, FailedErrors,
+// or any other field risks data races across goroutines that did not
+// synchronize their writes. If a caller needs a mutable copy, it must
+// copy-on-write.
+//
+// Cancellation caveat:
+// singleflight.Do runs the shared work in the first caller's context. If
+// that context is cancelled while waiters are parked, the shared op is
+// cancelled and ALL waiters observe the cancellation error. This is an
+// accepted trade-off vs. the alternative (unbounded duplicated budget
+// spend). Callers that cannot tolerate first-caller cancellation should
+// serialize their calls upstream.
+//
+// Optional rate limiting:
+// If the service was constructed with WithMineLimiter, each MineFile call
+// first consults the limiter via Allow(relPath). A denial returns a
+// MiningError with Code="mine_throttled" WITHOUT entering singleflight or
+// touching the miner, which bounds the singleflight key-space against
+// adversarial callers enumerating synthetic relPaths.
 func (s *TribalMiningService) MineFile(
+	ctx context.Context,
+	relPath string,
+	trigger Trigger,
+) (*MiningResult, error) {
+	// Rate-limit gate: check BEFORE entering singleflight so denied requests
+	// never register a key in the dedup map. This is the bounded-keyspace
+	// invariant that keeps the singleflight map from growing under
+	// adversarial enumeration of distinct relPaths.
+	if s.mineLimiter != nil && !s.mineLimiter.Allow(relPath) {
+		return nil, &MiningError{
+			Code: "mine_throttled",
+			// relPath is attacker-controllable when the mining service is
+			// reachable through an MCP tool. Quote with %q so newlines or
+			// control chars in a hostile path cannot inject log lines that
+			// render the Message field with %v.
+			Message: fmt.Sprintf("mine rate limit reached for %q", relPath),
+			Err:     ErrMineThrottled,
+		}
+	}
+
+	// Dedup concurrent callers for the same relPath: only the first caller
+	// runs mineFileOnce; waiters receive the shared (result, err) pair.
+	// singleflight.Group auto-removes the key when Do returns, so the map
+	// never exceeds the number of in-flight distinct keys. The optional
+	// limiter above further bounds that set against hostile callers.
+	//
+	// The third return value (shared bool) is intentionally discarded:
+	// callers currently do not need to distinguish a first-run result from
+	// a waiter's shared result. If a future telemetry hook wants to count
+	// "deduped N waiters into 1 call," capture it here rather than adding
+	// a separate instrumentation path.
+	v, err, _ := s.mineFileGroup.Do(relPath, func() (any, error) {
+		return s.mineFileOnce(ctx, relPath, trigger)
+	})
+	if err != nil {
+		// err from mineFileOnce is already a *MiningError; return as-is.
+		return nil, err
+	}
+	// v is *MiningResult from mineFileOnce; an untyped-nil is impossible
+	// because mineFileOnce always returns (result, nil) or (nil, error).
+	result, _ := v.(*MiningResult)
+	return result, nil
+}
+
+// mineFileOnce is the actual mining implementation. It is invoked at most
+// once per in-flight relPath via singleflight. Callers must NOT invoke
+// this directly — always go through MineFile so concurrent dedup and
+// rate limiting apply uniformly.
+func (s *TribalMiningService) mineFileOnce(
 	ctx context.Context,
 	relPath string,
 	trigger Trigger,

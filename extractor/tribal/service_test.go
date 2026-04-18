@@ -6,10 +6,38 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"runtime"
+	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/sjarmak/livedocs/db"
 )
+
+// waitForSettle spins until the runner's prListArrivals count stops
+// changing, indicating the caller set has quiesced (either all N have
+// reached the barrier, or singleflight has parked N-1 and only 1 is at
+// the barrier). Bounded by a generous deadline so a stuck test still
+// terminates; no wall-clock branching inside the assertion path.
+func waitForSettle(runner *countingRunner, maxArrivals int) {
+	deadline := time.Now().Add(2 * time.Second)
+	var last int64 = -1
+	stable := 0
+	for time.Now().Before(deadline) {
+		cur := atomic.LoadInt64(&runner.prListArrivals)
+		if cur == last {
+			stable++
+			if stable >= 50 || cur >= int64(maxArrivals) {
+				return
+			}
+		} else {
+			stable = 0
+			last = cur
+		}
+		runtime.Gosched()
+	}
+}
 
 // newTestClaimsDB creates an in-memory claims DB with both core and tribal schemas.
 func newTestClaimsDB(t *testing.T) *db.ClaimsDB {
@@ -684,5 +712,399 @@ func TestMiningError_Structured(t *testing.T) {
 	s := me.Error()
 	if s == "" {
 		t.Error("Error() should return non-empty string")
+	}
+}
+
+// countingRunner records the number of `gh api` calls (the expensive
+// extract-work calls) atomically so concurrent tests can assert
+// exactly-once semantics without timing flakiness.
+//
+// If barrier is non-nil, every `gh pr list` call waits on it before
+// returning. This is how concurrent tests force all N goroutines to be
+// simultaneously inside ExtractForFile (after the cursor load, before any
+// SetPRIDSet write) — without the barrier, the serial nature of SQLite
+// writes can accidentally order goroutines such that later callers see a
+// populated cursor and skip the extract, masking the dedup bug.
+type countingRunner struct {
+	prList     string
+	apiResp    string
+	apiCalls   int64 // atomic counter of `gh api` invocations
+	totalCalls int64 // atomic counter of all invocations
+
+	// barrier, if non-nil, blocks every `gh pr list` caller until the
+	// barrier is closed. Test harnesses close it after all expected
+	// goroutines have arrived to guarantee true concurrency.
+	barrier chan struct{}
+
+	// prListArrived is closed once prListArrivals reaches the expected
+	// count, letting the test harness synchronize on "all N goroutines are
+	// parked at the barrier". Optional; zero-value disables the signal.
+	prListArrivals int64
+}
+
+func (r *countingRunner) run(_ context.Context, name string, args ...string) ([]byte, error) {
+	atomic.AddInt64(&r.totalCalls, 1)
+	for _, a := range args {
+		if a == "pr" {
+			atomic.AddInt64(&r.prListArrivals, 1)
+			if r.barrier != nil {
+				<-r.barrier
+			}
+			return []byte(r.prList), nil
+		}
+	}
+	atomic.AddInt64(&r.apiCalls, 1)
+	return []byte(r.apiResp), nil
+}
+
+// newConcurrentTestService builds a service + miner wired to the counting
+// runner for the given path. Responses cover up to N concurrent callers.
+func newConcurrentTestService(t *testing.T, path string, responses int) (*TribalMiningService, *countingRunner, *mockLLMClient) {
+	t.Helper()
+	cdb := newTestClaimsDB(t)
+
+	comment := PRComment{
+		Body:     "This function must hold the mutex before calling",
+		DiffHunk: "@@",
+		Path:     path,
+		HTMLURL:  fmt.Sprintf("https://github.com/org/repo/pull/42#discussion_r100_%s", path),
+		User:     prUser{Login: "reviewer1"},
+	}
+	commentJSON, _ := json.Marshal(comment)
+
+	runner := &countingRunner{
+		prList:  "42\n",
+		apiResp: string(commentJSON),
+	}
+
+	llmResponses := make([]string, responses)
+	for i := 0; i < responses; i++ {
+		llmResponses[i] = `{"kind":"invariant","body":"must hold mutex before calling","confidence":0.85}`
+	}
+	llm := &mockLLMClient{responses: llmResponses}
+
+	miner := &prCommentMiner{
+		RepoOwner:   "org",
+		RepoName:    "repo",
+		Client:      llm,
+		Model:       "test-model",
+		DailyBudget: 1_000, // generous: test asserts budget is NOT drained by concurrency
+		RunCommand:  runner.run,
+	}
+
+	svc := newServiceWithMiner(cdb, miner, "repo")
+	return svc, runner, llm
+}
+
+// TestTribalMiningService_MineFile_ConcurrentDedup asserts that N concurrent
+// MineFile calls for the SAME relPath result in exactly one underlying
+// ExtractForFile invocation. Before singleflight was added, each caller
+// independently ran the full mine path — N times the cost, N times the
+// budget charge. This test is the RED test that locks in the fix.
+//
+// The runner's barrier channel forces true concurrency: the first caller
+// to reach `gh pr list` parks at the barrier. Without singleflight, ALL
+// N callers would eventually arrive at the barrier; with singleflight,
+// only ONE arrives and the remaining N-1 wait on the shared result. The
+// test waits for each goroutine to be in-flight (wgStarted) before
+// releasing the barrier, ensuring none has been able to finish early and
+// populate the cursor (which would accidentally dedup through the DB).
+func TestTribalMiningService_MineFile_ConcurrentDedup(t *testing.T) {
+	const N = 10
+	svc, runner, llm := newConcurrentTestService(t, "pkg/hot.go", N)
+	runner.barrier = make(chan struct{})
+
+	start := make(chan struct{})
+	var wgStarted sync.WaitGroup
+	var wgDone sync.WaitGroup
+	results := make([]*MiningResult, N)
+	errs := make([]error, N)
+
+	for i := 0; i < N; i++ {
+		wgStarted.Add(1)
+		wgDone.Add(1)
+		go func(idx int) {
+			defer wgDone.Done()
+			<-start
+			wgStarted.Done()
+			r, err := svc.MineFile(context.Background(), "pkg/hot.go", TriggerJITOnDemand)
+			results[idx] = r
+			errs[idx] = err
+		}(i)
+	}
+	close(start)
+	wgStarted.Wait() // all goroutines have entered MineFile (or are about to)
+
+	// Wait for goroutines to settle: either all N arrive at `gh pr list`
+	// (no-dedup path, apiCalls will later be N), or just 1 arrives and
+	// N-1 park inside singleflight.Do (dedup path, apiCalls will be 1).
+	// We spin for a bounded number of Gosched()s — no wall clock, so this
+	// is deterministic and race-detector clean.
+	waitForSettle(runner, N)
+
+	close(runner.barrier)
+	wgDone.Wait()
+
+	for i, err := range errs {
+		if err != nil {
+			t.Fatalf("goroutine %d: MineFile: %v", i, err)
+		}
+	}
+
+	// Core assertion: extraction's gh api (expensive path) ran exactly once.
+	// singleflight guarantees only ONE goroutine ran mineFileOnce; all
+	// waiters received the shared result. Without singleflight, multiple
+	// goroutines would race into gh api before any cursor write landed.
+	if got := atomic.LoadInt64(&runner.apiCalls); got != 1 {
+		t.Errorf("gh api calls = %d, want 1 (singleflight dedup missing)", got)
+	}
+
+	// LLM was called at most once (one comment classified).
+	if got := len(llm.getCalls()); got != 1 {
+		t.Errorf("LLM calls = %d, want 1", got)
+	}
+
+	// prListArrivals is the direct singleflight signal: without dedup
+	// every goroutine would arrive at gh pr list; with dedup only one does.
+	if got := atomic.LoadInt64(&runner.prListArrivals); got != 1 {
+		t.Errorf("gh pr list arrivals = %d, want 1 (singleflight should serialize)", got)
+	}
+
+	// Generation counter bumps exactly once per dedup window.
+	if g := svc.FactsGeneration(); g != 1 {
+		t.Errorf("generation = %d, want 1", g)
+	}
+}
+
+// TestTribalMiningService_MineFile_BudgetChargedOnce asserts that the
+// DailyBudget is decremented exactly once when N concurrent callers race
+// for the same relPath. This is the direct integrity invariant — the
+// security review called out that without dedup, a single file could be
+// charged N times for a single unit of work.
+func TestTribalMiningService_MineFile_BudgetChargedOnce(t *testing.T) {
+	const N = 10
+	svc, runner, _ := newConcurrentTestService(t, "pkg/charged.go", N)
+	runner.barrier = make(chan struct{})
+
+	start := make(chan struct{})
+	var wgStarted sync.WaitGroup
+	var wgDone sync.WaitGroup
+	for i := 0; i < N; i++ {
+		wgStarted.Add(1)
+		wgDone.Add(1)
+		go func() {
+			defer wgDone.Done()
+			<-start
+			wgStarted.Done()
+			_, _ = svc.MineFile(context.Background(), "pkg/charged.go", TriggerJITOnDemand)
+		}()
+	}
+	close(start)
+	wgStarted.Wait()
+	waitForSettle(runner, N)
+	close(runner.barrier)
+	wgDone.Wait()
+
+	// The miner's callCount reflects the LLM budget charge.
+	svc.miner.mu.Lock()
+	calls := svc.miner.callCount
+	svc.miner.mu.Unlock()
+	if calls != 1 {
+		t.Errorf("miner callCount = %d, want 1 (budget charged once per dedup window)", calls)
+	}
+}
+
+// TestTribalMiningService_MineFile_DifferentKeysNoDedup asserts that
+// concurrent calls with DIFFERENT relPaths each run their own extraction
+// — singleflight must key on relPath, not a global lock.
+func TestTribalMiningService_MineFile_DifferentKeysNoDedup(t *testing.T) {
+	const N = 10
+	cdb := newTestClaimsDB(t)
+
+	runner := &countingRunner{
+		prList:  "1\n",
+		apiResp: `{"body":"x","diff_hunk":"@@","path":"pkg/x.go","html_url":"https://github.com/org/repo/pull/1#r1","user":{"login":"r"}}`,
+	}
+
+	llmResponses := make([]string, N)
+	for i := range llmResponses {
+		llmResponses[i] = `{"kind":"rationale","body":"x","confidence":0.8}`
+	}
+	llm := &mockLLMClient{responses: llmResponses}
+
+	miner := &prCommentMiner{
+		RepoOwner:   "org",
+		RepoName:    "repo",
+		Client:      llm,
+		Model:       "test",
+		DailyBudget: 1_000,
+		RunCommand:  runner.run,
+	}
+	svc := newServiceWithMiner(cdb, miner, "repo")
+
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	for i := 0; i < N; i++ {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			<-start
+			path := fmt.Sprintf("pkg/file_%d.go", idx)
+			_, _ = svc.MineFile(context.Background(), path, TriggerBatchSchedule)
+		}(i)
+	}
+	close(start)
+	wg.Wait()
+
+	if got := atomic.LoadInt64(&runner.apiCalls); got != int64(N) {
+		t.Errorf("ExtractForFile gh api calls = %d, want %d (no dedup across distinct keys)", got, N)
+	}
+}
+
+// TestTribalMiningService_MineFile_LimiterDenial asserts that a limiter
+// denial returns a mine_throttled MiningError WITHOUT entering singleflight
+// or touching the miner. With Burst=1 and a fast second call, the second
+// call must be throttled.
+func TestTribalMiningService_MineFile_LimiterDenial(t *testing.T) {
+	svc, runner, _ := newConcurrentTestService(t, "pkg/throttled.go", 2)
+	// Very low burst so two quick calls trip the limiter.
+	lim := NewKeyedLimiter(KeyedLimiterConfig{
+		Rate:  0.001, // effectively no refill on test time scales
+		Burst: 1,
+	})
+	WithMineLimiter(lim)(svc)
+
+	// First call: allowed, runs full mine.
+	r1, err := svc.MineFile(context.Background(), "pkg/throttled.go", TriggerJITOnDemand)
+	if err != nil {
+		t.Fatalf("first MineFile: %v", err)
+	}
+	if r1 == nil {
+		t.Fatal("first MineFile: expected non-nil result")
+	}
+
+	// Second call: same key, burst exhausted → denied.
+	r2, err := svc.MineFile(context.Background(), "pkg/throttled.go", TriggerJITOnDemand)
+	if err == nil {
+		t.Fatal("second MineFile: expected error, got nil")
+	}
+	if r2 != nil {
+		t.Errorf("second MineFile: expected nil result on denial, got %+v", r2)
+	}
+
+	var me *MiningError
+	if !errors.As(err, &me) {
+		t.Fatalf("expected *MiningError, got %T: %v", err, err)
+	}
+	if me.Code != "mine_throttled" {
+		t.Errorf("Code = %q, want mine_throttled", me.Code)
+	}
+	if !errors.Is(err, ErrMineThrottled) {
+		t.Error("error should unwrap to ErrMineThrottled")
+	}
+	// Must be distinguishable from budget_exceeded.
+	if errors.Is(err, ErrBudgetExceeded) {
+		t.Error("throttle error must NOT unwrap to ErrBudgetExceeded")
+	}
+	// SafeMessage gives caller-facing text.
+	if msg := me.SafeMessage(); msg == "" || msg == me.Code {
+		t.Errorf("SafeMessage() = %q, want specific throttle message", msg)
+	}
+
+	// Critical: the miner was NOT invoked for the denied call.
+	if got := atomic.LoadInt64(&runner.apiCalls); got != 1 {
+		t.Errorf("gh api calls = %d, want 1 (denied call must not enter extract)", got)
+	}
+}
+
+// TestTribalMiningService_MineFile_NilLimiterUnlimited asserts that a nil
+// limiter yields the backward-compatible, unthrottled path — N rapid calls
+// for distinct keys must all proceed.
+func TestTribalMiningService_MineFile_NilLimiterUnlimited(t *testing.T) {
+	const N = 20
+	cdb := newTestClaimsDB(t)
+
+	runner := &countingRunner{
+		prList:  "1\n",
+		apiResp: `{"body":"x","diff_hunk":"@@","path":"pkg/x.go","html_url":"https://github.com/org/repo/pull/1#r1","user":{"login":"r"}}`,
+	}
+	llmResponses := make([]string, N)
+	for i := range llmResponses {
+		llmResponses[i] = `{"kind":"rationale","body":"x","confidence":0.8}`
+	}
+	llm := &mockLLMClient{responses: llmResponses}
+
+	miner := &prCommentMiner{
+		RepoOwner:   "org",
+		RepoName:    "repo",
+		Client:      llm,
+		Model:       "test",
+		DailyBudget: 1_000,
+		RunCommand:  runner.run,
+	}
+
+	// No WithMineLimiter → mineLimiter is nil → backward-compatible.
+	svc := newServiceWithMiner(cdb, miner, "repo")
+	if svc.mineLimiter != nil {
+		t.Fatalf("expected nil mineLimiter by default, got %v", svc.mineLimiter)
+	}
+
+	for i := 0; i < N; i++ {
+		path := fmt.Sprintf("pkg/f_%d.go", i)
+		if _, err := svc.MineFile(context.Background(), path, TriggerBatchSchedule); err != nil {
+			var me *MiningError
+			if errors.As(err, &me) && me.Code == "mine_throttled" {
+				t.Fatalf("nil limiter must never throttle; got %v", err)
+			}
+			t.Fatalf("MineFile(%d): %v", i, err)
+		}
+	}
+	if got := atomic.LoadInt64(&runner.apiCalls); got != int64(N) {
+		t.Errorf("gh api calls = %d, want %d (nil limiter = unlimited)", got, N)
+	}
+}
+
+// TestTribalMiningService_MineFile_LimiterBoundedKeyspace asserts that
+// minting more distinct keys than MaxKeys does NOT grow the limiter's
+// tracked bucket set beyond MaxKeys. This is the security invariant:
+// an adversary enumerating synthetic relPaths cannot drive unbounded
+// limiter-map growth.
+func TestTribalMiningService_MineFile_LimiterBoundedKeyspace(t *testing.T) {
+	const maxKeys = 8
+	const overMint = maxKeys + 12
+
+	cdb := newTestClaimsDB(t)
+	runner := &countingRunner{
+		prList:  "1\n",
+		apiResp: `{"body":"x","diff_hunk":"@@","path":"pkg/x.go","html_url":"https://github.com/org/repo/pull/1#r1","user":{"login":"r"}}`,
+	}
+	llmResponses := make([]string, overMint)
+	for i := range llmResponses {
+		llmResponses[i] = `{"kind":"rationale","body":"x","confidence":0.8}`
+	}
+	llm := &mockLLMClient{responses: llmResponses}
+	miner := &prCommentMiner{
+		RepoOwner:   "org",
+		RepoName:    "repo",
+		Client:      llm,
+		Model:       "test",
+		DailyBudget: 10_000,
+		RunCommand:  runner.run,
+	}
+
+	lim := NewKeyedLimiter(KeyedLimiterConfig{
+		Rate:    100, // generous: we want to observe map growth, not throttle
+		Burst:   100,
+		MaxKeys: maxKeys,
+	})
+	svc := newServiceWithMiner(cdb, miner, "repo", WithMineLimiter(lim))
+
+	for i := 0; i < overMint; i++ {
+		path := fmt.Sprintf("pkg/synthetic_%d.go", i)
+		_, _ = svc.MineFile(context.Background(), path, TriggerBatchSchedule)
+	}
+
+	if sz := lim.Size(); sz > maxKeys {
+		t.Errorf("limiter Size() = %d, want <= %d (LRU bound)", sz, maxKeys)
 	}
 }
