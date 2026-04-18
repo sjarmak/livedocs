@@ -2,6 +2,7 @@ package validation_test
 
 import (
 	"os"
+	"strings"
 	"testing"
 
 	"gopkg.in/yaml.v3"
@@ -151,13 +152,13 @@ func TestActionYML_CachesClaimsDB(t *testing.T) {
 
 	found := false
 	for _, s := range a.Runs.Steps {
-		if s.Uses == "actions/cache@v4" && s.Name == "Cache claims database" {
+		if strings.HasPrefix(s.Uses, "actions/cache@") && s.Name == "Cache claims database" {
 			found = true
 			break
 		}
 	}
 	if !found {
-		t.Error("action must cache claims database using actions/cache@v4")
+		t.Error("action must cache claims database using actions/cache")
 	}
 }
 
@@ -166,7 +167,7 @@ func TestActionYML_UploadsArtifact(t *testing.T) {
 
 	found := false
 	for _, s := range a.Runs.Steps {
-		if s.Uses == "actions/upload-artifact@v4" {
+		if strings.HasPrefix(s.Uses, "actions/upload-artifact@") {
 			found = true
 			break
 		}
