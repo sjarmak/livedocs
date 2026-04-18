@@ -89,6 +89,8 @@ runs:
         VERSION: ${{ steps.version.outputs.version }}
         VERSION_BARE: ${{ steps.version.outputs.version-bare }}
       run: |
+        set -euo pipefail
+
         if [ -x /usr/local/bin/livedocs ]; then
           echo "livedocs binary found in cache"
           exit 0
@@ -113,10 +115,36 @@ runs:
         ARCHIVE="livedocs_${VERSION_BARE}_${OS}_${ARCH}.${EXT}"
         echo "Downloading $ARCHIVE from release $VERSION"
 
+        # Download the archive and the release-wide checksums.txt in the
+        # same invocation. goreleaser publishes a sha256 checksums.txt
+        # covering every archive (linux tar.gz + darwin zip).
         gh release download "$VERSION" \
           --repo sjarmak/livedocs \
           --pattern "$ARCHIVE" \
+          --pattern "checksums.txt" \
           --dir /tmp
+
+        # Verify integrity BEFORE extracting or installing. Two guards:
+        #   1. Our archive MUST be listed in checksums.txt. Asserted
+        #      explicitly with `grep -F` — `sha256sum --ignore-missing`
+        #      silently returns 0 when the target is absent from the
+        #      checksum list, which would be a bypass.
+        #   2. `sha256sum -c` must confirm the hash matches. Under
+        #      `set -euo pipefail` any non-zero exit aborts the step
+        #      before `sudo mv`, so an attacker-swapped tarball never
+        #      reaches /usr/local/bin.
+        #
+        # --ignore-missing is correct here: the release-wide checksums.txt
+        # lists archives for every os/arch, and we only downloaded one.
+        #
+        # NOTE: This is an integrity check, not authenticity. A compromised
+        # release repository could publish a matching tarball + checksum
+        # together. For authenticity we'd need signed releases (cosign/GPG).
+        if ! grep -qF "  ${ARCHIVE}" /tmp/checksums.txt; then
+          echo "::error::${ARCHIVE} is not listed in checksums.txt — refusing to install."
+          exit 1
+        fi
+        ( cd /tmp && sha256sum --ignore-missing -c checksums.txt )
 
         if [ "$EXT" = "tar.gz" ]; then
           tar -xzf "/tmp/$ARCHIVE" -C /tmp livedocs
@@ -126,7 +154,7 @@ runs:
 
         chmod +x /tmp/livedocs
         sudo mv /tmp/livedocs /usr/local/bin/livedocs
-        rm -f "/tmp/$ARCHIVE"
+        rm -f "/tmp/$ARCHIVE" /tmp/checksums.txt
 
     - name: Cache claims database
       uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830  # v4.3.0

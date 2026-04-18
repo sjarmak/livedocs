@@ -176,3 +176,70 @@ func TestActionYML_UploadsArtifact(t *testing.T) {
 		t.Error("action must upload drift report as artifact")
 	}
 }
+
+// TestActionYML_ChecksumVerification asserts that the "Download livedocs
+// binary" step verifies release-asset integrity before `sudo mv`ing the
+// binary into /usr/local/bin. Mirrors the two-guard pattern (grep presence
+// pre-check + sha256sum --ignore-missing -c) applied to
+// examples/workflows/livedocs-prbot.yml in 5vc.7.
+//
+// Security rationale: action.yml runs `sudo mv /tmp/livedocs
+// /usr/local/bin/livedocs` on adopter runners. Without a checksum guard, a
+// compromised release asset would get root on every consumer of
+// `uses: sjarmak/livedocs@...`.
+func TestActionYML_ChecksumVerification(t *testing.T) {
+	data, err := os.ReadFile("../action.yml")
+	if err != nil {
+		t.Fatalf("read action.yml: %v", err)
+	}
+	raw := string(data)
+
+	// Guard 0: checksums.txt must be downloaded alongside the archive in
+	// the same `gh release download` invocation. Assert via the literal
+	// --pattern flag so a refactor that drops the download from the
+	// release-download step is caught.
+	if !strings.Contains(raw, `--pattern "checksums.txt"`) {
+		t.Error("action.yml must download checksums.txt via `gh release download --pattern \"checksums.txt\"`")
+	}
+
+	// Guard 1: explicit archive-presence pre-check. `sha256sum --ignore-missing`
+	// silently exits 0 when the archive is absent from the manifest, so we
+	// must grep for it first.
+	if !strings.Contains(raw, "grep -qF") {
+		t.Error("action.yml must pre-check archive presence in checksums.txt via `grep -qF` (closes --ignore-missing bypass)")
+	}
+
+	// Guard 2: sha256sum -c verifies the archive bytes match the manifest
+	// entry. --ignore-missing is correct here because the release-wide
+	// checksums.txt lists every os/arch archive but we only downloaded one.
+	if !strings.Contains(raw, "sha256sum --ignore-missing -c") {
+		t.Error("action.yml must verify archive via `sha256sum --ignore-missing -c checksums.txt`")
+	}
+
+	// Fail-closed: the Download step must run under `set -euo pipefail` so
+	// any guard failure aborts before `sudo mv`.
+	downloadIdx := strings.Index(raw, "name: Download livedocs binary")
+	if downloadIdx < 0 {
+		t.Fatal("missing `Download livedocs binary` step")
+	}
+	// Scan only the Download step body (up to the next top-level step).
+	nextStepIdx := strings.Index(raw[downloadIdx+len("name: Download livedocs binary"):], "\n    - name:")
+	if nextStepIdx < 0 {
+		t.Fatal("could not locate end of Download step")
+	}
+	downloadBody := raw[downloadIdx : downloadIdx+len("name: Download livedocs binary")+nextStepIdx]
+	if !strings.Contains(downloadBody, "set -euo pipefail") {
+		t.Error("Download step must run under `set -euo pipefail` to fail closed on guard failures")
+	}
+
+	// Ordering: verification must happen before the binary is installed.
+	// Match the literal install command (not the same phrase in comments).
+	sha256Idx := strings.Index(downloadBody, "sha256sum --ignore-missing -c")
+	sudoMvIdx := strings.Index(downloadBody, "sudo mv /tmp/livedocs /usr/local/bin/livedocs")
+	if sha256Idx < 0 || sudoMvIdx < 0 {
+		t.Fatalf("missing sha256sum (%d) or install command (%d) in Download step", sha256Idx, sudoMvIdx)
+	}
+	if sha256Idx >= sudoMvIdx {
+		t.Error("sha256sum verification must precede installation (otherwise unverified bytes reach /usr/local/bin)")
+	}
+}
