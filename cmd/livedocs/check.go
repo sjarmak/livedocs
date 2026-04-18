@@ -9,10 +9,10 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/live-docs/live_docs/check"
-	"github.com/live-docs/live_docs/drift"
-	"github.com/live-docs/live_docs/semantic"
-	"github.com/live-docs/live_docs/sourcegraph"
+	"github.com/sjarmak/livedocs/check"
+	"github.com/sjarmak/livedocs/drift"
+	"github.com/sjarmak/livedocs/semantic"
+	"github.com/sjarmak/livedocs/sourcegraph"
 )
 
 var (

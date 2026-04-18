@@ -5,7 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 
-	"github.com/live-docs/live_docs/db"
+	"github.com/sjarmak/livedocs/db"
 )
 
 // tribalSearchResponse is the JSON response for the tribal_search tool.

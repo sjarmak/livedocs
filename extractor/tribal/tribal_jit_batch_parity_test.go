@@ -8,7 +8,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/live-docs/live_docs/db"
+	"github.com/sjarmak/livedocs/db"
 )
 
 // TestTribalJITBatchParity runs the same corpus through both entry points

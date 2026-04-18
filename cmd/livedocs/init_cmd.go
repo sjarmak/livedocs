@@ -7,7 +7,7 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/live-docs/live_docs/initcmd"
+	"github.com/sjarmak/livedocs/initcmd"
 )
 
 var (

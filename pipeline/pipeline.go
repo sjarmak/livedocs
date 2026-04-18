@@ -14,10 +14,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/live-docs/live_docs/cache"
-	"github.com/live-docs/live_docs/db"
-	"github.com/live-docs/live_docs/extractor"
-	"github.com/live-docs/live_docs/gitdiff"
+	"github.com/sjarmak/livedocs/cache"
+	"github.com/sjarmak/livedocs/db"
+	"github.com/sjarmak/livedocs/extractor"
+	"github.com/sjarmak/livedocs/gitdiff"
 )
 
 // Config holds the dependencies for a Pipeline.

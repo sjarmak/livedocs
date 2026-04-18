@@ -201,7 +201,7 @@ func DefaultYAML(languages []string) string {
 		Languages: languages,
 	}
 	data, _ := yaml.Marshal(cfg)
-	header := "# livedocs configuration\n# All fields are optional. An empty file uses sane defaults.\n# See: https://github.com/live-docs/live_docs\n"
+	header := "# livedocs configuration\n# All fields are optional. An empty file uses sane defaults.\n# See: https://github.com/sjarmak/livedocs\n"
 	tribalDoc := "\n# tribal:\n" +
 		"#   # Opt in to LLM-classified tribal extraction (deterministic extractors\n" +
 		"#   # always run regardless of this flag).\n" +

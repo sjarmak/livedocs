@@ -14,8 +14,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/live-docs/live_docs/check"
-	"github.com/live-docs/live_docs/drift"
+	"github.com/sjarmak/livedocs/check"
+	"github.com/sjarmak/livedocs/drift"
 )
 
 // ReportVersion is the schema version for audit reports. Bump when the

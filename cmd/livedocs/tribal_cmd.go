@@ -11,7 +11,7 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/live-docs/live_docs/db"
+	"github.com/sjarmak/livedocs/db"
 )
 
 // ValidateDBPath checks that the given path is a valid claims database path.

@@ -112,7 +112,7 @@ func TestExtractClaimsFromContent_SkipsCodeBlocks(t *testing.T) {
 }
 
 func TestExtractClaimsFromContent_GoImports(t *testing.T) {
-	content := "Uses `github.com/live-docs/live_docs/drift` for detection.\nAlso `github.com/spf13/cobra` for CLI.\n"
+	content := "Uses `github.com/sjarmak/livedocs/drift` for detection.\nAlso `github.com/spf13/cobra` for CLI.\n"
 
 	claims := ExtractClaimsFromContent(content, "CLAUDE.md")
 
@@ -124,7 +124,7 @@ func TestExtractClaimsFromContent_GoImports(t *testing.T) {
 	}
 
 	expected := map[string]bool{
-		"github.com/live-docs/live_docs/drift": true,
+		"github.com/sjarmak/livedocs/drift": true,
 		"github.com/spf13/cobra":               true,
 	}
 

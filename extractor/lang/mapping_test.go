@@ -3,7 +3,7 @@ package lang_test
 import (
 	"testing"
 
-	"github.com/live-docs/live_docs/extractor/lang"
+	"github.com/sjarmak/livedocs/extractor/lang"
 )
 
 func TestClaimMappingLookup(t *testing.T) {

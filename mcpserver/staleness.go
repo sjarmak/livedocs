@@ -17,8 +17,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/live-docs/live_docs/db"
-	"github.com/live-docs/live_docs/extractor"
+	"github.com/sjarmak/livedocs/db"
+	"github.com/sjarmak/livedocs/extractor"
 )
 
 const (

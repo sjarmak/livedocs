@@ -16,12 +16,12 @@ import (
 	"testing"
 	"time"
 
-	"github.com/live-docs/live_docs/cache"
-	"github.com/live-docs/live_docs/extractor"
-	"github.com/live-docs/live_docs/extractor/goextractor"
-	"github.com/live-docs/live_docs/extractor/lang"
-	"github.com/live-docs/live_docs/extractor/treesitter"
-	"github.com/live-docs/live_docs/versionnorm"
+	"github.com/sjarmak/livedocs/cache"
+	"github.com/sjarmak/livedocs/extractor"
+	"github.com/sjarmak/livedocs/extractor/goextractor"
+	"github.com/sjarmak/livedocs/extractor/lang"
+	"github.com/sjarmak/livedocs/extractor/treesitter"
+	"github.com/sjarmak/livedocs/versionnorm"
 )
 
 const (

@@ -20,7 +20,7 @@ A claims-backed MCP server reduces context acquisition from thousands of tokens 
 
 ```bash
 # Install
-go install github.com/live-docs/live_docs/cmd/livedocs@latest
+go install github.com/sjarmak/livedocs/cmd/livedocs@latest
 
 # Extract claims from your repo
 cd /path/to/your/repo

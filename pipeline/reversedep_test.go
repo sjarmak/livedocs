@@ -5,9 +5,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/live-docs/live_docs/db"
-	"github.com/live-docs/live_docs/extractor"
-	"github.com/live-docs/live_docs/gitdiff"
+	"github.com/sjarmak/livedocs/db"
+	"github.com/sjarmak/livedocs/extractor"
+	"github.com/sjarmak/livedocs/gitdiff"
 )
 
 func TestReverseDepPaths_BasicImport(t *testing.T) {

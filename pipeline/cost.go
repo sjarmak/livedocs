@@ -9,7 +9,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/live-docs/live_docs/gitdiff"
+	"github.com/sjarmak/livedocs/gitdiff"
 )
 
 // ErrDailyBudgetExceeded is returned when the daily MCP call budget has been reached.

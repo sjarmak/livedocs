@@ -13,8 +13,8 @@ import (
 
 	"github.com/mark3labs/mcp-go/mcp"
 
-	"github.com/live-docs/live_docs/db"
-	"github.com/live-docs/live_docs/mcpserver"
+	"github.com/sjarmak/livedocs/db"
+	"github.com/sjarmak/livedocs/mcpserver"
 )
 
 // mockMCPCaller records tool calls and returns canned responses.

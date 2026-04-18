@@ -11,8 +11,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/live-docs/live_docs/db"
-	"github.com/live-docs/live_docs/semantic"
+	"github.com/sjarmak/livedocs/db"
+	"github.com/sjarmak/livedocs/semantic"
 
 	_ "modernc.org/sqlite"
 )

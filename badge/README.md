@@ -55,7 +55,7 @@ Body:
 Add to your workflow:
 
 ```yaml
-- uses: live-docs/live_docs@v1
+- uses: sjarmak/livedocs@v1
   with:
     badge-api-url: https://livedocs-badge.your-account.workers.dev
     badge-api-token: ${{ secrets.LIVEDOCS_BADGE_TOKEN }}

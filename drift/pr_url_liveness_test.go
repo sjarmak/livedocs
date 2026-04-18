@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/live-docs/live_docs/db"
+	"github.com/sjarmak/livedocs/db"
 )
 
 // fakeLivenessChecker implements LivenessChecker via per-key lookup.

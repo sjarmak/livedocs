@@ -21,7 +21,7 @@ The problem: nobody updates them.
 
 ## The data
 
-We ran [`livedocs verify`](https://github.com/live-docs/live_docs) against 10 high-profile repos with AI context files:
+We ran [`livedocs verify`](https://github.com/sjarmak/livedocs) against 10 high-profile repos with AI context files:
 
 | Repo | Stars | Claims | Stale | Accuracy |
 |------|------:|-------:|------:|---------:|
@@ -69,7 +69,7 @@ Context files rot for the same reason all documentation rots: they're decoupled 
 
 ## Fixing it
 
-We built [livedocs](https://github.com/live-docs/live_docs) to detect context rot automatically. The `verify` command extracts every file path claim from your AI context files and checks whether it resolves to something real in the repo:
+We built [livedocs](https://github.com/sjarmak/livedocs) to detect context rot automatically. The `verify` command extracts every file path claim from your AI context files and checks whether it resolves to something real in the repo:
 
 ```bash
 $ livedocs verify
@@ -91,7 +91,7 @@ Three ways to use it:
 **CLI** — run `livedocs verify` in any repo. Zero config, instant results.
 
 ```bash
-go install github.com/live-docs/live_docs/cmd/livedocs@latest
+go install github.com/sjarmak/livedocs/cmd/livedocs@latest
 cd your-repo
 livedocs verify
 ```
@@ -107,7 +107,7 @@ Then ask Claude: "Check if my CLAUDE.md is up to date." The `check_ai_context` t
 **GitHub Action** — catch drift in CI before it reaches your agents.
 
 ```yaml
-- uses: live-docs/live_docs@v1
+- uses: sjarmak/livedocs@v1
   with:
     fail-threshold: 0
 ```
@@ -127,7 +127,7 @@ The fix is the same as for any documentation problem: automated verification. Yo
 ## Try it
 
 ```bash
-go install github.com/live-docs/live_docs/cmd/livedocs@latest
+go install github.com/sjarmak/livedocs/cmd/livedocs@latest
 livedocs verify
 ```
 
@@ -135,4 +135,4 @@ Your CLAUDE.md is probably already stale. Now you can prove it.
 
 ---
 
-*[livedocs](https://github.com/live-docs/live_docs) is open source (Apache 2.0). Star the repo, file issues, and tell us what you find when you run `livedocs verify` on your projects.*
+*[livedocs](https://github.com/sjarmak/livedocs) is open source (Apache 2.0). Star the repo, file issues, and tell us what you find when you run `livedocs verify` on your projects.*

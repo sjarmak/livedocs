@@ -9,8 +9,8 @@ import (
 	"sort"
 	"time"
 
-	"github.com/live-docs/live_docs/db"
-	"github.com/live-docs/live_docs/gitdiff"
+	"github.com/sjarmak/livedocs/db"
+	"github.com/sjarmak/livedocs/gitdiff"
 )
 
 // Status describes the verification state of an anchored claim.

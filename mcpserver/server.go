@@ -22,11 +22,11 @@ import (
 
 	"github.com/mark3labs/mcp-go/server"
 
-	"github.com/live-docs/live_docs/aicontext"
-	"github.com/live-docs/live_docs/anchor"
-	"github.com/live-docs/live_docs/db"
-	"github.com/live-docs/live_docs/drift"
-	"github.com/live-docs/live_docs/extractor"
+	"github.com/sjarmak/livedocs/aicontext"
+	"github.com/sjarmak/livedocs/anchor"
+	"github.com/sjarmak/livedocs/db"
+	"github.com/sjarmak/livedocs/drift"
+	"github.com/sjarmak/livedocs/extractor"
 )
 
 // Config holds the configuration for the MCP server.

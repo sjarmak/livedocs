@@ -19,8 +19,8 @@ import (
 
 	sitter "github.com/smacker/go-tree-sitter"
 
-	"github.com/live-docs/live_docs/extractor"
-	"github.com/live-docs/live_docs/extractor/lang"
+	"github.com/sjarmak/livedocs/extractor"
+	"github.com/sjarmak/livedocs/extractor/lang"
 )
 
 const (

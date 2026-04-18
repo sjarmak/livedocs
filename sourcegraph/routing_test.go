@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/live-docs/live_docs/extractor"
+	"github.com/sjarmak/livedocs/extractor"
 )
 
 // mockCaller implements MCPCaller for testing.

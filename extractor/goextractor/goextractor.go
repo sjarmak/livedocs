@@ -20,8 +20,8 @@ import (
 	"time"
 	"unicode"
 
-	"github.com/live-docs/live_docs/extractor"
-	"github.com/live-docs/live_docs/scip"
+	"github.com/sjarmak/livedocs/extractor"
+	"github.com/sjarmak/livedocs/scip"
 	"golang.org/x/tools/go/packages"
 )
 

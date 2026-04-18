@@ -4,7 +4,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/live-docs/live_docs/cache"
+	"github.com/sjarmak/livedocs/cache"
 )
 
 // helper creates an in-memory SQLite store with the given size cap.

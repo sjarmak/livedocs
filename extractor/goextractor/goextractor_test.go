@@ -6,7 +6,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/live-docs/live_docs/extractor"
+	"github.com/sjarmak/livedocs/extractor"
 )
 
 // createTestFixture writes a minimal Go package to a temp directory and returns the path.

@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/live-docs/live_docs/db"
+	"github.com/sjarmak/livedocs/db"
 )
 
 // resetExportFlags resets global flag state to avoid leaking between tests.

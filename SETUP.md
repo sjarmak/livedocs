@@ -5,14 +5,14 @@
 Install the `livedocs` binary:
 
 ```bash
-go install github.com/live-docs/live_docs/cmd/livedocs@latest
+go install github.com/sjarmak/livedocs/cmd/livedocs@latest
 ```
 
 Or build from source (requires CGO for tree-sitter):
 
 ```bash
-git clone https://github.com/live-docs/live_docs.git
-cd live_docs
+git clone https://github.com/sjarmak/livedocs.git
+cd livedocs
 make build
 # Binary at ./livedocs — move to your PATH
 ```
@@ -304,7 +304,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: live-docs/live_docs@v1
+      - uses: sjarmak/livedocs@v1
         with:
           fail-threshold: 0
 ```

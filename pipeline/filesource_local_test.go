@@ -7,7 +7,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/live-docs/live_docs/gitdiff"
+	"github.com/sjarmak/livedocs/gitdiff"
 )
 
 // Compile-time check that LocalFileSource satisfies FileSource.

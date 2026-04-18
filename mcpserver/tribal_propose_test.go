@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/live-docs/live_docs/db"
+	"github.com/sjarmak/livedocs/db"
 )
 
 // setupProposeTestDB creates a test pool with a repo DB containing tribal

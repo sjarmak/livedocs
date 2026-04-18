@@ -12,8 +12,8 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/live-docs/live_docs/aicontext"
-	"github.com/live-docs/live_docs/drift"
+	"github.com/sjarmak/livedocs/aicontext"
+	"github.com/sjarmak/livedocs/drift"
 )
 
 // skipDirs are directories to skip during markdown file discovery.

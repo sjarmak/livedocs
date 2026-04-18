@@ -4,8 +4,8 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/live-docs/live_docs/db"
-	"github.com/live-docs/live_docs/extractor"
+	"github.com/sjarmak/livedocs/db"
+	"github.com/sjarmak/livedocs/extractor"
 )
 
 // GenerateForPackage generates semantic claims for a single import path.

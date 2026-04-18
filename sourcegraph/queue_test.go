@@ -10,8 +10,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/live-docs/live_docs/db"
-	"github.com/live-docs/live_docs/extractor"
+	"github.com/sjarmak/livedocs/db"
+	"github.com/sjarmak/livedocs/extractor"
 )
 
 // blockingRouter is a PredicateRouter that blocks until unblocked, allowing

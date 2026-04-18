@@ -1,6 +1,6 @@
 # livedocs configuration
 # All fields are optional. An empty file uses sane defaults.
-# See: https://github.com/live-docs/live_docs
+# See: https://github.com/sjarmak/livedocs
 languages:
     - go
 tribal:

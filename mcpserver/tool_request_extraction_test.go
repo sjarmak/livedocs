@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/live-docs/live_docs/db"
+	"github.com/sjarmak/livedocs/db"
 )
 
 // mockExtractionRunner implements ExtractionRunner for testing.

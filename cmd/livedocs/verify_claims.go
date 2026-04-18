@@ -12,8 +12,8 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/live-docs/live_docs/db"
-	"github.com/live-docs/live_docs/drift"
+	"github.com/sjarmak/livedocs/db"
+	"github.com/sjarmak/livedocs/drift"
 )
 
 var (

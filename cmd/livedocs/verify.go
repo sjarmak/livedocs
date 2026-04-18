@@ -9,7 +9,7 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/live-docs/live_docs/aicontext"
+	"github.com/sjarmak/livedocs/aicontext"
 )
 
 var (

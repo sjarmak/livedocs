@@ -8,7 +8,7 @@ import (
 	"os"
 	"strings"
 
-	"github.com/live-docs/live_docs/semantic"
+	"github.com/sjarmak/livedocs/semantic"
 )
 
 // SemanticChecker validates README section descriptions against actual code

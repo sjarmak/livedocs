@@ -549,7 +549,7 @@ func (c *ClaimsDB) ListDistinctSourceFiles() ([]string, error) {
 // GetImportPathsForSymbolName returns distinct import_path values from symbols
 // whose symbol_name matches the given pattern (SQL LIKE).
 // This enables resolving a symbol name like "ClaimsDB" to its package path
-// "github.com/live-docs/live_docs/db" so tribal facts keyed by file path
+// "github.com/sjarmak/livedocs/db" so tribal facts keyed by file path
 // in that package directory can be found.
 func (c *ClaimsDB) GetImportPathsForSymbolName(pattern string) ([]string, error) {
 	rows, err := c.exec.Query(`

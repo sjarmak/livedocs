@@ -3,7 +3,7 @@ package pipeline
 import (
 	"context"
 
-	"github.com/live-docs/live_docs/gitdiff"
+	"github.com/sjarmak/livedocs/gitdiff"
 )
 
 // FileSource abstracts file access and diff operations, decoupling the pipeline

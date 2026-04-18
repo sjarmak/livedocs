@@ -34,7 +34,7 @@ jobs:
             -e GITHUB_TOKEN="${{ secrets.GITHUB_TOKEN }}" \
             -e HOMEBREW_TAP_GITHUB_TOKEN="${{ secrets.HOMEBREW_TAP_GITHUB_TOKEN }}" \
             -v /var/run/docker.sock:/var/run/docker.sock \
-            -v "${{ github.workspace }}:/go/src/github.com/live-docs/live_docs" \
-            -w /go/src/github.com/live-docs/live_docs \
+            -v "${{ github.workspace }}:/go/src/github.com/sjarmak/livedocs" \
+            -w /go/src/github.com/sjarmak/livedocs \
             ghcr.io/goreleaser/goreleaser-cross:${GORELEASER_CROSS_VERSION} \
             release --clean

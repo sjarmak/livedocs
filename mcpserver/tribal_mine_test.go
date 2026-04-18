@@ -9,8 +9,8 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"github.com/live-docs/live_docs/db"
-	"github.com/live-docs/live_docs/extractor/tribal"
+	"github.com/sjarmak/livedocs/db"
+	"github.com/sjarmak/livedocs/extractor/tribal"
 )
 
 // ---------------------------------------------------------------------------

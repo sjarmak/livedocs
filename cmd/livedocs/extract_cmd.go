@@ -14,18 +14,18 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/live-docs/live_docs/cache"
-	"github.com/live-docs/live_docs/config"
-	"github.com/live-docs/live_docs/db"
-	"github.com/live-docs/live_docs/extractor"
-	"github.com/live-docs/live_docs/extractor/goextractor"
-	"github.com/live-docs/live_docs/extractor/lang"
-	"github.com/live-docs/live_docs/extractor/treesitter"
-	"github.com/live-docs/live_docs/extractor/tribal"
-	"github.com/live-docs/live_docs/gitdiff"
-	"github.com/live-docs/live_docs/pipeline"
-	"github.com/live-docs/live_docs/semantic"
-	"github.com/live-docs/live_docs/sourcegraph"
+	"github.com/sjarmak/livedocs/cache"
+	"github.com/sjarmak/livedocs/config"
+	"github.com/sjarmak/livedocs/db"
+	"github.com/sjarmak/livedocs/extractor"
+	"github.com/sjarmak/livedocs/extractor/goextractor"
+	"github.com/sjarmak/livedocs/extractor/lang"
+	"github.com/sjarmak/livedocs/extractor/treesitter"
+	"github.com/sjarmak/livedocs/extractor/tribal"
+	"github.com/sjarmak/livedocs/gitdiff"
+	"github.com/sjarmak/livedocs/pipeline"
+	"github.com/sjarmak/livedocs/semantic"
+	"github.com/sjarmak/livedocs/sourcegraph"
 )
 
 var (

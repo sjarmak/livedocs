@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/live-docs/live_docs/db"
+	"github.com/sjarmak/livedocs/db"
 )
 
 // systemPrompt is the system message instructing the LLM how to produce

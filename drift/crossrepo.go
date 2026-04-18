@@ -21,7 +21,7 @@ import (
 
 	"gopkg.in/yaml.v3"
 
-	"github.com/live-docs/live_docs/semantic"
+	"github.com/sjarmak/livedocs/semantic"
 )
 
 // CodeSearcher fetches code context from remote repositories.

@@ -13,7 +13,7 @@ import (
 
 	"github.com/mark3labs/mcp-go/mcp"
 
-	"github.com/live-docs/live_docs/db"
+	"github.com/sjarmak/livedocs/db"
 )
 
 // computeSHA256 returns the hex-encoded SHA-256 hash of a string.

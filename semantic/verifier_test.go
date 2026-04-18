@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/live-docs/live_docs/db"
-	"github.com/live-docs/live_docs/extractor"
+	"github.com/sjarmak/livedocs/db"
+	"github.com/sjarmak/livedocs/extractor"
 )
 
 func makeClaim(name string, pred extractor.Predicate, text string) extractor.Claim {

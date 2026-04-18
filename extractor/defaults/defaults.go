@@ -3,10 +3,10 @@
 package defaults
 
 import (
-	"github.com/live-docs/live_docs/extractor"
-	"github.com/live-docs/live_docs/extractor/goextractor"
-	"github.com/live-docs/live_docs/extractor/lang"
-	"github.com/live-docs/live_docs/extractor/treesitter"
+	"github.com/sjarmak/livedocs/extractor"
+	"github.com/sjarmak/livedocs/extractor/goextractor"
+	"github.com/sjarmak/livedocs/extractor/lang"
+	"github.com/sjarmak/livedocs/extractor/treesitter"
 )
 
 // BuildDefaultRegistry creates a Registry pre-populated with the standard

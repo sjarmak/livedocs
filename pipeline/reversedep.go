@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/live-docs/live_docs/db"
+	"github.com/sjarmak/livedocs/db"
 )
 
 // reverseDepPaths returns file paths that import symbols from any of the

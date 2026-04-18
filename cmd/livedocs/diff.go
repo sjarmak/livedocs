@@ -10,14 +10,14 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/live-docs/live_docs/anchor"
-	"github.com/live-docs/live_docs/cache"
-	"github.com/live-docs/live_docs/db"
-	"github.com/live-docs/live_docs/drift"
-	"github.com/live-docs/live_docs/extractor"
-	"github.com/live-docs/live_docs/extractor/goextractor"
-	"github.com/live-docs/live_docs/gitdiff"
-	"github.com/live-docs/live_docs/pipeline"
+	"github.com/sjarmak/livedocs/anchor"
+	"github.com/sjarmak/livedocs/cache"
+	"github.com/sjarmak/livedocs/db"
+	"github.com/sjarmak/livedocs/drift"
+	"github.com/sjarmak/livedocs/extractor"
+	"github.com/sjarmak/livedocs/extractor/goextractor"
+	"github.com/sjarmak/livedocs/gitdiff"
+	"github.com/sjarmak/livedocs/pipeline"
 )
 
 var diffFormat string

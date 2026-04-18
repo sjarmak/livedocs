@@ -8,7 +8,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/live-docs/live_docs/gitdiff"
+	"github.com/sjarmak/livedocs/gitdiff"
 )
 
 // costTestFileSource is a minimal FileSource for testing CostTracker.

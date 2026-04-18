@@ -1,9 +1,9 @@
 #!/bin/sh
 # install.sh — curl-pipe-sh installer for livedocs
-# Usage: curl -sSfL https://raw.githubusercontent.com/live-docs/live_docs/main/install.sh | sh
+# Usage: curl -sSfL https://raw.githubusercontent.com/sjarmak/livedocs/main/install.sh | sh
 set -e
 
-REPO="live-docs/live_docs"
+REPO="sjarmak/livedocs"
 BINARY="livedocs"
 INSTALL_DIR="${INSTALL_DIR:-/usr/local/bin}"
 

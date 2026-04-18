@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/live-docs/live_docs/check"
+	"github.com/sjarmak/livedocs/check"
 )
 
 func TestGenerate_EmptyRepo(t *testing.T) {

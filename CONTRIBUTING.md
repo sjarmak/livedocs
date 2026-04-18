@@ -90,7 +90,7 @@ Each requires implementing the `Extractor` interface and adding test coverage. L
 
 ## Reporting Bugs
 
-Use the [bug report template](https://github.com/live-docs/live_docs/issues/new?template=bug_report.md) and include:
+Use the [bug report template](https://github.com/sjarmak/livedocs/issues/new?template=bug_report.md) and include:
 
 - Steps to reproduce
 - Expected vs actual behavior
@@ -98,7 +98,7 @@ Use the [bug report template](https://github.com/live-docs/live_docs/issues/new?
 
 ## Requesting Features
 
-Use the [feature request template](https://github.com/live-docs/live_docs/issues/new?template=feature_request.md).
+Use the [feature request template](https://github.com/sjarmak/livedocs/issues/new?template=feature_request.md).
 
 ## License
 

@@ -7,8 +7,8 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/live-docs/live_docs/db"
-	"github.com/live-docs/live_docs/extractor/tribal/normalize"
+	"github.com/sjarmak/livedocs/db"
+	"github.com/sjarmak/livedocs/extractor/tribal/normalize"
 )
 
 // corpusFact is the shape of each row in testdata/pilot_corpus.json.

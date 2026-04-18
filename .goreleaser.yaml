@@ -81,7 +81,7 @@ brews:
       name: homebrew-tap
       token: "{{ .Env.HOMEBREW_TAP_GITHUB_TOKEN }}"
     directory: Formula
-    homepage: "https://github.com/live-docs/live_docs"
+    homepage: "https://github.com/sjarmak/livedocs"
     description: "Live documentation for codebases"
     license: "MIT"
     install: |

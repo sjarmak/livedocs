@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/live-docs/live_docs/db"
+	"github.com/sjarmak/livedocs/db"
 	"github.com/spf13/pflag"
 	_ "modernc.org/sqlite"
 )

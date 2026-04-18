@@ -6,7 +6,7 @@ import (
 	"sort"
 	"testing"
 
-	"github.com/live-docs/live_docs/db"
+	"github.com/sjarmak/livedocs/db"
 )
 
 // createTestDBWithSymbols creates a claims DB at the given path with the

@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/live-docs/live_docs/db"
+	"github.com/sjarmak/livedocs/db"
 )
 
 // setupEnrichmentTestDB creates a test database with a package and structural claims.

@@ -27,7 +27,7 @@ make build              # Build livedocs binary (CGO required for tree-sitter)
 
 ## Conventions
 
-- Go module: `github.com/live-docs/live_docs`
+- Go module: `github.com/sjarmak/livedocs`
 - Claims DBs stored as `<repo-name>.claims.db` in data directories
 - MCP adapter pattern: all mcp-go imports confined to `mcpserver/adapter.go`
 - Tribal facts use provenance envelopes: every fact must have `source_quote`, `evidence[]`, `confidence`, `status`

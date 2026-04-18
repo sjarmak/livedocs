@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/live-docs/live_docs/db"
+	"github.com/sjarmak/livedocs/db"
 )
 
 func tempDB(t *testing.T) *db.ClaimsDB {

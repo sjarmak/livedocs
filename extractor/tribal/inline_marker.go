@@ -9,7 +9,7 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/live-docs/live_docs/db"
+	"github.com/sjarmak/livedocs/db"
 )
 
 const (

@@ -8,10 +8,10 @@ import (
 	"runtime"
 	"testing"
 
-	"github.com/live-docs/live_docs/db"
-	"github.com/live-docs/live_docs/extractor"
-	"github.com/live-docs/live_docs/extractor/lang"
-	"github.com/live-docs/live_docs/extractor/treesitter"
+	"github.com/sjarmak/livedocs/db"
+	"github.com/sjarmak/livedocs/extractor"
+	"github.com/sjarmak/livedocs/extractor/lang"
+	"github.com/sjarmak/livedocs/extractor/treesitter"
 )
 
 // testdataPath returns the absolute path to a file in extractor/treesitter/testdata/.

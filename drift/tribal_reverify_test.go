@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/live-docs/live_docs/db"
+	"github.com/sjarmak/livedocs/db"
 )
 
 // insertLLMFact inserts an LLM-extracted tribal fact (model != "") with the

@@ -7,9 +7,9 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/live-docs/live_docs/db"
-	"github.com/live-docs/live_docs/gitdiff"
-	"github.com/live-docs/live_docs/prbot"
+	"github.com/sjarmak/livedocs/db"
+	"github.com/sjarmak/livedocs/gitdiff"
+	"github.com/sjarmak/livedocs/prbot"
 )
 
 var (

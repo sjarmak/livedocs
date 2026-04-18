@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/live-docs/live_docs/extractor"
+	"github.com/sjarmak/livedocs/extractor"
 )
 
 // verifySystemPrompt instructs the LLM to act as an adversarial reviewer

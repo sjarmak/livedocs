@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/live-docs/live_docs/db"
+	"github.com/sjarmak/livedocs/db"
 )
 
 // ReverifyVerdict is the outcome of a semantic reverification check.

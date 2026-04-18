@@ -13,7 +13,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/live-docs/live_docs/pipeline"
+	"github.com/sjarmak/livedocs/pipeline"
 	_ "modernc.org/sqlite"
 )
 

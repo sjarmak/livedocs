@@ -8,9 +8,9 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/live-docs/live_docs/anchor"
-	"github.com/live-docs/live_docs/db"
-	"github.com/live-docs/live_docs/gitdiff"
+	"github.com/sjarmak/livedocs/anchor"
+	"github.com/sjarmak/livedocs/db"
+	"github.com/sjarmak/livedocs/gitdiff"
 )
 
 // InvalidatedClaim pairs an invalidated anchor with the claim it references

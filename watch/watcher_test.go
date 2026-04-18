@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/live-docs/live_docs/pipeline"
+	"github.com/sjarmak/livedocs/pipeline"
 )
 
 // safeWriter is a goroutine-safe io.Writer for concurrent test use.

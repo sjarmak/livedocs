@@ -6,7 +6,7 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/live-docs/live_docs/gitdiff"
+	"github.com/sjarmak/livedocs/gitdiff"
 )
 
 // defaultConcurrency is the default number of concurrent MCP calls.

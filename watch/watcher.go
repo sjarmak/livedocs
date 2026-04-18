@@ -6,7 +6,7 @@ import (
 	"io"
 	"time"
 
-	"github.com/live-docs/live_docs/pipeline"
+	"github.com/sjarmak/livedocs/pipeline"
 )
 
 // emptyTreeSHA is the hash of the empty tree in git, used as the "from"

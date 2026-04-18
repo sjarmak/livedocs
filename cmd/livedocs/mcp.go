@@ -10,10 +10,10 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/live-docs/live_docs/db"
-	"github.com/live-docs/live_docs/extractor/defaults"
-	"github.com/live-docs/live_docs/mcpserver"
-	"github.com/live-docs/live_docs/sourcegraph"
+	"github.com/sjarmak/livedocs/db"
+	"github.com/sjarmak/livedocs/extractor/defaults"
+	"github.com/sjarmak/livedocs/mcpserver"
+	"github.com/sjarmak/livedocs/sourcegraph"
 )
 
 var (

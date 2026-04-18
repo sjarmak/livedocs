@@ -8,7 +8,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/live-docs/live_docs/extractor"
+	"github.com/sjarmak/livedocs/extractor"
 )
 
 // MCPCaller abstracts the MCP client's CallTool method so tests can use mocks.

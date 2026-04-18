@@ -9,7 +9,7 @@ import (
 	scipb "github.com/scip-code/scip/bindings/go/scip"
 	"google.golang.org/protobuf/proto"
 
-	"github.com/live-docs/live_docs/db"
+	"github.com/sjarmak/livedocs/db"
 )
 
 func testClaimsDB(t *testing.T) *db.ClaimsDB {

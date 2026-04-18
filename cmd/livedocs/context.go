@@ -7,8 +7,8 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/live-docs/live_docs/mcpserver"
-	"github.com/live-docs/live_docs/renderer"
+	"github.com/sjarmak/livedocs/mcpserver"
+	"github.com/sjarmak/livedocs/renderer"
 )
 
 var contextDataDir string

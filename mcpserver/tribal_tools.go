@@ -9,7 +9,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/live-docs/live_docs/db"
+	"github.com/sjarmak/livedocs/db"
 )
 
 // corroborationDegradedThreshold is the corroboration level below which
@@ -257,8 +257,8 @@ func queryTribalFactsForSymbol(
 // by stripping known module prefixes. Returns a path with trailing "/".
 // Examples:
 //
-//	"github.com/live-docs/live_docs/db" → "db/"
-//	"github.com/live-docs/live_docs/extractor/tribal" → "extractor/tribal/"
+//	"github.com/sjarmak/livedocs/db" → "db/"
+//	"github.com/sjarmak/livedocs/extractor/tribal" → "extractor/tribal/"
 //	"db" → "db/"
 func importPathToLocalDir(importPath string) string {
 	// Common Go module prefixes: 3-segment (github.com/org/repo).

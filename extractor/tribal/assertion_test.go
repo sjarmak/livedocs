@@ -317,7 +317,7 @@ func TestAssertionExtractorNoCrossPackageImports(t *testing.T) {
 		t.Fatalf("parse assertion.go: %v", err)
 	}
 
-	const modPrefix = "github.com/live-docs/live_docs/"
+	const modPrefix = "github.com/sjarmak/livedocs/"
 	forbiddenPrefixes := []string{
 		modPrefix + "mcpserver",
 		modPrefix + "cmd",

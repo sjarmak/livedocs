@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"log"
 
-	"github.com/live-docs/live_docs/extractor/tribal/normalize"
+	"github.com/sjarmak/livedocs/extractor/tribal/normalize"
 )
 
 // recentBodyScanLimit caps how many existing fact bodies UpsertTribalFact

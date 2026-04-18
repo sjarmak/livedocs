@@ -15,7 +15,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/live-docs/live_docs/db"
+	"github.com/sjarmak/livedocs/db"
 )
 
 // LivenessChecker probes whether a fact's source reference (e.g. a PR

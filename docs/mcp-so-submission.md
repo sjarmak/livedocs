@@ -34,7 +34,7 @@ It also detects documentation drift — finding stale references in README files
 ## Installation
 
 ```bash
-go install github.com/live-docs/live_docs/cmd/livedocs@latest
+go install github.com/sjarmak/livedocs/cmd/livedocs@latest
 cd /path/to/your/repo
 livedocs init && livedocs extract
 ```

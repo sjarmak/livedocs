@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/live-docs/live_docs/gitdiff"
+	"github.com/sjarmak/livedocs/gitdiff"
 )
 
 // mockMCPCaller is a test double that returns canned responses keyed by tool name.

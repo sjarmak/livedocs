@@ -10,9 +10,9 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/live-docs/live_docs/audit"
-	"github.com/live-docs/live_docs/db"
-	"github.com/live-docs/live_docs/renderer"
+	"github.com/sjarmak/livedocs/audit"
+	"github.com/sjarmak/livedocs/db"
+	"github.com/sjarmak/livedocs/renderer"
 )
 
 var (

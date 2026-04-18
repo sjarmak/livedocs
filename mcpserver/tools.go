@@ -11,8 +11,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/live-docs/live_docs/db"
-	"github.com/live-docs/live_docs/renderer"
+	"github.com/sjarmak/livedocs/db"
+	"github.com/sjarmak/livedocs/renderer"
 )
 
 // stalenessThreshold is the duration after which extracted data is considered stale.

@@ -9,7 +9,7 @@ import (
 
 	scipb "github.com/scip-code/scip/bindings/go/scip"
 
-	"github.com/live-docs/live_docs/db"
+	"github.com/sjarmak/livedocs/db"
 )
 
 const (

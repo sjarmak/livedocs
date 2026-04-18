@@ -16,13 +16,13 @@ import (
 	"testing"
 	"time"
 
-	"github.com/live-docs/live_docs/cache"
-	"github.com/live-docs/live_docs/check"
-	"github.com/live-docs/live_docs/db"
-	"github.com/live-docs/live_docs/extractor"
-	"github.com/live-docs/live_docs/extractor/lang"
-	"github.com/live-docs/live_docs/extractor/treesitter"
-	"github.com/live-docs/live_docs/pipeline"
+	"github.com/sjarmak/livedocs/cache"
+	"github.com/sjarmak/livedocs/check"
+	"github.com/sjarmak/livedocs/db"
+	"github.com/sjarmak/livedocs/extractor"
+	"github.com/sjarmak/livedocs/extractor/lang"
+	"github.com/sjarmak/livedocs/extractor/treesitter"
+	"github.com/sjarmak/livedocs/pipeline"
 )
 
 // clientGoRoot returns the absolute path to ~/kubernetes/client-go, or skips.

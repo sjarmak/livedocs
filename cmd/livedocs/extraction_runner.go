@@ -10,13 +10,13 @@ import (
 	"strings"
 	"time"
 
-	"github.com/live-docs/live_docs/cache"
-	"github.com/live-docs/live_docs/db"
-	"github.com/live-docs/live_docs/extractor"
-	"github.com/live-docs/live_docs/extractor/lang"
-	"github.com/live-docs/live_docs/extractor/treesitter"
-	"github.com/live-docs/live_docs/gitdiff"
-	"github.com/live-docs/live_docs/pipeline"
+	"github.com/sjarmak/livedocs/cache"
+	"github.com/sjarmak/livedocs/db"
+	"github.com/sjarmak/livedocs/extractor"
+	"github.com/sjarmak/livedocs/extractor/lang"
+	"github.com/sjarmak/livedocs/extractor/treesitter"
+	"github.com/sjarmak/livedocs/gitdiff"
+	"github.com/sjarmak/livedocs/pipeline"
 )
 
 // extractionRunner implements mcpserver.ExtractionRunner by delegating to

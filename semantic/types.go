@@ -7,7 +7,7 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/live-docs/live_docs/db"
+	"github.com/sjarmak/livedocs/db"
 )
 
 // Version is the semantic extractor version, used in claim provenance.

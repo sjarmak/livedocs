@@ -10,7 +10,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/live-docs/live_docs/db"
+	"github.com/sjarmak/livedocs/db"
 
 	_ "modernc.org/sqlite"
 )
@@ -684,8 +684,8 @@ func TestImportPathToLocalDir(t *testing.T) {
 		importPath string
 		want       string
 	}{
-		{"github.com package", "github.com/live-docs/live_docs/db", "db/"},
-		{"github.com nested", "github.com/live-docs/live_docs/extractor/tribal", "extractor/tribal/"},
+		{"github.com package", "github.com/sjarmak/livedocs/db", "db/"},
+		{"github.com nested", "github.com/sjarmak/livedocs/extractor/tribal", "extractor/tribal/"},
 		{"github.com root", "github.com/foo/bar", ""},
 		{"gitlab.com package", "gitlab.com/org/repo/pkg", "pkg/"},
 		{"bitbucket.org package", "bitbucket.org/org/repo/pkg", "pkg/"},
