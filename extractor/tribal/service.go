@@ -76,11 +76,52 @@ func (e *MiningError) SafeMessage() string {
 
 func (e *MiningError) Unwrap() error { return e.Err }
 
+// maxFailedErrorsCaptured caps the number of per-fact upsert errors retained
+// on MiningResult.FailedErrors. FailedCount still reflects the true total so
+// observability is preserved on pathological files; the slice is bounded to
+// avoid unbounded growth (one error object per failure can accumulate heap
+// pressure on very large, fully-failing files).
+const maxFailedErrorsCaptured = 32
+
 // MiningResult holds the outcome of a single file mining operation.
+//
+// Partial-failure semantics: MineFile returns a non-nil MiningResult and a
+// nil error even when some UpsertTribalFact calls fail. Callers that need
+// to detect partial failure MUST inspect FailedCount (> 0 signals at least
+// one upsert failed). FailedErrors exposes up to maxFailedErrorsCaptured
+// concrete errors for logging or metrics; FailedCount is the authoritative
+// total. This is additive to the original Facts/Trigger/Path surface so
+// existing callers do not break.
 type MiningResult struct {
-	Facts   []db.TribalFact // newly mined facts (SubjectID already set)
-	Trigger Trigger         // echo of the caller's trigger for telemetry
-	Path    string          // the file path that was mined
+	Facts        []db.TribalFact // newly mined facts (SubjectID already set)
+	Trigger      Trigger         // echo of the caller's trigger for telemetry
+	Path         string          // the file path that was mined
+	FailedCount  int             // total UpsertTribalFact failures (uncapped)
+	FailedErrors []error         // retained errors, capped at maxFailedErrorsCaptured
+}
+
+// factUpserter is the narrow interface MineFile needs from the claims DB
+// for fact persistence. Narrowing the dependency here serves two purposes:
+// (1) it documents the exact side effect MineFile performs on the DB, and
+// (2) it enables tests to inject failure paths without spinning up a
+// broken sqlite connection. Production code uses *db.ClaimsDB directly
+// via claimsDBUpserter; MineFile never references this interface
+// outside of the injected field.
+type factUpserter interface {
+	UpsertTribalFact(fact db.TribalFact, evidence []db.TribalEvidence) (int64, bool, error)
+}
+
+// claimsDBUpserter adapts *db.ClaimsDB to the factUpserter interface.
+// The adapter keeps the production call path identical to the previous
+// direct method call — only the dispatch layer is abstracted.
+type claimsDBUpserter struct {
+	cdb *db.ClaimsDB
+}
+
+func (a *claimsDBUpserter) UpsertTribalFact(
+	fact db.TribalFact, evidence []db.TribalEvidence,
+) (int64, bool, error) {
+	return a.cdb.UpsertTribalFact(fact, evidence)
 }
 
 // TribalMiningService is the single orchestration layer for tribal mining.
@@ -89,8 +130,9 @@ type MiningResult struct {
 type TribalMiningService struct {
 	miner        *prCommentMiner
 	claimsDB     *db.ClaimsDB
-	repo         string // repo name in the claims DB (e.g. "kubernetes")
-	minerVersion string // recorded in source_files.pr_miner_version
+	upserter     factUpserter // fact persistence seam; defaults to claimsDB
+	repo         string       // repo name in the claims DB (e.g. "kubernetes")
+	minerVersion string       // recorded in source_files.pr_miner_version
 
 	// factsGeneration is atomically incremented on every write.
 	// Readers (e.g. MCP pool) can poll this to detect invalidation.
@@ -125,6 +167,12 @@ type ServiceOption func(*TribalMiningService)
 // source_files.pr_miner_version. Defaults to "service-v1".
 func WithMinerVersion(v string) ServiceOption {
 	return func(s *TribalMiningService) { s.minerVersion = v }
+}
+
+// withFactUpserter overrides the fact persistence layer. Unexported because
+// it is a test seam; production callers always use the default (claimsDB).
+func withFactUpserter(u factUpserter) ServiceOption {
+	return func(s *TribalMiningService) { s.upserter = u }
 }
 
 // NewTribalMiningService creates the shared orchestration layer.
@@ -170,6 +218,9 @@ func newServiceWithMiner(
 	}
 	for _, o := range opts {
 		o(s)
+	}
+	if s.upserter == nil {
+		s.upserter = &claimsDBUpserter{cdb: claimsDB}
 	}
 	return s
 }
@@ -256,15 +307,25 @@ func (s *TribalMiningService) MineFile(
 		}
 	}
 
-	// 4. Upsert facts with correct SubjectID.
+	// 4. Upsert facts with correct SubjectID. Each failure is recorded on
+	//    the result so callers observe partial success (see MiningResult
+	//    partial-failure semantics). We never abort on first failure —
+	//    the remaining facts may still succeed, and a single poison fact
+	//    should not block valid neighbors on the same file.
 	result := &MiningResult{
 		Trigger: trigger,
 		Path:    relPath,
 	}
 	for _, fact := range facts {
 		fact.SubjectID = fileSymID
-		if _, _, insertErr := s.claimsDB.UpsertTribalFact(fact, fact.Evidence); insertErr == nil {
+		_, _, insertErr := s.upserter.UpsertTribalFact(fact, fact.Evidence)
+		if insertErr == nil {
 			result.Facts = append(result.Facts, fact)
+			continue
+		}
+		result.FailedCount++
+		if len(result.FailedErrors) < maxFailedErrorsCaptured {
+			result.FailedErrors = append(result.FailedErrors, insertErr)
 		}
 	}
 

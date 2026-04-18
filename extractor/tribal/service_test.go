@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"path/filepath"
 	"testing"
 
@@ -31,11 +32,11 @@ func newTestClaimsDB(t *testing.T) *db.ClaimsDB {
 
 // mockRunnerRecording records all gh command calls and returns canned responses.
 type mockRunnerRecording struct {
-	calls    [][]string
-	prList   string // response for `gh pr list`
-	apiResp  string // response for `gh api`
-	prErr    error
-	apiErr   error
+	calls   [][]string
+	prList  string // response for `gh pr list`
+	apiResp string // response for `gh api`
+	prErr   error
+	apiErr  error
 }
 
 func (m *mockRunnerRecording) run(_ context.Context, name string, args ...string) ([]byte, error) {
@@ -367,9 +368,9 @@ func TestIsSourceFile(t *testing.T) {
 		{"assets/image.png", false},
 
 		// Edge cases
-		{"k8s.io/api/core/v1/types.go", true},     // import path with dots BUT ends in .go
-		{".hidden/file.go", true},                   // dotfile directory
-		{"path/to/file.JS", true},                   // case insensitive
+		{"k8s.io/api/core/v1/types.go", true}, // import path with dots BUT ends in .go
+		{".hidden/file.go", true},             // dotfile directory
+		{"path/to/file.JS", true},             // case insensitive
 	}
 
 	for _, tt := range tests {
@@ -453,6 +454,217 @@ func TestResolveSymbolFiles_WildcardNoFanOut(t *testing.T) {
 		if len(paths) != 0 {
 			t.Errorf("resolveSymbolFiles(%q) = %v, want 0 paths (wildcards must be literal)", input, paths)
 		}
+	}
+}
+
+// failingUpserter implements factUpserter; UpsertTribalFact always returns err.
+// Used to exercise MineFile's partial-failure bookkeeping.
+type failingUpserter struct {
+	err error
+}
+
+func (f *failingUpserter) UpsertTribalFact(
+	_ db.TribalFact, _ []db.TribalEvidence,
+) (int64, bool, error) {
+	return 0, false, f.err
+}
+
+// mixedUpserter fails every other call, simulating a flaky writer.
+type mixedUpserter struct {
+	real  factUpserter
+	err   error
+	calls int
+}
+
+func (m *mixedUpserter) UpsertTribalFact(
+	fact db.TribalFact, evidence []db.TribalEvidence,
+) (int64, bool, error) {
+	m.calls++
+	if m.calls%2 == 0 {
+		return 0, false, m.err
+	}
+	return m.real.UpsertTribalFact(fact, evidence)
+}
+
+func TestTribalMiningService_MineFile_FailedUpsertsAreSurfaced(t *testing.T) {
+	cdb := newTestClaimsDB(t)
+	comment := PRComment{
+		Body:     "must acquire lock",
+		DiffHunk: "@@",
+		Path:     "pkg/x.go",
+		HTMLURL:  "https://github.com/org/repo/pull/1#r1",
+		User:     prUser{Login: "r"},
+	}
+	commentJSON, _ := json.Marshal(comment)
+
+	runner := &mockRunnerRecording{
+		prList:  "1\n",
+		apiResp: string(commentJSON),
+	}
+	llm := &mockLLMClient{
+		responses: []string{`{"kind":"invariant","body":"must acquire lock","confidence":0.9}`},
+	}
+	miner := &prCommentMiner{
+		RepoOwner:  "org",
+		RepoName:   "repo",
+		Client:     llm,
+		Model:      "test",
+		RunCommand: runner.run,
+	}
+
+	svc := newServiceWithMiner(cdb, miner, "repo",
+		withFactUpserter(&failingUpserter{err: errors.New("simulated upsert failure")}),
+	)
+
+	result, err := svc.MineFile(context.Background(), "pkg/x.go", TriggerBatchSchedule)
+	if err != nil {
+		t.Fatalf("MineFile should return nil error on partial upsert failure (additive API), got %v", err)
+	}
+	if result == nil {
+		t.Fatal("expected non-nil result even on all-fail")
+	}
+	if len(result.Facts) != 0 {
+		t.Errorf("Facts = %d, want 0 (upsert failed)", len(result.Facts))
+	}
+	if result.FailedCount != 1 {
+		t.Errorf("FailedCount = %d, want 1", result.FailedCount)
+	}
+	if len(result.FailedErrors) != 1 {
+		t.Fatalf("FailedErrors len = %d, want 1", len(result.FailedErrors))
+	}
+	if result.FailedErrors[0] == nil {
+		t.Error("FailedErrors[0] should not be nil")
+	}
+	// Generation should NOT bump when no facts were written.
+	if g := svc.FactsGeneration(); g != 0 {
+		t.Errorf("generation = %d, want 0 (no successful facts)", g)
+	}
+}
+
+// encodeNDJSON serializes comments as newline-delimited JSON, matching the
+// output of `gh api ... -q '.[] | select(...)'` which emits one object per line.
+func encodeNDJSON(t *testing.T, comments []PRComment) string {
+	t.Helper()
+	var out []byte
+	for _, c := range comments {
+		b, err := json.Marshal(c)
+		if err != nil {
+			t.Fatalf("marshal comment: %v", err)
+		}
+		out = append(out, b...)
+		out = append(out, '\n')
+	}
+	return string(out)
+}
+
+func TestTribalMiningService_MineFile_MixedSuccessAndFailure(t *testing.T) {
+	cdb := newTestClaimsDB(t)
+	comments := []PRComment{
+		{Body: "first rationale", DiffHunk: "@@", Path: "pkg/m.go",
+			HTMLURL: "https://github.com/org/repo/pull/1#r1", User: prUser{Login: "r"}},
+		{Body: "second rationale", DiffHunk: "@@", Path: "pkg/m.go",
+			HTMLURL: "https://github.com/org/repo/pull/1#r2", User: prUser{Login: "r"}},
+		{Body: "third rationale", DiffHunk: "@@", Path: "pkg/m.go",
+			HTMLURL: "https://github.com/org/repo/pull/1#r3", User: prUser{Login: "r"}},
+		{Body: "fourth rationale", DiffHunk: "@@", Path: "pkg/m.go",
+			HTMLURL: "https://github.com/org/repo/pull/1#r4", User: prUser{Login: "r"}},
+	}
+
+	runner := &mockRunnerRecording{
+		prList:  "1\n",
+		apiResp: encodeNDJSON(t, comments),
+	}
+	llm := &mockLLMClient{
+		responses: []string{
+			`{"kind":"rationale","body":"first rationale body","confidence":0.9}`,
+			`{"kind":"rationale","body":"second rationale body","confidence":0.9}`,
+			`{"kind":"rationale","body":"third rationale body","confidence":0.9}`,
+			`{"kind":"rationale","body":"fourth rationale body","confidence":0.9}`,
+		},
+	}
+	miner := &prCommentMiner{
+		RepoOwner:  "org",
+		RepoName:   "repo",
+		Client:     llm,
+		Model:      "test",
+		RunCommand: runner.run,
+	}
+
+	realUpserter := &claimsDBUpserter{cdb: cdb}
+	mixed := &mixedUpserter{
+		real: realUpserter,
+		err:  errors.New("simulated flaky upsert"),
+	}
+
+	svc := newServiceWithMiner(cdb, miner, "repo", withFactUpserter(mixed))
+
+	result, err := svc.MineFile(context.Background(), "pkg/m.go", TriggerBatchSchedule)
+	if err != nil {
+		t.Fatalf("MineFile: %v", err)
+	}
+	if result == nil {
+		t.Fatal("expected non-nil result")
+	}
+	// Four facts: calls 1,3 succeed; calls 2,4 fail.
+	if len(result.Facts) != 2 {
+		t.Errorf("Facts = %d, want 2 successful", len(result.Facts))
+	}
+	if result.FailedCount != 2 {
+		t.Errorf("FailedCount = %d, want 2 failed", result.FailedCount)
+	}
+	if len(result.FailedErrors) != 2 {
+		t.Errorf("FailedErrors len = %d, want 2", len(result.FailedErrors))
+	}
+	// Generation bumps exactly once (not per successful fact).
+	if g := svc.FactsGeneration(); g != 1 {
+		t.Errorf("generation = %d, want 1 (bumps once when any fact written)", g)
+	}
+}
+
+func TestTribalMiningService_MineFile_FailedErrorsCapped(t *testing.T) {
+	cdb := newTestClaimsDB(t)
+	// Build enough comments to exceed the retention cap (maxFailedErrorsCaptured = 32).
+	const n = maxFailedErrorsCaptured + 5
+	comments := make([]PRComment, n)
+	responses := make([]string, n)
+	for i := 0; i < n; i++ {
+		comments[i] = PRComment{
+			Body:     fmt.Sprintf("comment %d", i),
+			DiffHunk: "@@",
+			Path:     "pkg/big.go",
+			HTMLURL:  fmt.Sprintf("https://github.com/org/repo/pull/1#r%d", i),
+			User:     prUser{Login: "r"},
+		}
+		responses[i] = fmt.Sprintf(`{"kind":"rationale","body":"body %d","confidence":0.9}`, i)
+	}
+
+	runner := &mockRunnerRecording{
+		prList:  "1\n",
+		apiResp: encodeNDJSON(t, comments),
+	}
+	llm := &mockLLMClient{responses: responses}
+	miner := &prCommentMiner{
+		RepoOwner:  "org",
+		RepoName:   "repo",
+		Client:     llm,
+		Model:      "test",
+		RunCommand: runner.run,
+	}
+
+	svc := newServiceWithMiner(cdb, miner, "repo",
+		withFactUpserter(&failingUpserter{err: errors.New("boom")}),
+	)
+
+	result, err := svc.MineFile(context.Background(), "pkg/big.go", TriggerBatchSchedule)
+	if err != nil {
+		t.Fatalf("MineFile: %v", err)
+	}
+	if result.FailedCount != n {
+		t.Errorf("FailedCount = %d, want %d", result.FailedCount, n)
+	}
+	if len(result.FailedErrors) != maxFailedErrorsCaptured {
+		t.Errorf("FailedErrors len = %d, want cap %d",
+			len(result.FailedErrors), maxFailedErrorsCaptured)
 	}
 }
 
