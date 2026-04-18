@@ -10,6 +10,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/sjarmak/livedocs/config"
 	"github.com/sjarmak/livedocs/db"
 	"github.com/sjarmak/livedocs/extractor/defaults"
 	"github.com/sjarmak/livedocs/mcpserver"
@@ -82,6 +83,18 @@ See SETUP.md for Cursor and Windsurf configuration.`,
 			}
 		}
 
+		// Wire up MiningFactory for tribal_mine_on_demand. The factory is
+		// registered only when (a) multi-repo mode is active, (b) tribal LLM
+		// extraction is explicitly enabled, (c) DailyBudget > 0, and (d) an
+		// LLM client (Claude CLI or Anthropic API key) is reachable. When any
+		// precondition fails, the tool is silently omitted from the registry
+		// — the safe default for a long-running server.
+		if mcpDataDir != "" {
+			tribalCfg := loadTribalConfigForMCP()
+			cfg.MiningFactory = buildMiningFactory(tribalCfg, defaultLLMClientFactory)
+			logMiningFactoryWireup(cfg.MiningFactory, tribalCfg)
+		}
+
 		cfg.Telemetry = mcpTelemetry || os.Getenv("LIVEDOCS_TELEMETRY") == "1"
 		srv, err := mcpserver.New(cfg)
 		if err != nil {
@@ -114,6 +127,26 @@ func init() {
 	mcpCmd.Flags().BoolVar(&mcpEnableStaleness, "enable-staleness", true, "auto-discover repo roots and enable lazy staleness checking")
 	mcpCmd.Flags().StringVar(&mcpTransport, "transport", "stdio", "transport type: \"stdio\" (default) or \"http\" (HTTP/SSE for multi-client access)")
 	mcpCmd.Flags().IntVar(&mcpPort, "port", 8080, "port for HTTP transport (only used with --transport http)")
+}
+
+// loadTribalConfigForMCP loads the repo-root .livedocs.yaml and returns the
+// resolved TribalConfig (with defaults applied). If the config file cannot
+// be read, it returns an empty TribalConfig so buildMiningFactory falls back
+// to the no-op path. The MCP server has no concept of "the current repo"
+// — it runs at workspace scope — so this mirrors extract_cmd's pattern of
+// loading from CWD.
+func loadTribalConfigForMCP() config.TribalConfig {
+	cwd, err := os.Getwd()
+	if err != nil {
+		log.Printf("warning: getwd for tribal config: %v (JIT mining disabled)", err)
+		return config.TribalConfig{}
+	}
+	cfg, err := config.Load(config.ConfigPath(cwd))
+	if err != nil {
+		log.Printf("warning: load tribal config: %v (JIT mining disabled)", err)
+		return config.TribalConfig{}
+	}
+	return cfg.Tribal
 }
 
 // discoverRepoRoots scans dataDir for *.claims.db files, opens each to read
