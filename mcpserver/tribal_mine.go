@@ -27,6 +27,21 @@ var sessionIDResolver = SessionIDFromContext
 // Public types
 // ---------------------------------------------------------------------------
 
+// ErrLLMClientUnavailable is the sentinel MiningServiceFactory
+// implementations return (wrapped) when neither the primary nor the
+// fallback LLM client can be resolved at call time. The handler uses
+// errors.Is to classify this distinct from generic factory failures
+// (missing git metadata, DB error, etc.) so the MCP client sees an
+// actionable message rather than the generic
+// "mining service unavailable" fallback.
+//
+// The factory MAY wrap the sentinel with additional context (e.g. "claude
+// CLI not on PATH and ANTHROPIC_API_KEY unset") — that context is
+// preserved when the handler renders the caller-facing message. The
+// sentinel itself never embeds provider-specific details so it remains a
+// stable errors.Is target across implementations.
+var ErrLLMClientUnavailable = errors.New("llm client unavailable")
+
 // MiningServiceFactory constructs a tribal.TribalMiningService bound to the
 // given repo and claims DB. Callers that expose the tribal_mine_on_demand
 // tool must supply a factory that wires in the appropriate LLM client,
@@ -38,6 +53,12 @@ var sessionIDResolver = SessionIDFromContext
 // the claims DB) with the service returned by subsequent calls on the same
 // repo — this is what allows the M3 cursor to make repeat invocations
 // idempotent.
+//
+// When the LLM client cannot be resolved at call time (a transient probe
+// failure — e.g. PATH temporarily lacking the `claude` binary, credential
+// rotation race), the factory MUST return an error wrapping
+// ErrLLMClientUnavailable so the handler can render an actionable MCP
+// error result. See live_docs-m7v.23 for rationale.
 type MiningServiceFactory func(repo string, cdb *db.ClaimsDB) (*tribal.TribalMiningService, error)
 
 // ---------------------------------------------------------------------------
@@ -119,8 +140,31 @@ func TribalMineOnDemandHandler(pool *DBPool, factory MiningServiceFactory) ToolH
 		// --- Build the mining service for this repo ---
 		svc, err := factory(repo, cdb)
 		if err != nil {
-			// The factory may include provider-specific error details; keep
-			// the caller-facing message generic.
+			// Distinguish transient LLM-client unreachability from other
+			// factory failures so operators can act on the error. The
+			// sentinel is stable across factory implementations; the
+			// wrapped message is preserved because it is produced by
+			// code paths that already redact credentials (see
+			// cmd/livedocs/mcp_mining_factory.go and the constructors
+			// in semantic/). Other factory errors keep the generic
+			// message so they do not accidentally leak internal paths or
+			// DB details from the wrapping chain.
+			if errors.Is(err, ErrLLMClientUnavailable) {
+				// Log the server-side detail for operator diagnosis. The
+				// MCP client sees only a generic message: the MCP transport
+				// may be HTTP/SSE, so the actionable remediation (specific
+				// CLI name, specific env-var name) must not reach remote
+				// agents. Operators see the detail in their logs and can
+				// surface it through their own tooling.
+				log.Printf("tribal_mine_on_demand: llm client unreachable at call time: %v", err)
+				return NewErrorResult(
+					"tribal_mine_on_demand: LLM provider unavailable; contact the server operator",
+				), nil
+			}
+			// Log the underlying error so operators can diagnose, but
+			// return only a generic message to the caller to avoid
+			// leaking internal paths or DB details via %w chains.
+			log.Printf("tribal_mine_on_demand: factory error for repo=%q: %v", repo, err)
 			return NewErrorResult("tribal_mine_on_demand: mining service unavailable"), nil
 		}
 		if svc == nil {
