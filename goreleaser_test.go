@@ -30,6 +30,14 @@ type goreleaserConfig struct {
 	Checksum struct {
 		Algorithm string `yaml:"algorithm"`
 	} `yaml:"checksum"`
+	Signs []struct {
+		ID          string   `yaml:"id"`
+		Cmd         string   `yaml:"cmd"`
+		Artifacts   string   `yaml:"artifacts"`
+		Signature   string   `yaml:"signature"`
+		Certificate string   `yaml:"certificate"`
+		Args        []string `yaml:"args"`
+	} `yaml:"signs"`
 	Brews []struct {
 		Name string `yaml:"name"`
 	} `yaml:"brews"`
@@ -141,6 +149,53 @@ func TestGoreleaserConfig(t *testing.T) {
 			t.Errorf("expected brew name 'livedocs', got %q", cfg.Brews[0].Name)
 		}
 	})
+
+	// Cosign keyless signing of checksums.txt (live_docs-5vc.11). Without a
+	// signature, a compromised release repo could publish a matching
+	// (tarball, checksums.txt) pair and bypass consumer integrity checks.
+	t.Run("cosign keyless signing of checksums", func(t *testing.T) {
+		if len(cfg.Signs) == 0 {
+			t.Fatal("no signs block configured — checksums.txt would be unsigned")
+		}
+		// Find the checksum-signing entry (may coexist with future entries).
+		sigIdx := -1
+		for i := range cfg.Signs {
+			if cfg.Signs[i].Artifacts == "checksum" {
+				sigIdx = i
+				break
+			}
+		}
+		if sigIdx < 0 {
+			t.Fatal("no signs entry targeting artifacts: checksum")
+		}
+		sig := cfg.Signs[sigIdx]
+
+		if sig.Cmd != "cosign" {
+			t.Errorf("signs.cmd = %q, want %q (GPG would require key management)", sig.Cmd, "cosign")
+		}
+		if sig.Signature == "" {
+			t.Error("signs.signature must be set so the signature file lands in the release")
+		}
+		if sig.Certificate == "" {
+			t.Error("signs.certificate must be set so the Fulcio cert lands in the release (consumers verify against it)")
+		}
+		// Keyless signing requires --yes (otherwise cosign prompts and blocks
+		// non-interactive CI). sign-blob (not sign) targets a raw file, which
+		// is what we need for checksums.txt. sign-blob MUST be the first arg —
+		// cosign requires the subcommand to precede all flags.
+		if len(sig.Args) == 0 || sig.Args[0] != "sign-blob" {
+			t.Errorf("signs.args[0] must be 'sign-blob' (cosign requires subcommand first); got args=%v", sig.Args)
+		}
+		var foundYes bool
+		for _, a := range sig.Args {
+			if a == "--yes" {
+				foundYes = true
+			}
+		}
+		if !foundYes {
+			t.Error("signs.args must include '--yes' (keyless signing prompts in the absence of this flag and will hang CI)")
+		}
+	})
 }
 
 func TestReleaseWorkflow(t *testing.T) {
@@ -165,6 +220,48 @@ func TestReleaseWorkflow(t *testing.T) {
 	t.Run("has write permissions", func(t *testing.T) {
 		if !strings.Contains(content, "contents: write") {
 			t.Error("workflow missing contents: write permission")
+		}
+	})
+
+	// Cosign keyless signing requires the workflow to request an OIDC token
+	// from GitHub. Without id-token: write, the signs: block in .goreleaser.yaml
+	// fails at release time. Least-privilege: scope to the release job, not the
+	// whole workflow, so future jobs added here don't silently inherit OIDC
+	// issuance rights. (live_docs-5vc.11)
+	t.Run("id-token write scoped to release job, not workflow", func(t *testing.T) {
+		if !strings.Contains(content, "id-token: write") {
+			t.Error("workflow missing `id-token: write` permission (required for cosign keyless OIDC signing)")
+		}
+		// Top-level permissions block must be empty (`permissions: {}`) — any
+		// id-token write at that scope bleeds into every job in the workflow.
+		if !strings.Contains(content, "permissions: {}") {
+			t.Error("top-level `permissions: {}` missing — id-token: write must be job-scoped, not workflow-scoped (least privilege)")
+		}
+	})
+
+	// Cosign is not shipped inside goreleaser-cross. The host must install
+	// it (via sigstore/cosign-installer) and bind-mount the binary into the
+	// container; otherwise the signs: block fails with `cosign: not found`.
+	t.Run("installs cosign on host", func(t *testing.T) {
+		if !strings.Contains(content, "sigstore/cosign-installer@") {
+			t.Error("workflow must install cosign via sigstore/cosign-installer so goreleaser can sign checksums.txt")
+		}
+	})
+
+	// OIDC env vars must be forwarded into the goreleaser-cross container.
+	t.Run("forwards OIDC env vars to container", func(t *testing.T) {
+		if !strings.Contains(content, "ACTIONS_ID_TOKEN_REQUEST_TOKEN") {
+			t.Error("workflow must forward ACTIONS_ID_TOKEN_REQUEST_TOKEN into goreleaser-cross (cosign keyless requires it)")
+		}
+		if !strings.Contains(content, "ACTIONS_ID_TOKEN_REQUEST_URL") {
+			t.Error("workflow must forward ACTIONS_ID_TOKEN_REQUEST_URL into goreleaser-cross (cosign keyless requires it)")
+		}
+	})
+
+	// Cosign binary must be bind-mounted into the container.
+	t.Run("bind-mounts cosign binary", func(t *testing.T) {
+		if !strings.Contains(content, "/usr/local/bin/cosign") {
+			t.Error("workflow must bind-mount cosign into the goreleaser-cross container (the image does not ship cosign)")
 		}
 	})
 }

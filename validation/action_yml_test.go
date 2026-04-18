@@ -243,3 +243,81 @@ func TestActionYML_ChecksumVerification(t *testing.T) {
 		t.Error("sha256sum verification must precede installation (otherwise unverified bytes reach /usr/local/bin)")
 	}
 }
+
+// TestActionYML_CosignVerification asserts that authenticity of checksums.txt
+// is verified (cosign keyless signature) BEFORE integrity is trusted. Without
+// this, a compromised release repo could publish a matching tarball +
+// checksums.txt pair and bypass the sha256sum guard. See live_docs-5vc.11.
+func TestActionYML_CosignVerification(t *testing.T) {
+	data, err := os.ReadFile("../action.yml")
+	if err != nil {
+		t.Fatalf("read action.yml: %v", err)
+	}
+	raw := string(data)
+
+	// cosign-installer must be present so verify-blob is available at runtime.
+	if !strings.Contains(raw, "sigstore/cosign-installer@") {
+		t.Error("action.yml must install cosign via sigstore/cosign-installer (required for checksums.txt signature verification)")
+	}
+
+	// Signature + certificate assets must be downloaded from the release.
+	if !strings.Contains(raw, `--pattern "checksums.txt.sig"`) {
+		t.Error("action.yml must download checksums.txt.sig to verify release authenticity")
+	}
+	if !strings.Contains(raw, `--pattern "checksums.txt.pem"`) {
+		t.Error("action.yml must download checksums.txt.pem to verify release authenticity")
+	}
+
+	// Fail-closed if any required signing artifact is missing. Prevents
+	// silent downgrade to integrity-only if the release didn't sign.
+	if !strings.Contains(raw, "is missing $required") {
+		t.Error("action.yml must fail closed when signing artifacts are missing from the release (no silent downgrade)")
+	}
+
+	// cosign verify-blob must run and must pin identity + issuer. Without
+	// these flags, any cosign keyless signature from any GitHub workflow
+	// would validate.
+	if !strings.Contains(raw, "cosign verify-blob") {
+		t.Error("action.yml must invoke `cosign verify-blob` to authenticate checksums.txt")
+	}
+	if !strings.Contains(raw, "--certificate-identity-regexp") {
+		t.Error("action.yml must pin --certificate-identity-regexp (unpinned identity = any signer accepted)")
+	}
+	// The identity regex must pin BOTH the repo/workflow AND tag refs. Match
+	// the escaped regex literal we emit in the YAML.
+	wantIdentity := `'^https://github\.com/sjarmak/livedocs/\.github/workflows/release\.yml@refs/tags/v.*$'`
+	if !strings.Contains(raw, wantIdentity) {
+		t.Errorf("action.yml --certificate-identity-regexp must pin to sjarmak/livedocs release.yml on refs/tags/v* (got-regex not present: %s)", wantIdentity)
+	}
+	// The OIDC issuer must be GitHub's official token service (exactly one
+	// correct value for GitHub-hosted runners).
+	if !strings.Contains(raw, "--certificate-oidc-issuer 'https://token.actions.githubusercontent.com'") {
+		t.Error("action.yml --certificate-oidc-issuer must be 'https://token.actions.githubusercontent.com'")
+	}
+
+	// Ordering: authenticity (cosign verify-blob) must precede the integrity
+	// check (sha256sum -c). If the checksums.txt isn't authentic, the hashes
+	// inside it are worthless.
+	downloadIdx := strings.Index(raw, "name: Download livedocs binary")
+	if downloadIdx < 0 {
+		t.Fatal("missing `Download livedocs binary` step")
+	}
+	nextStepIdx := strings.Index(raw[downloadIdx+len("name: Download livedocs binary"):], "\n    - name:")
+	if nextStepIdx < 0 {
+		t.Fatal("could not locate end of Download step")
+	}
+	downloadBody := raw[downloadIdx : downloadIdx+len("name: Download livedocs binary")+nextStepIdx]
+
+	cosignIdx := strings.Index(downloadBody, "cosign verify-blob")
+	sha256Idx := strings.Index(downloadBody, "sha256sum --ignore-missing -c")
+	sudoMvIdx := strings.Index(downloadBody, "sudo mv /tmp/livedocs /usr/local/bin/livedocs")
+	if cosignIdx < 0 || sha256Idx < 0 || sudoMvIdx < 0 {
+		t.Fatalf("missing cosign (%d), sha256sum (%d), or install command (%d)", cosignIdx, sha256Idx, sudoMvIdx)
+	}
+	if cosignIdx >= sha256Idx {
+		t.Error("cosign verify-blob must precede sha256sum integrity check (authenticity before trusting the manifest)")
+	}
+	if cosignIdx >= sudoMvIdx {
+		t.Error("cosign verify-blob must precede `sudo mv` (otherwise unauthenticated bytes reach /usr/local/bin)")
+	}
+}
