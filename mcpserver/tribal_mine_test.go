@@ -487,7 +487,7 @@ func TestTribalMineOnDemand_PathTraversalRepo(t *testing.T) {
 func TestTribalMineOnDemand_FactoryError(t *testing.T) {
 	pool := setupMineTestPool(t, "test-repo", "X", "pkg/x.go")
 	factory := MiningServiceFactory(func(_ string, _ *db.ClaimsDB) (*tribal.TribalMiningService, error) {
-		return nil, errors.New("factory: llm client not configured")
+		return nil, errors.New("factory: unspecified internal failure")
 	})
 	handler := TribalMineOnDemandHandler(pool, factory)
 
@@ -501,6 +501,63 @@ func TestTribalMineOnDemand_FactoryError(t *testing.T) {
 	}
 	if !result.IsError() {
 		t.Fatalf("expected error result for factory failure, got: %s", result.Text())
+	}
+	// Generic factory errors must render the "mining service unavailable"
+	// message, NOT the LLM-specific guidance, so operators are not
+	// misdirected toward PATH/env-var fixes when the real cause is
+	// something else (e.g. missing git remote).
+	if got := result.Text(); !strings.Contains(got, "mining service unavailable") {
+		t.Fatalf("expected generic 'mining service unavailable' message; got %q", got)
+	}
+	if got := result.Text(); strings.Contains(got, "claude") || strings.Contains(got, "ANTHROPIC_API_KEY") {
+		t.Fatalf("generic factory error must NOT surface LLM-client-specific guidance; got %q", got)
+	}
+}
+
+// TestTribalMineOnDemand_LLMUnavailableError verifies the handler
+// distinguishes ErrLLMClientUnavailable from generic factory errors and
+// surfaces an actionable, specific message to MCP clients (live_docs-m7v.23).
+// Before the fix, all factory errors collapsed into the same generic
+// "mining service unavailable" message, making it impossible for agents or
+// operators to diagnose a transient CLI/env-var issue.
+func TestTribalMineOnDemand_LLMUnavailableError(t *testing.T) {
+	pool := setupMineTestPool(t, "test-repo", "X", "pkg/x.go")
+	// Factory wraps the mcpserver sentinel — the pattern the production
+	// cmd/livedocs factory uses.
+	factory := MiningServiceFactory(func(_ string, _ *db.ClaimsDB) (*tribal.TribalMiningService, error) {
+		return nil, errors.Join(ErrLLMClientUnavailable, errors.New("claude CLI not on PATH and ANTHROPIC_API_KEY unset"))
+	})
+	handler := TribalMineOnDemandHandler(pool, factory)
+
+	req := &tribalFakeRequest{args: map[string]any{
+		"symbol": "X",
+		"repo":   "test-repo",
+	}}
+	result, err := handler(context.Background(), req)
+	if err != nil {
+		t.Fatalf("handler returned transport error: %v", err)
+	}
+	if !result.IsError() {
+		t.Fatalf("expected error result for LLM-unavailable factory failure; got: %s", result.Text())
+	}
+	got := result.Text()
+	// Security: the MCP transport may be HTTP/SSE to untrusted clients. The
+	// caller-facing message must be a generic, operator-contact pointer
+	// that reveals neither the LLM provider's auth model nor specific
+	// env-var / binary names. Operators see the detail in server-side logs
+	// (see the log.Printf call in TribalMineOnDemandHandler's
+	// ErrLLMClientUnavailable branch).
+	if !strings.Contains(got, "LLM provider unavailable") {
+		t.Fatalf("expected generic 'LLM provider unavailable' phrasing for client; got %q", got)
+	}
+	if !strings.Contains(got, "contact the server operator") {
+		t.Fatalf("expected client-facing message to direct user to operator; got %q", got)
+	}
+	// The LLM auth model (CLI name, env-var name) MUST NOT leak to the
+	// MCP client over the transport. Regression guard.
+	if strings.Contains(got, "claude") || strings.Contains(got, "ANTHROPIC_API_KEY") ||
+		strings.Contains(got, "PATH") {
+		t.Fatalf("client-facing message leaks LLM auth model (claude / ANTHROPIC_API_KEY / PATH); got %q", got)
 	}
 }
 

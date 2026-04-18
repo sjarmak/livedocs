@@ -55,7 +55,7 @@ var defaultLLMClientFactory = llmClientFactory{
 }
 
 // buildMiningFactory returns a mcpserver.MiningServiceFactory if and only if
-// tribal JIT mining is fully configured for production use:
+// tribal JIT mining is configured for production use:
 //
 //   - cfg.LLMEnabled must be true (explicit opt-in; deterministic extractors
 //     run regardless, but LLM-classified PR comment mining is Phase 2 and
@@ -63,20 +63,27 @@ var defaultLLMClientFactory = llmClientFactory{
 //   - cfg.DailyBudget must be > 0 (zero or negative would allow either
 //     unbounded calls or silent no-ops depending on the consuming code path;
 //     both are dangerous in a long-running MCP server).
-//   - At least one LLM client path must succeed at wire-up time — either the
-//     Claude CLI on PATH (preferred, uses OAuth) or ANTHROPIC_API_KEY in the
-//     environment.
 //
-// When any precondition fails, the returned factory is nil. A nil factory
-// causes mcpserver.Server to skip registration of the tribal_mine_on_demand
-// tool entirely, which is the safe behavior: the tool will simply not appear
-// in the MCP tool list for agents to call.
+// When either precondition fails, the returned factory is nil and the tool
+// is not registered.
 //
-// The returned factory re-resolves the LLM client on every invocation so that
-// credential rotation (e.g. refreshed CLI OAuth tokens) is picked up without
-// restarting the server. It derives RepoOwner / RepoName from the per-repo
-// claims DB's extraction_meta.RepoRoot via `git remote get-url origin`;
-// callers that extract repos without a git remote simply will not have
+// LLM client availability is deliberately NOT checked at wire-up time
+// (live_docs-m7v.23). A transient probe failure at server startup (temporary
+// PATH issue, short-lived env-var glitch, race with a credential-rotation
+// process) must not disable tribal_mine_on_demand for the entire MCP server
+// lifetime. Instead, the returned factory closure re-resolves the LLM
+// client on every invocation — so credential rotation is picked up
+// automatically AND transient wire-up failures self-heal on the next call.
+//
+// When the LLM client is still unreachable at call time, the closure
+// returns an error wrapping mcpserver.ErrLLMClientUnavailable so the caller
+// (TribalMineOnDemandHandler) can surface an actionable message to the MCP
+// client ("claude CLI not on PATH and ANTHROPIC_API_KEY unset") instead of
+// the generic "mining service unavailable" fallback.
+//
+// RepoOwner / RepoName are derived from the per-repo claims DB's
+// extraction_meta.RepoRoot via `git remote get-url origin`; callers that
+// extract repos without a git remote simply will not have
 // tribal_mine_on_demand work for that repo, but other repos remain usable.
 func buildMiningFactory(cfg config.TribalConfig, llmFactory llmClientFactory) mcpserver.MiningServiceFactory {
 	if !cfg.LLMEnabled {
@@ -86,20 +93,21 @@ func buildMiningFactory(cfg config.TribalConfig, llmFactory llmClientFactory) mc
 		return nil
 	}
 
-	// Probe LLM availability once at wire-up time. If neither path works we
-	// return nil so the tool is never registered — better than registering a
-	// tool that will fail every call.
-	if _, err := resolveLLMForMining(cfg.Model, llmFactory); err != nil {
-		return nil
-	}
-
 	model := cfg.Model
 	budget := cfg.DailyBudget
 
 	return func(repo string, cdb *db.ClaimsDB) (*tribal.TribalMiningService, error) {
 		client, err := resolveLLMForMining(model, llmFactory)
 		if err != nil {
-			return nil, fmt.Errorf("mining factory: resolve llm client: %w", err)
+			// Wrap the mcpserver sentinel so the handler can errors.Is
+			// against it and render an actionable error result. We
+			// intentionally include the resolution-error text because
+			// the CLI/API helpers already redact credentials in their
+			// error returns (ClaudeCLIClient returns "not found on PATH"
+			// from exec.LookPath; AnthropicClient returns a construction
+			// error that does not echo the key). The wrapped message
+			// remains safe to log and return.
+			return nil, fmt.Errorf("%w (%s)", mcpserver.ErrLLMClientUnavailable, err.Error())
 		}
 
 		owner, name, err := resolveRepoOwner(repo, cdb)
@@ -118,9 +126,13 @@ func buildMiningFactory(cfg config.TribalConfig, llmFactory llmClientFactory) mc
 }
 
 // resolveLLMForMining prefers the Claude CLI (OAuth) and falls back to the
-// Anthropic API, matching extract_cmd's precedence exactly. It is used both
-// as a wire-up-time probe (buildMiningFactory checks for at least one success)
-// and on every factory invocation (so refreshed credentials are picked up).
+// Anthropic API, matching extract_cmd's precedence exactly. It is invoked
+// fresh on every factory call so refreshed credentials — or a transient
+// wire-up failure that has since resolved — are picked up without server
+// restart.
+//
+// Returned errors carry the reason ("claude CLI not on PATH ...") but never
+// echo the API key value.
 func resolveLLMForMining(model string, f llmClientFactory) (llmClient, error) {
 	if f.newCLI != nil {
 		if c, err := f.newCLI(model); err == nil {
@@ -170,21 +182,45 @@ func resolveRepoOwner(repo string, cdb *db.ClaimsDB) (owner, name string, err er
 	return o, n, nil
 }
 
-// logMiningFactoryWireup writes a single line to stderr describing whether
-// tribal_mine_on_demand will be registered. Kept in a helper so mcp.go stays
-// small.
+// logMiningFactoryWireup writes a single line to the given logger (defaulting
+// to the standard library logger when nil) describing whether
+// tribal_mine_on_demand will be registered. The three possible outcomes are
+// reported as distinct log lines so operators can tell apart:
+//
+//  1. "disabled (llm_enabled=false)" — operator has not opted in.
+//  2. "disabled (daily_budget<=0)"  — operator opted in but budget is 0.
+//  3. "enabled (...; LLM probe runs per-call)" — tool is registered; the
+//     probe is deferred to invocation time and the log line makes this
+//     explicit so the operator knows a wire-up-time probe failure is
+//     no longer the same thing as "disabled".
+//
+// The earlier implementation conflated "not configured" with "probe failed"
+// in one disabled branch. Since the probe no longer runs at wire-up, that
+// branch is now impossible — and we say so explicitly in the enabled case.
 func logMiningFactoryWireup(factory mcpserver.MiningServiceFactory, cfg config.TribalConfig) {
+	logMiningFactoryWireupTo(log.Default(), factory, cfg)
+}
+
+// logMiningFactoryWireupTo is the testable form that writes to an injected
+// logger. Production callers use logMiningFactoryWireup.
+func logMiningFactoryWireupTo(logger *log.Logger, factory mcpserver.MiningServiceFactory, cfg config.TribalConfig) {
 	if factory != nil {
-		log.Printf("mcp: tribal_mine_on_demand enabled (daily_budget=%d, model=%s)",
-			cfg.DailyBudget, cfg.Model)
+		logger.Printf(
+			"mcp: tribal_mine_on_demand enabled (daily_budget=%d, model=%s); LLM probe runs per-call",
+			cfg.DailyBudget, cfg.Model,
+		)
 		return
 	}
+	// factory == nil must correspond to exactly one of the config gates in
+	// buildMiningFactory. If a future refactor adds a third nil-return
+	// branch, the panic surfaces the drift immediately rather than letting
+	// operators see a silent no-op.
 	switch {
 	case !cfg.LLMEnabled:
-		log.Printf("mcp: tribal_mine_on_demand disabled (tribal.llm_enabled=false)")
+		logger.Printf("mcp: tribal_mine_on_demand disabled (tribal.llm_enabled=false)")
 	case cfg.DailyBudget <= 0:
-		log.Printf("mcp: tribal_mine_on_demand disabled (tribal.daily_budget=%d)", cfg.DailyBudget)
+		logger.Printf("mcp: tribal_mine_on_demand disabled (tribal.daily_budget=%d)", cfg.DailyBudget)
 	default:
-		log.Printf("mcp: tribal_mine_on_demand disabled (no LLM client: claude CLI missing and ANTHROPIC_API_KEY unset)")
+		panic("logMiningFactoryWireupTo: nil factory with llm_enabled=true and daily_budget>0 — buildMiningFactory invariant violated")
 	}
 }
