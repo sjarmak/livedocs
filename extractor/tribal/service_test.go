@@ -426,6 +426,36 @@ func TestResolveSymbolFiles_FiltersNonFilePaths(t *testing.T) {
 	}
 }
 
+// TestResolveSymbolFiles_WildcardNoFanOut guards against an MCP caller draining
+// the daily budget by passing LIKE wildcards (%, _) as a symbol name. Exact
+// match must treat them as literal characters, returning zero results rather
+// than every symbol in the repo.
+func TestResolveSymbolFiles_WildcardNoFanOut(t *testing.T) {
+	cdb := newTestClaimsDB(t)
+
+	for _, sym := range []db.Symbol{
+		{Repo: "repo", ImportPath: "pkg/a.go", SymbolName: "Alpha", Language: "go", Kind: "func", Visibility: "public"},
+		{Repo: "repo", ImportPath: "pkg/b.go", SymbolName: "Beta", Language: "go", Kind: "func", Visibility: "public"},
+		{Repo: "repo", ImportPath: "pkg/c.go", SymbolName: "Gamma", Language: "go", Kind: "func", Visibility: "public"},
+	} {
+		if _, err := cdb.UpsertSymbol(sym); err != nil {
+			t.Fatalf("upsert symbol: %v", err)
+		}
+	}
+
+	svc := newServiceWithMiner(cdb, nil, "repo")
+
+	for _, input := range []string{"%", "_", "%lph%", "Alpha_"} {
+		paths, err := svc.resolveSymbolFiles(input)
+		if err != nil {
+			t.Fatalf("resolveSymbolFiles(%q): %v", input, err)
+		}
+		if len(paths) != 0 {
+			t.Errorf("resolveSymbolFiles(%q) = %v, want 0 paths (wildcards must be literal)", input, paths)
+		}
+	}
+}
+
 func TestMiningError_Structured(t *testing.T) {
 	me := &MiningError{
 		Code:    "rate_limited",

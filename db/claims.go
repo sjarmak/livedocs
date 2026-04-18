@@ -721,8 +721,9 @@ func (c *ClaimsDB) ListDistinctImportPaths(limit int) ([]string, error) {
 }
 
 // SearchSymbolsByName returns symbols whose symbol_name matches the given
-// pattern using SQL LIKE. Use "%" as wildcard. For exact match, pass the name
-// directly without wildcards.
+// pattern using SQL LIKE. Use "%" as wildcard. For exact match with
+// untrusted input (e.g. MCP callers), use GetSymbolsByExactName instead —
+// LIKE wildcards in user-supplied patterns can fan out to full-table scans.
 func (c *ClaimsDB) SearchSymbolsByName(pattern string) ([]Symbol, error) {
 	rows, err := c.exec.Query(`
 		SELECT id, repo, import_path, symbol_name, language, kind, visibility, display_name, scip_symbol
@@ -731,6 +732,38 @@ func (c *ClaimsDB) SearchSymbolsByName(pattern string) ([]Symbol, error) {
 	`, pattern)
 	if err != nil {
 		return nil, fmt.Errorf("search symbols by name: %w", err)
+	}
+	defer rows.Close()
+
+	var symbols []Symbol
+	for rows.Next() {
+		var s Symbol
+		var displayName, scipSymbol sql.NullString
+		err := rows.Scan(
+			&s.ID, &s.Repo, &s.ImportPath, &s.SymbolName, &s.Language, &s.Kind, &s.Visibility,
+			&displayName, &scipSymbol,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("scan symbol: %w", err)
+		}
+		s.DisplayName = displayName.String
+		s.SCIPSymbol = scipSymbol.String
+		symbols = append(symbols, s)
+	}
+	return symbols, rows.Err()
+}
+
+// GetSymbolsByExactName returns symbols whose symbol_name equals name exactly.
+// Safe for untrusted input — uses SQL equality instead of LIKE so wildcard
+// characters (% and _) in name are treated as literals.
+func (c *ClaimsDB) GetSymbolsByExactName(name string) ([]Symbol, error) {
+	rows, err := c.exec.Query(`
+		SELECT id, repo, import_path, symbol_name, language, kind, visibility, display_name, scip_symbol
+		FROM symbols WHERE symbol_name = ?
+		ORDER BY symbol_name
+	`, name)
+	if err != nil {
+		return nil, fmt.Errorf("get symbols by exact name: %w", err)
 	}
 	defer rows.Close()
 

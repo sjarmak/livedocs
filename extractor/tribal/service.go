@@ -333,8 +333,11 @@ func (s *TribalMiningService) MineSymbol(
 
 // resolveSymbolFiles maps a symbol name to the file paths that contain it.
 // It queries the claims DB's symbols table for matching import_path values.
+// Uses exact-match lookup (not LIKE) because symbolName comes from MCP
+// callers — wildcards (%, _) in LIKE patterns would fan out to every symbol
+// in the repo and drain the DailyBudget with a single crafted call.
 func (s *TribalMiningService) resolveSymbolFiles(symbolName string) ([]string, error) {
-	symbols, err := s.claimsDB.SearchSymbolsByName(symbolName)
+	symbols, err := s.claimsDB.GetSymbolsByExactName(symbolName)
 	if err != nil {
 		return nil, fmt.Errorf("search symbols: %w", err)
 	}

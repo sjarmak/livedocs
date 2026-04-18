@@ -49,6 +49,11 @@ type Config struct {
 	// ExtractionRunner, when set, enables the request_extraction tool in
 	// multi-repo mode. If nil, the tool is not registered.
 	ExtractionRunner ExtractionRunner
+	// MiningFactory, when set, enables the tribal_mine_on_demand tool in
+	// multi-repo mode. The factory constructs a TribalMiningService per
+	// request using the caller's LLM client, command runner, and budget.
+	// If nil, the tool is not registered.
+	MiningFactory MiningServiceFactory
 }
 
 // Server wraps the MCP server and its dependencies.
@@ -108,7 +113,7 @@ func New(cfg Config) (*Server, error) {
 			s.staleness = NewStalenessChecker(cfg.RepoRoots, cfg.ExtractorRegistry)
 		}
 
-		s.registerMultiRepoTools(pool, cfg.ExtractionRunner)
+		s.registerMultiRepoTools(pool, cfg.ExtractionRunner, cfg.MiningFactory)
 	}
 
 	s.telemetry = NewCollector(CollectorConfig{
@@ -147,7 +152,8 @@ func (s *Server) buildRegistry() ToolRegistry {
 // registerMultiRepoTools registers the multi-repo tools via the adapter layer.
 // Builds a routing index for cross-repo symbol search.
 // If runner is non-nil, the request_extraction tool is also registered.
-func (s *Server) registerMultiRepoTools(pool *DBPool, runner ExtractionRunner) {
+// If factory is non-nil, the tribal_mine_on_demand tool is also registered.
+func (s *Server) registerMultiRepoTools(pool *DBPool, runner ExtractionRunner, factory MiningServiceFactory) {
 	// Build routing index for search_symbols fan-out optimization.
 	index := NewRoutingIndex()
 	// Best-effort: if Build fails, search falls back to all repos.
@@ -169,6 +175,10 @@ func (s *Server) registerMultiRepoTools(pool *DBPool, runner ExtractionRunner) {
 	if runner != nil {
 		tracker := NewExtractionTracker(runner)
 		defs = append(defs, RequestExtractionToolDef(pool, tracker))
+	}
+
+	if factory != nil {
+		defs = append(defs, TribalMineOnDemandToolDef(pool, factory))
 	}
 
 	for _, def := range defs {
