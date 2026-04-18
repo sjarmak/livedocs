@@ -74,7 +74,7 @@ func TestTribalMiningService_MineFile_Basic(t *testing.T) {
 		responses: []string{`{"kind":"invariant","body":"must hold mutex before calling","confidence":0.85}`},
 	}
 
-	miner := &PRCommentMiner{
+	miner := &prCommentMiner{
 		RepoOwner:   "org",
 		RepoName:    "repo",
 		Client:      llm,
@@ -83,7 +83,7 @@ func TestTribalMiningService_MineFile_Basic(t *testing.T) {
 		RunCommand:  runner.run,
 	}
 
-	svc := NewTribalMiningService(cdb, miner, "repo")
+	svc := newServiceWithMiner(cdb, miner, "repo")
 
 	result, err := svc.MineFile(context.Background(), "pkg/worker.go", TriggerBatchSchedule)
 	if err != nil {
@@ -129,7 +129,7 @@ func TestTribalMiningService_MineFile_BudgetExceeded(t *testing.T) {
 	llm := &mockLLMClient{
 		responses: []string{`{"kind":"rationale","body":"test","confidence":0.8}`},
 	}
-	miner := &PRCommentMiner{
+	miner := &prCommentMiner{
 		RepoOwner:   "org",
 		RepoName:    "repo",
 		Client:      llm,
@@ -144,7 +144,7 @@ func TestTribalMiningService_MineFile_BudgetExceeded(t *testing.T) {
 	miner.callCount = 1 // already at budget
 	miner.mu.Unlock()
 
-	svc := NewTribalMiningService(cdb, miner, "repo")
+	svc := newServiceWithMiner(cdb, miner, "repo")
 	_, err := svc.MineFile(context.Background(), "pkg/x.go", TriggerJITOnDemand)
 	if err == nil {
 		t.Fatal("expected error for budget exceeded")
@@ -167,14 +167,14 @@ func TestTribalMiningService_MineFile_CursorRegression(t *testing.T) {
 		prList: "50\n",
 	}
 	llm := &mockLLMClient{}
-	miner := &PRCommentMiner{
+	miner := &prCommentMiner{
 		RepoOwner:  "org",
 		RepoName:   "repo",
 		Client:     llm,
 		RunCommand: runner.run,
 	}
 
-	svc := NewTribalMiningService(cdb, miner, "repo")
+	svc := newServiceWithMiner(cdb, miner, "repo")
 
 	// Seed a cursor with PR 100 already seen.
 	_ = cdb.SetPRIDSet("repo", "pkg/x.go", []int{100}, "v1")
@@ -220,7 +220,7 @@ func TestTribalMiningService_MineFile_IdempotentSecondRun(t *testing.T) {
 			`{"kind":"rationale","body":"important","confidence":0.9}`,
 		},
 	}
-	miner := &PRCommentMiner{
+	miner := &prCommentMiner{
 		RepoOwner:  "org",
 		RepoName:   "repo",
 		Client:     llm,
@@ -228,7 +228,7 @@ func TestTribalMiningService_MineFile_IdempotentSecondRun(t *testing.T) {
 		RunCommand: runner,
 	}
 
-	svc := NewTribalMiningService(cdb, miner, "repo")
+	svc := newServiceWithMiner(cdb, miner, "repo")
 
 	// First run: should produce facts.
 	r1, err := svc.MineFile(context.Background(), "pkg/a.go", TriggerBatchSchedule)
@@ -260,14 +260,14 @@ func TestTribalMiningService_GenerationCounter(t *testing.T) {
 	cdb := newTestClaimsDB(t)
 	llm := &mockLLMClient{}
 	runner := &mockRunnerRecording{prList: "\n"} // no PRs
-	miner := &PRCommentMiner{
+	miner := &prCommentMiner{
 		RepoOwner:  "org",
 		RepoName:   "repo",
 		Client:     llm,
 		RunCommand: runner.run,
 	}
 
-	svc := NewTribalMiningService(cdb, miner, "repo")
+	svc := newServiceWithMiner(cdb, miner, "repo")
 
 	if g := svc.FactsGeneration(); g != 0 {
 		t.Fatalf("initial generation = %d, want 0", g)
@@ -312,7 +312,7 @@ func TestTribalMiningService_MineSymbol(t *testing.T) {
 	llm := &mockLLMClient{
 		responses: []string{`{"kind":"quirk","body":"needs rate limiting","confidence":0.75}`},
 	}
-	miner := &PRCommentMiner{
+	miner := &prCommentMiner{
 		RepoOwner:  "org",
 		RepoName:   "repo",
 		Client:     llm,
@@ -320,7 +320,7 @@ func TestTribalMiningService_MineSymbol(t *testing.T) {
 		RunCommand: runner.run,
 	}
 
-	svc := NewTribalMiningService(cdb, miner, "repo")
+	svc := newServiceWithMiner(cdb, miner, "repo")
 
 	results, err := svc.MineSymbol(context.Background(), "HandleRequest", TriggerJITOnDemand)
 	if err != nil {
@@ -396,7 +396,7 @@ func TestResolveSymbolFiles_FiltersNonFilePaths(t *testing.T) {
 		}
 	}
 
-	svc := NewTribalMiningService(cdb, nil, "repo")
+	svc := newServiceWithMiner(cdb, nil, "repo")
 
 	// HandleRequest should resolve to the .go file only.
 	paths, err := svc.resolveSymbolFiles("HandleRequest")

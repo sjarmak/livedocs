@@ -26,7 +26,7 @@ const (
 // ErrBudgetExceeded is returned when the daily LLM call budget has been reached.
 var ErrBudgetExceeded = errors.New("daily LLM call budget exceeded")
 
-// ErrCursorRegression is returned by PRCommentMiner.ExtractForFile when the
+// ErrCursorRegression is returned by prCommentMiner.ExtractForFile when the
 // newly observed PR window's max id is strictly smaller than the stored
 // cursor's max id. Callers should treat this as a signal to flip the file to
 // the needs_remine sentinel and increment CursorRegressionCount.
@@ -106,10 +106,15 @@ var validClassificationKinds = map[string]bool{
 // userPromptTmpl is the parsed text/template for the user prompt.
 var userPromptTmpl = template.Must(template.New("prComment").Parse(prCommentUserPromptTemplate))
 
-// PRCommentMiner fetches GitHub PR review comments via `gh api`, redacts PII,
+// prCommentMiner fetches GitHub PR review comments via `gh api`, redacts PII,
 // classifies each comment via LLM, and produces TribalFact entries with full
 // provenance.
-type PRCommentMiner struct {
+//
+// This type is intentionally unexported: all production callers must go
+// through TribalMiningService so that cursor management, daily budget
+// accounting, and the facts-generation counter are enforced uniformly.
+// Direct instantiation outside package tribal is therefore impossible.
+type prCommentMiner struct {
 	// RepoOwner is the GitHub repository owner (e.g. "kubernetes").
 	RepoOwner string
 	// RepoName is the GitHub repository name (e.g. "kubernetes").
@@ -149,7 +154,7 @@ type PRCommentMiner struct {
 // (nil, nil, ErrCursorRegression) and increments the package-level
 // CursorRegressionCount metric. The caller is expected to flip the file
 // to the needs_remine sentinel so the next run does a full re-mine.
-func (m *PRCommentMiner) ExtractForFile(
+func (m *prCommentMiner) ExtractForFile(
 	ctx context.Context,
 	sourcePath string,
 	sinceCursor []int,
@@ -258,7 +263,7 @@ func maxInts(xs []int) int {
 const maxPRsPerFile = 10
 
 // findPRsForFile uses `gh pr list` to find merged PRs that touched the given file.
-func (m *PRCommentMiner) findPRsForFile(ctx context.Context, runner CommandRunner, filePath string) ([]int, error) {
+func (m *prCommentMiner) findPRsForFile(ctx context.Context, runner CommandRunner, filePath string) ([]int, error) {
 	// Use GitHub search to find PRs that mention this file path.
 	// gh pr list --search "filename:path" returns PRs touching that file.
 	output, err := runner(ctx, "gh", "pr", "list",
@@ -293,7 +298,7 @@ func (m *PRCommentMiner) findPRsForFile(ctx context.Context, runner CommandRunne
 }
 
 // fetchPRComments fetches review comments from a single PR, filtered to the given file.
-func (m *PRCommentMiner) fetchPRComments(ctx context.Context, runner CommandRunner, prNumber int, filePath string) ([]PRComment, error) {
+func (m *prCommentMiner) fetchPRComments(ctx context.Context, runner CommandRunner, prNumber int, filePath string) ([]PRComment, error) {
 	endpoint := fmt.Sprintf("repos/%s/%s/pulls/%d/comments", m.RepoOwner, m.RepoName, prNumber)
 	jqFilter := fmt.Sprintf(`.[] | select(.path == %q)`, filePath)
 
@@ -325,7 +330,7 @@ func (m *PRCommentMiner) fetchPRComments(ctx context.Context, runner CommandRunn
 }
 
 // checkBudget returns ErrBudgetExceeded if the daily budget has been reached.
-func (m *PRCommentMiner) checkBudget() error {
+func (m *prCommentMiner) checkBudget() error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -338,7 +343,7 @@ func (m *PRCommentMiner) checkBudget() error {
 
 // incrementCallCount records an LLM call. Must be called after a successful
 // budget check and before the actual LLM call.
-func (m *PRCommentMiner) incrementCallCount() {
+func (m *prCommentMiner) incrementCallCount() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.callCount++
@@ -348,7 +353,7 @@ func (m *PRCommentMiner) incrementCallCount() {
 // and returns a TribalFact if the classification is non-null. The returned
 // fact has SubjectID=0; the caller is responsible for patching it to the
 // correct symbol ID before inserting.
-func (m *PRCommentMiner) classifyComment(ctx context.Context, filePath string, _ int64, comment PRComment) (*db.TribalFact, error) {
+func (m *prCommentMiner) classifyComment(ctx context.Context, filePath string, _ int64, comment PRComment) (*db.TribalFact, error) {
 	// Redact PII from both the comment body and the diff hunk BEFORE
 	// sending to the LLM.
 	redactedBody := RedactPII(comment.Body)

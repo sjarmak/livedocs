@@ -1,10 +1,12 @@
 // Package tribal — service.go is the single orchestration layer for all tribal
 // mining paths (batch and JIT). Both cmd/livedocs/extract_cmd.go and
 // mcpserver/tribal_mine.go call MineFile / MineSymbol; neither touches
-// PRCommentMiner, DailyBudget, or cursor columns directly.
+// the PR comment miner, DailyBudget, or cursor columns directly.
 //
 // The seven shared invariants this service enforces:
-//  1. Handle ownership — the service owns the PRCommentMiner lifecycle
+//  1. Handle ownership — the service owns the PR comment miner lifecycle
+//     (the underlying miner type is unexported so external callers cannot
+//     bypass the service and double-spend the daily budget)
 //  2. Atomic budget — budget checks and increments are in one place
 //  3. Uniform error propagation — structured MiningError responses
 //  4. Cursor management — loads, updates, and regression-handling here
@@ -82,10 +84,10 @@ type MiningResult struct {
 }
 
 // TribalMiningService is the single orchestration layer for tribal mining.
-// Both batch and JIT callers use this service; neither directly touches
-// PRCommentMiner, budget, or cursor state.
+// Both batch and JIT callers use this service; neither directly touches the
+// underlying PR comment miner, budget, or cursor state.
 type TribalMiningService struct {
-	miner        *PRCommentMiner
+	miner        *prCommentMiner
 	claimsDB     *db.ClaimsDB
 	repo         string // repo name in the claims DB (e.g. "kubernetes")
 	minerVersion string // recorded in source_files.pr_miner_version
@@ -94,6 +96,26 @@ type TribalMiningService struct {
 	// Readers (e.g. MCP pool) can poll this to detect invalidation.
 	// TTL-based caching is banned for tribal facts.
 	factsGeneration int64
+}
+
+// PRMinerConfig configures the PR comment miner that the service owns.
+// External callers construct a TribalMiningService by passing this config;
+// the miner itself is unexported so it cannot be instantiated outside this
+// package and therefore cannot bypass the service's cursor/budget/generation
+// bookkeeping.
+type PRMinerConfig struct {
+	// RepoOwner is the GitHub repository owner (e.g. "kubernetes").
+	RepoOwner string
+	// RepoName is the GitHub repository name (e.g. "kubernetes").
+	RepoName string
+	// Client is the LLM client used for comment classification.
+	Client LLMClient
+	// Model is the model identifier stored in fact provenance.
+	Model string
+	// DailyBudget is the maximum number of LLM calls per day. Zero means unlimited.
+	DailyBudget int
+	// RunCommand is the command runner. If nil, defaultCommandRunner is used.
+	RunCommand CommandRunner
 }
 
 // ServiceOption configures a TribalMiningService.
@@ -107,9 +129,36 @@ func WithMinerVersion(v string) ServiceOption {
 
 // NewTribalMiningService creates the shared orchestration layer.
 // The claimsDB must already have the tribal schema created.
+//
+// The miner is constructed internally from cfg and is not reachable by
+// callers; this is how the service enforces that every LLM call runs through
+// its cursor/budget/generation bookkeeping.
 func NewTribalMiningService(
 	claimsDB *db.ClaimsDB,
-	miner *PRCommentMiner,
+	cfg PRMinerConfig,
+	repo string,
+	opts ...ServiceOption,
+) *TribalMiningService {
+	return newServiceWithMiner(claimsDB, &prCommentMiner{
+		RepoOwner:   cfg.RepoOwner,
+		RepoName:    cfg.RepoName,
+		Client:      cfg.Client,
+		Model:       cfg.Model,
+		DailyBudget: cfg.DailyBudget,
+		RunCommand:  cfg.RunCommand,
+	}, repo, opts...)
+}
+
+// newServiceWithMiner is a package-private constructor that accepts an
+// already-built *prCommentMiner. It exists so in-package tests can keep a
+// handle to the miner for white-box assertions (e.g. preloading callCount
+// to exercise the budget-exceeded path). Production code uses
+// NewTribalMiningService, which takes the exported PRMinerConfig and builds
+// the miner internally — the miner type is unexported so external callers
+// cannot reach this helper.
+func newServiceWithMiner(
+	claimsDB *db.ClaimsDB,
+	miner *prCommentMiner,
 	repo string,
 	opts ...ServiceOption,
 ) *TribalMiningService {
@@ -139,7 +188,7 @@ func (s *TribalMiningService) bumpGeneration() {
 
 // MineFile runs PR comment mining for a single file path. It handles:
 //   - Loading the stored PR cursor from the DB
-//   - Invoking the PRCommentMiner (budget-checked internally)
+//   - Invoking the internal PR comment miner (budget-checked internally)
 //   - Upserting facts with correct SubjectID
 //   - Updating the PR cursor on success
 //   - Cursor regression detection and needs_remine marking

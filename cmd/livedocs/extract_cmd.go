@@ -1101,19 +1101,18 @@ func runLLMTribalExtraction(ctx context.Context, out io.Writer, claimsDB *db.Cla
 		fmt.Fprintf(out, "Using Anthropic API for LLM tribal extraction\n")
 	}
 
-	// 6. Create PR comment miner and wrap in TribalMiningService.
+	// 6. Configure the PR comment miner and wrap in TribalMiningService.
 	// The service owns cursor management, budget enforcement, error
-	// propagation, and fact upsert — callers never touch PRCommentMiner,
-	// DailyBudget, or cursor columns directly (premortem F7 mitigation).
-	miner := &tribal.PRCommentMiner{
+	// propagation, and fact upsert — the underlying miner type is
+	// unexported so callers can never bypass the service and touch
+	// DailyBudget or cursor columns directly (premortem F7 mitigation).
+	svc := tribal.NewTribalMiningService(claimsDB, tribal.PRMinerConfig{
 		RepoOwner:   owner,
 		RepoName:    repo,
 		Client:      client,
 		Model:       cfg.Tribal.Model,
 		DailyBudget: cfg.Tribal.DailyBudget,
-	}
-	svc := tribal.NewTribalMiningService(claimsDB, miner, repoName,
-		tribal.WithMinerVersion(minerVersion))
+	}, repoName, tribal.WithMinerVersion(minerVersion))
 
 	// 7. Select files via the ranker. source_files is seeded by
 	// runTribalExtraction (always invoked in the LLM path), so the ranker

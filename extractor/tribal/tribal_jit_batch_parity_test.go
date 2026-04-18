@@ -137,25 +137,25 @@ func TestTribalJITBatchParity(t *testing.T) {
 
 	// --- Batch path: mine each file via MineFile ---
 	batchLLM := newLLM()
-	batchMiner := &PRCommentMiner{
+	batchMiner := &prCommentMiner{
 		RepoOwner:  "org",
 		RepoName:   "repo",
 		Client:     batchLLM,
 		Model:      "test-model",
 		RunCommand: newRunner(),
 	}
-	batchSvc := NewTribalMiningService(batchDB, batchMiner, "parity-repo")
+	batchSvc := newServiceWithMiner(batchDB, batchMiner, "parity-repo")
 
 	// --- JIT path: mine each symbol via MineSymbol ---
 	jitLLM := newLLM()
-	jitMiner := &PRCommentMiner{
+	jitMiner := &prCommentMiner{
 		RepoOwner:  "org",
 		RepoName:   "repo",
 		Client:     jitLLM,
 		Model:      "test-model",
 		RunCommand: newRunner(),
 	}
-	jitSvc := NewTribalMiningService(jitDB, jitMiner, "parity-repo")
+	jitSvc := newServiceWithMiner(jitDB, jitMiner, "parity-repo")
 
 	// Run both paths CONCURRENTLY against the shared DB (race detector active).
 	var wg sync.WaitGroup
@@ -302,14 +302,14 @@ func TestTribalJITBatchParity_GenerationBump(t *testing.T) {
 	llm := &mockLLMClient{
 		responses: []string{`{"kind":"rationale","body":"gen test","confidence":0.8}`},
 	}
-	miner := &PRCommentMiner{
+	miner := &prCommentMiner{
 		RepoOwner:  "org",
 		RepoName:   "repo",
 		Client:     llm,
 		RunCommand: runner.run,
 	}
 
-	svc := NewTribalMiningService(cdb, miner, "repo")
+	svc := newServiceWithMiner(cdb, miner, "repo")
 
 	g0 := svc.FactsGeneration()
 	if g0 != 0 {

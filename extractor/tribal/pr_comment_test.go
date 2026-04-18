@@ -106,7 +106,7 @@ func TestPRCommentMiner_GHOutputParsing(t *testing.T) {
 		},
 	}
 
-	miner := &PRCommentMiner{
+	miner := &prCommentMiner{
 		RepoOwner:  "org",
 		RepoName:   "repo",
 		Client:     llm,
@@ -152,7 +152,7 @@ func TestPRCommentMiner_PIIRedactedBeforeLLM(t *testing.T) {
 		},
 	}
 
-	miner := &PRCommentMiner{
+	miner := &prCommentMiner{
 		RepoOwner:  "org",
 		RepoName:   "repo",
 		Client:     llm,
@@ -207,7 +207,7 @@ func TestPRCommentMiner_NullClassificationSkipped(t *testing.T) {
 		},
 	}
 
-	miner := &PRCommentMiner{
+	miner := &prCommentMiner{
 		RepoOwner:  "org",
 		RepoName:   "repo",
 		Client:     llm,
@@ -246,7 +246,7 @@ func TestPRCommentMiner_FactProvenanceFields(t *testing.T) {
 		},
 	}
 
-	miner := &PRCommentMiner{
+	miner := &prCommentMiner{
 		RepoOwner:  "org",
 		RepoName:   "repo",
 		Client:     llm,
@@ -358,7 +358,7 @@ func TestPRCommentMiner_CostBudgetEnforcement(t *testing.T) {
 		},
 	}
 
-	miner := &PRCommentMiner{
+	miner := &prCommentMiner{
 		RepoOwner:   "org",
 		RepoName:    "repo",
 		Client:      llm,
@@ -392,7 +392,7 @@ func TestPRCommentMiner_CostBudgetEnforcement(t *testing.T) {
 func TestPRCommentMiner_EmptyGHOutput(t *testing.T) {
 	llm := &mockLLMClient{}
 
-	miner := &PRCommentMiner{
+	miner := &prCommentMiner{
 		RepoOwner:  "org",
 		RepoName:   "repo",
 		Client:     llm,
@@ -418,7 +418,7 @@ func TestPRCommentMiner_EmptyGHOutput(t *testing.T) {
 func TestPRCommentMiner_GHAPIError(t *testing.T) {
 	llm := &mockLLMClient{}
 
-	miner := &PRCommentMiner{
+	miner := &prCommentMiner{
 		RepoOwner:  "org",
 		RepoName:   "repo",
 		Client:     llm,
@@ -451,7 +451,7 @@ func TestPRCommentMiner_ConfidenceClampedBelowOne(t *testing.T) {
 		},
 	}
 
-	miner := &PRCommentMiner{
+	miner := &prCommentMiner{
 		RepoOwner:  "org",
 		RepoName:   "repo",
 		Client:     llm,
@@ -490,7 +490,7 @@ func TestPRCommentMiner_MentionRedactedInDiffHunk(t *testing.T) {
 		},
 	}
 
-	miner := &PRCommentMiner{
+	miner := &prCommentMiner{
 		RepoOwner:  "org",
 		RepoName:   "repo",
 		Client:     llm,
@@ -583,7 +583,7 @@ func TestPRCommentIncremental(t *testing.T) {
 		},
 	}
 
-	miner := &PRCommentMiner{
+	miner := &prCommentMiner{
 		RepoOwner:  "org",
 		RepoName:   "repo",
 		Client:     llm,
@@ -655,7 +655,7 @@ func TestPRCommentForceRemine(t *testing.T) {
 		},
 	}
 
-	miner := &PRCommentMiner{
+	miner := &prCommentMiner{
 		RepoOwner:  "org",
 		RepoName:   "repo",
 		Client:     llm,
@@ -700,7 +700,7 @@ func TestTribalIncrementalCursorMonotonicity(t *testing.T) {
 
 	llm := &mockLLMClient{} // must never be called
 
-	miner := &PRCommentMiner{
+	miner := &prCommentMiner{
 		RepoOwner:  "org",
 		RepoName:   "repo",
 		Client:     llm,
