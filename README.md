@@ -145,7 +145,7 @@ See [SETUP.md](SETUP.md) for detailed Sourcegraph workflow tutorials.
 Add drift detection to your CI pipeline:
 
 ```yaml
-- uses: live-docs/live_docs@v1
+- uses: sjarmak/livedocs@v0.2.0
   with:
     fail-threshold: 0 # Fail if any drift detected
 ```
@@ -158,7 +158,7 @@ Drop a single workflow file into any repo to get documentation-impact analysis o
 
 ### Install
 
-Copy [`workflows/livedocs-prbot.yml`](https://github.com/live-docs/live_docs/blob/main/examples/workflows/livedocs-prbot.yml) into your repo as `.github/workflows/livedocs-context.yml`. That's it.
+Copy [`examples/workflows/livedocs-prbot.yml`](https://github.com/sjarmak/livedocs/blob/main/examples/workflows/livedocs-prbot.yml) into your repo as `.github/workflows/livedocs-context.yml`. That's it. The workflow pins `LIVEDOCS_VERSION: latest` by default, which resolves to the most recent release (currently v0.2.0) and feeds the PR diff to `livedocs prbot` via `--diff-format unified`.
 
 ### What it does
 
