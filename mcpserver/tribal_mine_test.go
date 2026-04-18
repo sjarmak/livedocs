@@ -539,9 +539,13 @@ func TestBuildTribalMineResponse_SurfacesFailedCountWithFacts(t *testing.T) {
 			// No failures on this file.
 		},
 		{
-			Path:         "pkg/b.go",
-			FailedCount:  3,
-			FailedErrors: []error{errors.New("upsert b.go: disk full"), errors.New("upsert b.go: constraint violation")},
+			Path:        "pkg/b.go",
+			FailedCount: 3,
+			// Post-m7v.21: FailedErrors carries sanitized canonical categories,
+			// never raw error messages. Production code builds these via
+			// sanitizeUpsertError inside the mining service; here we synthesize
+			// two entries to exercise the MCP response shape only.
+			FailedErrors: []string{"database_error", "unique_constraint_violation"},
 		},
 	}
 
@@ -586,9 +590,10 @@ func TestBuildTribalMineResponse_SurfacesFailedCountWithFacts(t *testing.T) {
 func TestBuildTribalMineResponse_PartialFailureNoFacts(t *testing.T) {
 	results := []*tribal.MiningResult{
 		{
-			Path:         "pkg/a.go",
-			FailedCount:  2,
-			FailedErrors: []error{errors.New("boom"), errors.New("boom2")},
+			Path:        "pkg/a.go",
+			FailedCount: 2,
+			// Post-m7v.21: sanitized canonical categories only.
+			FailedErrors: []string{"database_error", "database_error"},
 		},
 	}
 

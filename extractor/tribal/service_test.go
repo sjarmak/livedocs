@@ -532,8 +532,8 @@ func TestTribalMiningService_MineFile_FailedUpsertsAreSurfaced(t *testing.T) {
 	if len(result.FailedErrors) != 1 {
 		t.Fatalf("FailedErrors len = %d, want 1", len(result.FailedErrors))
 	}
-	if result.FailedErrors[0] == nil {
-		t.Error("FailedErrors[0] should not be nil")
+	if result.FailedErrors[0] == "" {
+		t.Error("FailedErrors[0] should not be empty")
 	}
 	// Generation should NOT bump when no facts were written.
 	if g := svc.FactsGeneration(); g != 0 {

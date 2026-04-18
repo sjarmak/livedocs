@@ -19,6 +19,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"path/filepath"
 	"strings"
 	"sync/atomic"
@@ -89,15 +90,25 @@ const maxFailedErrorsCaptured = 32
 // nil error even when some UpsertTribalFact calls fail. Callers that need
 // to detect partial failure MUST inspect FailedCount (> 0 signals at least
 // one upsert failed). FailedErrors exposes up to maxFailedErrorsCaptured
-// concrete errors for logging or metrics; FailedCount is the authoritative
-// total. This is additive to the original Facts/Trigger/Path surface so
-// existing callers do not break.
+// sanitized category strings for display or metrics; FailedCount is the
+// authoritative total. This is additive to the original Facts/Trigger/Path
+// surface so existing callers do not break.
+//
+// Sanitization contract (live_docs-m7v.21):
+// Every entry in FailedErrors is produced by sanitizeUpsertError and is one
+// of a fixed set of canonical category strings (e.g. "unique_constraint_
+// violation", "database_error"). Raw error text — which may include SQLite
+// schema details, offending row values, LLM-generated content, file paths,
+// or symbol names — never reaches this field. Operators who need the raw
+// error for debugging read the server-side log line emitted at the capture
+// site in MineFile; callers should treat each entry as an opaque category
+// tag.
 type MiningResult struct {
 	Facts        []db.TribalFact // newly mined facts (SubjectID already set)
 	Trigger      Trigger         // echo of the caller's trigger for telemetry
 	Path         string          // the file path that was mined
 	FailedCount  int             // total UpsertTribalFact failures (uncapped)
-	FailedErrors []error         // retained errors, capped at maxFailedErrorsCaptured
+	FailedErrors []string        // sanitized category strings, capped at maxFailedErrorsCaptured
 }
 
 // factUpserter is the narrow interface MineFile needs from the claims DB
@@ -324,9 +335,35 @@ func (s *TribalMiningService) MineFile(
 			continue
 		}
 		result.FailedCount++
+		// Sanitization boundary (live_docs-m7v.21): never append the raw
+		// error. Map to a canonical category string so callers cannot
+		// observe SQLite schema details, offending values, LLM echo, file
+		// paths, or symbol names via MiningResult.FailedErrors. The slice
+		// is also bounded by maxFailedErrorsCaptured; FailedCount remains
+		// uncapped as the authoritative total.
 		if len(result.FailedErrors) < maxFailedErrorsCaptured {
-			result.FailedErrors = append(result.FailedErrors, insertErr)
+			result.FailedErrors = append(result.FailedErrors, sanitizeUpsertError(insertErr))
+			// Operator log: emit the raw error server-side so maintainers
+			// retain full debuggability. %q defeats log injection via
+			// embedded newlines or control characters in wrapped error
+			// messages. We cap operator logging at the same threshold as
+			// the retained-error slice so a pathological file cannot flood
+			// logs; remaining failures are summarized once below via
+			// FailedCount. This log line is the operator's authoritative
+			// debugging surface — the MiningResult field is caller-facing.
+			log.Printf(
+				"tribal.MineFile: upsert failure repo=%q path=%q err=%q",
+				s.repo, relPath, insertErr.Error(),
+			)
 		}
+	}
+	// If we hit the cap, emit a single summary line so operators can see
+	// the true failure count without scanning for per-failure log lines.
+	if result.FailedCount > maxFailedErrorsCaptured {
+		log.Printf(
+			"tribal.MineFile: upsert failures exceeded retention cap repo=%q path=%q total_failed=%d logged=%d",
+			s.repo, relPath, result.FailedCount, maxFailedErrorsCaptured,
+		)
 	}
 
 	// 5. Bump generation counter if any facts were written.
