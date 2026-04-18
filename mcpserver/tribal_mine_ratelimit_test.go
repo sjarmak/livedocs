@@ -273,17 +273,20 @@ func TestTribalMineOnDemand_BudgetExceededStillSurfaced(t *testing.T) {
 	if err != nil {
 		t.Fatalf("handler err: %v", err)
 	}
-	// Budget-exceeded surfaces as an error result; verify we see it, not a
-	// generic rate-limit error.
-	if result.IsError() {
-		text := strings.ToLower(result.Text())
-		if strings.Contains(text, "rate") && !strings.Contains(text, "budget") {
-			t.Errorf("rate-limit fired before budget — should be orthogonal: %q", result.Text())
-		}
+	// Unconditional invariants: with budget=1 the rate-limiter must NOT
+	// have short-circuited (this test is specifically about budget, not
+	// rate), and the LLM must not have been called more than budget allows.
+	// If the handler returns IsError()==false here, the budget error must
+	// still be observable in the result body — assert that unconditionally
+	// rather than gating the check on IsError().
+	text := strings.ToLower(result.Text())
+	if strings.Contains(text, "rate limit") {
+		t.Fatalf("rate-limit fired before budget — should be orthogonal: %q", result.Text())
 	}
-	// Regardless of result shape, the LLM should not have been called more
-	// than 2 times (burst + 1 is the miner's allowable headroom).
-	if llm.Calls() > 2 {
+	if !strings.Contains(text, "budget") {
+		t.Errorf("budget-exceeded path did not surface 'budget' in result text: %q", result.Text())
+	}
+	if llm.Calls() > 1 {
 		t.Errorf("LLM called %d times with budget=1 — budget bypassed", llm.Calls())
 	}
 }

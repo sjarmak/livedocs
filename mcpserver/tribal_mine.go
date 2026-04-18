@@ -367,7 +367,7 @@ func truncateForLog(s string) string {
 // value cannot (a) forge log lines with injected newlines or (b) bloat
 // log storage with a multi-megabyte value.
 func logMineAttempt(logger MineLogger, sessionID, repo, symbol, outcome string) {
-	const format = "tribal_mine_on_demand: session_id=%q repo=%q symbol=%q outcome=%s"
+	const format = "tribal_mine_on_demand: session_id=%q repo=%q symbol=%q outcome=%q"
 	sID := truncateForLog(sessionID)
 	r := truncateForLog(repo)
 	sym := truncateForLog(symbol)

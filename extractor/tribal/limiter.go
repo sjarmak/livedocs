@@ -64,6 +64,14 @@ type KeyedLimiterConfig struct {
 	// would push the map over MaxKeys, the least-recently-used entry is
 	// evicted. Zero or negative values default to
 	// DefaultKeyedLimiterMaxKeys.
+	//
+	// SECURITY-SENSITIVE: sizing this below the expected concurrent
+	// session count enables an LRU-thrash degradation where an adversary
+	// minting distinct synthetic IDs evicts legitimate sessions' buckets.
+	// Each eviction resets the victim's bucket to full burst, so eviction
+	// is net-zero or net-negative for the attacker but disruptive to
+	// accounting. Set MaxKeys well above the expected session population.
+	// See live_docs-m7v.24 for planned state-persistence across eviction.
 	MaxKeys int
 
 	// AnonymousID is the bucket used for empty-string keys. All
@@ -90,6 +98,9 @@ type lruEntry struct {
 
 // KeyedLimiter is a bounded-keyspace token-bucket rate limiter. It is
 // safe for concurrent use.
+//
+// The zero value is NOT usable; construct via NewKeyedLimiter. Calling
+// methods on a zero-value KeyedLimiter will panic on the first insert.
 type KeyedLimiter struct {
 	mu      sync.Mutex
 	rate    rate.Limit
@@ -174,9 +185,13 @@ func (l *KeyedLimiter) Close() error {
 
 // bucketKey normalizes an incoming key: empty keys map to the anonymous
 // bucket so callers without a stable identity still face a quota.
+//
+// The anonymous bucket key is prefixed with a NUL byte so no client-supplied
+// session ID can collide with (and starve) it — MCP session identifiers are
+// identifier-style strings that cannot contain NUL.
 func (l *KeyedLimiter) bucketKey(key string) string {
 	if key == "" {
-		return l.anonID
+		return "\x00anon:" + l.anonID
 	}
 	return key
 }

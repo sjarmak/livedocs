@@ -83,9 +83,36 @@ func TestKeyedLimiter_EmptyKeyUsesAnonymous(t *testing.T) {
 	if l.Allow("") {
 		t.Error("empty-key call 3 should be denied (anon bucket exhausted)")
 	}
-	// Explicit "anon-bucket" key shares the same bucket.
-	if l.Allow("anon-bucket") {
-		t.Error("explicit anon-bucket call should share exhausted anonymous bucket")
+}
+
+// Security regression: a client sending the configured AnonymousID as its
+// own session ID must NOT share the anonymous bucket. Internally the
+// anonymous bucket is NUL-prefixed so no identifier-style session ID can
+// collide with it. Without this separation, any HTTP/SSE client could drain
+// the stdio-anonymous bucket by setting session_id="anonymous".
+func TestKeyedLimiter_ExplicitAnonymousIDDoesNotCollide(t *testing.T) {
+	l := NewKeyedLimiter(KeyedLimiterConfig{
+		Rate:        1,
+		Burst:       2,
+		MaxKeys:     16,
+		AnonymousID: "anon-bucket",
+	})
+	defer l.Close()
+
+	// Exhaust the true anonymous bucket via empty key.
+	if !l.Allow("") || !l.Allow("") {
+		t.Fatal("anon bucket should grant its full burst")
+	}
+	if l.Allow("") {
+		t.Fatal("anon bucket should be exhausted after burst")
+	}
+	// A client that explicitly sends "anon-bucket" as its session ID must
+	// get a SEPARATE bucket, not the exhausted anonymous one.
+	if !l.Allow("anon-bucket") {
+		t.Error("explicit 'anon-bucket' session ID must not collide with the anonymous bucket")
+	}
+	if !l.Allow("anon-bucket") {
+		t.Error("explicit 'anon-bucket' session ID must have its own independent burst")
 	}
 }
 
