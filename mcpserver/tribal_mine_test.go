@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -500,5 +501,156 @@ func TestTribalMineOnDemand_FactoryError(t *testing.T) {
 	}
 	if !result.IsError() {
 		t.Fatalf("expected error result for factory failure, got: %s", result.Text())
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Tests for m7v.20 — FailedCount/FailedErrors propagation from MiningResult.
+//
+// These exercise buildTribalMineResponse directly with synthesized results so
+// we can control FailedCount/FailedErrors without needing to force real
+// UpsertTribalFact failures through the LLM + gh pipeline.
+// ---------------------------------------------------------------------------
+
+// m7v.20: FailedCount is summed across results and surfaced in the JSON
+// envelope even when there are successful facts.
+func TestBuildTribalMineResponse_SurfacesFailedCountWithFacts(t *testing.T) {
+	fact := db.TribalFact{
+		SubjectID:    1,
+		Kind:         "invariant",
+		Body:         "must hold request lock",
+		SourceQuote:  "must hold request lock",
+		Extractor:    "pr-miner",
+		LastVerified: "2026-04-18T00:00:00Z",
+		Status:       "active",
+		Evidence: []db.TribalEvidence{
+			{
+				SourceType: "pr_comment",
+				SourceRef:  "https://example/pr/1#r1",
+				Author:     "reviewer1",
+				AuthoredAt: "2026-04-18T00:00:00Z",
+			},
+		},
+	}
+	results := []*tribal.MiningResult{
+		{
+			Path:  "pkg/a.go",
+			Facts: []db.TribalFact{fact},
+			// No failures on this file.
+		},
+		{
+			Path:         "pkg/b.go",
+			FailedCount:  3,
+			FailedErrors: []error{errors.New("upsert b.go: disk full"), errors.New("upsert b.go: constraint violation")},
+		},
+	}
+
+	resp, textMsg, berr := buildTribalMineResponse("HandleRequest", "test-repo", results)
+	if berr != nil {
+		t.Fatalf("buildTribalMineResponse returned err: %v", berr)
+	}
+	if textMsg != "" {
+		t.Errorf("expected empty textMsg when facts present, got %q", textMsg)
+	}
+	if resp.Total != 1 {
+		t.Errorf("Total = %d, want 1", resp.Total)
+	}
+	if resp.FailedCount != 3 {
+		t.Errorf("FailedCount = %d, want 3 (summed across results)", resp.FailedCount)
+	}
+	// The JSON envelope must include failed_count.
+	data, err := json.Marshal(resp)
+	if err != nil {
+		t.Fatalf("marshal resp: %v", err)
+	}
+	var decoded map[string]any
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if _, ok := decoded["failed_count"]; !ok {
+		t.Errorf("JSON envelope missing 'failed_count' field: %s", data)
+	}
+	if fc, _ := decoded["failed_count"].(float64); fc != 3 {
+		t.Errorf("JSON failed_count = %v, want 3", decoded["failed_count"])
+	}
+	// FailedErrors MUST NOT be serialized into the JSON envelope (m7v.21).
+	if _, leaked := decoded["failed_errors"]; leaked {
+		t.Errorf("JSON envelope leaked failed_errors to client: %s", data)
+	}
+}
+
+// m7v.20: when no facts are mined but FailedCount > 0, the handler must NOT
+// return the misleading "No new tribal facts mined" text. Instead it must
+// report the partial-failure count so the agent knows work was silently
+// dropped.
+func TestBuildTribalMineResponse_PartialFailureNoFacts(t *testing.T) {
+	results := []*tribal.MiningResult{
+		{
+			Path:         "pkg/a.go",
+			FailedCount:  2,
+			FailedErrors: []error{errors.New("boom"), errors.New("boom2")},
+		},
+	}
+
+	resp, textMsg, berr := buildTribalMineResponse("Foo", "test-repo", results)
+	if berr != nil {
+		t.Fatalf("buildTribalMineResponse returned err: %v", berr)
+	}
+	if resp.Total != 0 {
+		t.Errorf("Total = %d, want 0", resp.Total)
+	}
+	if resp.FailedCount != 2 {
+		t.Errorf("FailedCount = %d, want 2", resp.FailedCount)
+	}
+	if textMsg == "" {
+		t.Fatal("expected a partial-failure text message, got empty")
+	}
+	// The warning text must not pretend everything succeeded.
+	if strings.Contains(textMsg, "No new tribal facts mined") && !strings.Contains(textMsg, "failed") {
+		t.Errorf("partial-failure path returned misleading success text: %q", textMsg)
+	}
+	// The text must mention the failure count so agents can act on it.
+	if !strings.Contains(textMsg, "2") {
+		t.Errorf("warning text should mention failure count 2, got %q", textMsg)
+	}
+}
+
+// m7v.20: zero facts AND zero failures = genuine empty result. Keep the
+// existing "no new facts" text so the idempotency path is unchanged.
+func TestBuildTribalMineResponse_EmptyResultsUnchanged(t *testing.T) {
+	results := []*tribal.MiningResult{
+		{Path: "pkg/a.go"}, // zero facts, zero failures
+	}
+
+	resp, textMsg, berr := buildTribalMineResponse("Foo", "test-repo", results)
+	if berr != nil {
+		t.Fatalf("buildTribalMineResponse returned err: %v", berr)
+	}
+	if resp.Total != 0 {
+		t.Errorf("Total = %d, want 0", resp.Total)
+	}
+	if resp.FailedCount != 0 {
+		t.Errorf("FailedCount = %d, want 0", resp.FailedCount)
+	}
+	if !strings.Contains(textMsg, "No new tribal facts mined") {
+		t.Errorf("empty-result text should still say 'No new tribal facts mined', got %q", textMsg)
+	}
+}
+
+// m7v.20: nil-safe against nil results.
+func TestBuildTribalMineResponse_NilResults(t *testing.T) {
+	results := []*tribal.MiningResult{nil, nil}
+	resp, textMsg, berr := buildTribalMineResponse("Foo", "test-repo", results)
+	if berr != nil {
+		t.Fatalf("buildTribalMineResponse returned err on nil results: %v", berr)
+	}
+	if resp.Total != 0 {
+		t.Errorf("Total = %d, want 0", resp.Total)
+	}
+	if resp.FailedCount != 0 {
+		t.Errorf("FailedCount = %d, want 0", resp.FailedCount)
+	}
+	if textMsg == "" {
+		t.Error("expected non-empty fallback text on all-nil results")
 	}
 }

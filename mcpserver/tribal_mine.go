@@ -12,6 +12,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 
 	"github.com/sjarmak/livedocs/db"
 	"github.com/sjarmak/livedocs/extractor/tribal"
@@ -39,11 +40,20 @@ type MiningServiceFactory func(repo string, cdb *db.ClaimsDB) (*tribal.TribalMin
 // ---------------------------------------------------------------------------
 
 // tribalMineResponse is the JSON response for tribal_mine_on_demand.
+//
+// FailedCount is the total number of per-fact UpsertTribalFact failures
+// summed across every MiningResult returned by the service. It is the
+// authoritative signal that partial work was silently dropped —
+// clients MUST inspect FailedCount and surface a warning when it is
+// non-zero even if len(Facts) > 0. The actual errors are logged
+// server-side only; raw FailedErrors are intentionally NOT serialized
+// to the client (see live_docs-m7v.21 — sanitization bead).
 type tribalMineResponse struct {
-	Symbol string               `json:"symbol"`
-	Repo   string               `json:"repo"`
-	Facts  []tribalFactEnvelope `json:"facts"`
-	Total  int                  `json:"total"`
+	Symbol      string               `json:"symbol"`
+	Repo        string               `json:"repo"`
+	Facts       []tribalFactEnvelope `json:"facts"`
+	Total       int                  `json:"total"`
+	FailedCount int                  `json:"failed_count"`
 }
 
 // ---------------------------------------------------------------------------
@@ -137,30 +147,18 @@ func TribalMineOnDemandHandler(pool *DBPool, factory MiningServiceFactory) ToolH
 		}
 
 		// --- Build response ---
-		resp := tribalMineResponse{
-			Symbol: symbol,
-			Repo:   repo,
-			Facts:  make([]tribalFactEnvelope, 0),
-		}
-		for _, r := range results {
-			if r == nil {
-				continue
-			}
-			for _, fact := range r.Facts {
-				if vErr := validateProvenanceEnvelope(fact); vErr != nil {
-					return NewErrorResultf("tribal_mine_on_demand: %v", vErr), nil
-				}
-				resp.Facts = append(resp.Facts, factToEnvelope(fact))
-			}
-		}
-		resp.Total = len(resp.Facts)
+		// Log any per-file partial-upsert failures server-side BEFORE shaping
+		// the response. FailedErrors may carry raw DB constraint text or
+		// paths, so they never leave the server (m7v.21); only aggregated
+		// counts reach the JSON envelope.
+		logMiningFailures(repo, results)
 
-		if resp.Total == 0 {
-			return NewTextResult(fmt.Sprintf(
-				"No new tribal facts mined for symbol %q in repo %q. "+
-					"(Symbol not found, cursor already advanced, or no PR comments classified as tribal.)",
-				symbol, repo,
-			)), nil
+		resp, textMsg, err := buildTribalMineResponse(symbol, repo, results)
+		if err != nil {
+			return NewErrorResultf("tribal_mine_on_demand: %v", err), nil
+		}
+		if textMsg != "" {
+			return NewTextResult(textMsg), nil
 		}
 
 		data, err := json.Marshal(resp)
@@ -168,6 +166,82 @@ func TribalMineOnDemandHandler(pool *DBPool, factory MiningServiceFactory) ToolH
 			return NewErrorResultf("tribal_mine_on_demand: marshal response: %v", err), nil
 		}
 		return NewTextResult(string(data)), nil
+	}
+}
+
+// buildTribalMineResponse shapes the MCP response from a slice of MiningResult
+// pointers. It aggregates FailedCount across all results and surfaces it in
+// the envelope so clients can detect partial-upsert failures that the
+// service reports via (non-nil result, nil error) semantics per m7v.14.
+//
+// Returns (response, textMsg, err):
+//   - response is the populated envelope when at least one fact was mined.
+//   - textMsg is a non-empty warning string for the zero-facts paths:
+//     "No new tribal facts mined" for genuinely empty results, or a
+//     partial-failure warning when FailedCount > 0. Callers must prefer
+//     textMsg over JSON marshaling when it is non-empty.
+//   - err is non-nil only when a fact fails the provenance-envelope check,
+//     which is treated as a server-side invariant violation.
+func buildTribalMineResponse(symbol, repo string, results []*tribal.MiningResult) (tribalMineResponse, string, error) {
+	resp := tribalMineResponse{
+		Symbol: symbol,
+		Repo:   repo,
+		Facts:  make([]tribalFactEnvelope, 0),
+	}
+	for _, r := range results {
+		if r == nil {
+			continue
+		}
+		resp.FailedCount += r.FailedCount
+		for _, fact := range r.Facts {
+			if vErr := validateProvenanceEnvelope(fact); vErr != nil {
+				return tribalMineResponse{}, "", vErr
+			}
+			resp.Facts = append(resp.Facts, factToEnvelope(fact))
+		}
+	}
+	resp.Total = len(resp.Facts)
+
+	if resp.Total == 0 {
+		if resp.FailedCount > 0 {
+			// Contract fix (m7v.20): do NOT return the misleading
+			// "No new tribal facts mined" text when upsert failures
+			// silently dropped work. Agents need to know.
+			return resp, fmt.Sprintf(
+				"Tribal mining for symbol %q in repo %q produced 0 facts but encountered %d "+
+					"fact-upsert failure(s); details logged server-side. "+
+					"Retry or investigate before treating this symbol as having no tribal knowledge.",
+				symbol, repo, resp.FailedCount,
+			), nil
+		}
+		return resp, fmt.Sprintf(
+			"No new tribal facts mined for symbol %q in repo %q. "+
+				"(Symbol not found, cursor already advanced, or no PR comments classified as tribal.)",
+			symbol, repo,
+		), nil
+	}
+
+	return resp, "", nil
+}
+
+// logMiningFailures emits one log line per MiningResult that recorded
+// per-fact upsert failures. FailedErrors content is quoted with %q to
+// defeat log-injection via embedded newlines or control characters in
+// wrapped DB error messages. The first retained error is logged for
+// debuggability; FailedCount is the authoritative total.
+func logMiningFailures(repo string, results []*tribal.MiningResult) {
+	for _, r := range results {
+		if r == nil || r.FailedCount == 0 {
+			continue
+		}
+		first := ""
+		if len(r.FailedErrors) > 0 && r.FailedErrors[0] != nil {
+			first = r.FailedErrors[0].Error()
+		}
+		log.Printf(
+			"tribal_mine_on_demand: partial upsert failure repo=%q path=%q failed_count=%d retained_errors=%d first_error=%q",
+			repo, r.Path, r.FailedCount, len(r.FailedErrors), first,
+		)
 	}
 }
 
