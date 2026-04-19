@@ -100,10 +100,6 @@ func TestVerifyCommand_FormatSummary(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Reset flags from prior tests.
-	verifyJSON = false
-	verifyFormat = "human"
-
 	buf := new(bytes.Buffer)
 	rootCmd.SetOut(buf)
 	rootCmd.SetErr(buf)
@@ -135,10 +131,6 @@ func TestVerifyCommand_DirectoryMode(t *testing.T) {
 	if err := os.WriteFile(claudeMD, []byte(content), 0o644); err != nil {
 		t.Fatal(err)
 	}
-
-	// Reset flags from prior tests.
-	verifyJSON = false
-	verifyFormat = "human"
 
 	buf := new(bytes.Buffer)
 	rootCmd.SetOut(buf)

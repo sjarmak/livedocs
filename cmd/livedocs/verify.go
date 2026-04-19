@@ -12,11 +12,6 @@ import (
 	"github.com/sjarmak/livedocs/aicontext"
 )
 
-var (
-	verifyJSON   bool
-	verifyFormat string
-)
-
 var verifyCmd = &cobra.Command{
 	Use:   "verify [path]",
 	Short: "Verify accuracy of AI context files",
@@ -30,8 +25,8 @@ Returns exit code 1 if stale references are found.`,
 }
 
 func init() {
-	verifyCmd.Flags().BoolVar(&verifyJSON, "json", false, "output as JSON (shorthand for --format=json)")
-	verifyCmd.Flags().StringVar(&verifyFormat, "format", "human", "output format: human, json, or summary")
+	verifyCmd.Flags().Bool("json", false, "output as JSON (shorthand for --format=json)")
+	verifyCmd.Flags().String("format", "human", "output format: human, json, or summary")
 }
 
 // VerifyReport is the structured output for the verify command.
@@ -64,13 +59,16 @@ type StaleRefInfo struct {
 }
 
 func runVerify(cmd *cobra.Command, args []string) error {
+	defer resetCmdFlags(cmd)
+
 	path := "."
 	if len(args) > 0 {
 		path = args[0]
 	}
 
-	format := verifyFormat
-	if verifyJSON {
+	format, _ := cmd.Flags().GetString("format")
+	jsonShortcut, _ := cmd.Flags().GetBool("json")
+	if jsonShortcut {
 		format = "json"
 	}
 

@@ -15,13 +15,6 @@ import (
 	"github.com/sjarmak/livedocs/renderer"
 )
 
-var (
-	exportFormat string
-	exportOutput string
-	exportRepo   string
-	exportDB     string
-)
-
 var exportCmd = &cobra.Command{
 	Use:   "export [path]",
 	Short: "Export documentation audit report or rendered markdown",
@@ -40,42 +33,48 @@ Used By (reverse dependencies), Implements (interface satisfaction), and
 Cross-Package References sections. Requires --repo flag.`,
 	Args: cobra.MaximumNArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
+		defer resetCmdFlags(cmd)
+
 		path := "."
 		if len(args) > 0 {
 			path = args[0]
 		}
 
-		switch exportFormat {
+		format, _ := cmd.Flags().GetString("format")
+		switch format {
 		case "markdown":
 			return runMarkdownExport(cmd, path)
 		case "audit", "audit-json", "audit-md":
 			return runAuditExport(cmd, path)
 		default:
-			return fmt.Errorf("unknown format %q: use \"audit-json\", \"audit-md\", or \"markdown\"", exportFormat)
+			return fmt.Errorf("unknown format %q: use \"audit-json\", \"audit-md\", or \"markdown\"", format)
 		}
 	},
 }
 
 func init() {
-	exportCmd.Flags().StringVar(&exportFormat, "format", "audit-json",
+	exportCmd.Flags().String("format", "audit-json",
 		"output format: audit-json, audit-md, or markdown")
-	exportCmd.Flags().StringVarP(&exportOutput, "output", "o", "",
+	exportCmd.Flags().StringP("output", "o", "",
 		"write output to file (default: stdout)")
-	exportCmd.Flags().StringVar(&exportRepo, "repo", "",
+	exportCmd.Flags().String("repo", "",
 		"repository name (required for markdown format)")
-	exportCmd.Flags().StringVar(&exportDB, "db", "",
+	exportCmd.Flags().String("db", "",
 		"claims database path (default: <repo>.claims.db)")
 }
 
 func runAuditExport(cmd *cobra.Command, path string) error {
+	output, _ := cmd.Flags().GetString("output")
+	format, _ := cmd.Flags().GetString("format")
+
 	report, err := audit.Generate(path, time.Now())
 	if err != nil {
 		return fmt.Errorf("generate audit report: %w", err)
 	}
 
 	w := cmd.OutOrStdout()
-	if exportOutput != "" {
-		f, err := os.Create(exportOutput)
+	if output != "" {
+		f, err := os.Create(output)
 		if err != nil {
 			return fmt.Errorf("create output file: %w", err)
 		}
@@ -83,7 +82,7 @@ func runAuditExport(cmd *cobra.Command, path string) error {
 		w = f
 	}
 
-	switch exportFormat {
+	switch format {
 	case "audit", "audit-json":
 		if err := audit.WriteJSON(w, report); err != nil {
 			return fmt.Errorf("write JSON: %w", err)
@@ -98,7 +97,11 @@ func runAuditExport(cmd *cobra.Command, path string) error {
 }
 
 func runMarkdownExport(cmd *cobra.Command, path string) error {
-	if exportRepo == "" {
+	repo, _ := cmd.Flags().GetString("repo")
+	output, _ := cmd.Flags().GetString("output")
+	dbFlag, _ := cmd.Flags().GetString("db")
+
+	if repo == "" {
 		return fmt.Errorf("--repo is required for markdown format")
 	}
 
@@ -108,9 +111,9 @@ func runMarkdownExport(cmd *cobra.Command, path string) error {
 	}
 
 	// Determine the claims DB path.
-	dbPath := exportDB
+	dbPath := dbFlag
 	if dbPath == "" {
-		dbPath = exportRepo + ".claims.db"
+		dbPath = repo + ".claims.db"
 	}
 
 	// Open the claims database.
@@ -137,8 +140,8 @@ func runMarkdownExport(cmd *cobra.Command, path string) error {
 
 	// Write output.
 	w := cmd.OutOrStdout()
-	if exportOutput != "" {
-		f, err := os.Create(exportOutput)
+	if output != "" {
+		f, err := os.Create(output)
 		if err != nil {
 			return fmt.Errorf("create output file: %w", err)
 		}

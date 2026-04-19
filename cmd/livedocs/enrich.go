@@ -19,18 +19,6 @@ import (
 // for cold-cache cost estimation in --initial mode.
 const estimatedCostPerCall = 0.003
 
-var (
-	enrichDataDir         string
-	enrichBudget          int
-	enrichMaxSymbols      int
-	enrichIncludeInternal bool
-	enrichForce           bool
-	enrichDryRun          bool
-	enrichVerify          bool
-	enrichInitial         bool
-	enrichConfirm         bool
-)
-
 var enrichCmd = &cobra.Command{
 	Use:   "enrich",
 	Short: "Enrich claims with semantic context from Sourcegraph",
@@ -53,57 +41,64 @@ estimate and exits.`,
 }
 
 func init() {
-	enrichCmd.Flags().StringVar(&enrichDataDir, "data-dir", "", "directory containing per-repo .claims.db files (required)")
-	enrichCmd.Flags().IntVar(&enrichBudget, "budget", 100, "maximum number of Sourcegraph router calls")
-	enrichCmd.Flags().IntVar(&enrichMaxSymbols, "max-symbols", 200, "maximum number of symbols to enrich")
-	enrichCmd.Flags().BoolVar(&enrichIncludeInternal, "include-internal", false, "include internal-visibility symbols")
-	enrichCmd.Flags().BoolVar(&enrichForce, "force", false, "re-enrich all symbols, ignoring content-hash cache")
-	enrichCmd.Flags().BoolVar(&enrichDryRun, "dry-run", false, "list symbols and estimated cost without calling Sourcegraph")
-	enrichCmd.Flags().BoolVar(&enrichVerify, "verify", false, "verify enriched claims after completion")
-	enrichCmd.Flags().BoolVar(&enrichInitial, "initial", false, "full-corpus enrichment (unlimited budget and max-symbols)")
-	enrichCmd.Flags().BoolVar(&enrichConfirm, "confirm", false, "confirm cold-cache enrichment (required with --initial)")
+	enrichCmd.Flags().String("data-dir", "", "directory containing per-repo .claims.db files (required)")
+	enrichCmd.Flags().Int("budget", 100, "maximum number of Sourcegraph router calls")
+	enrichCmd.Flags().Int("max-symbols", 200, "maximum number of symbols to enrich")
+	enrichCmd.Flags().Bool("include-internal", false, "include internal-visibility symbols")
+	enrichCmd.Flags().Bool("force", false, "re-enrich all symbols, ignoring content-hash cache")
+	enrichCmd.Flags().Bool("dry-run", false, "list symbols and estimated cost without calling Sourcegraph")
+	enrichCmd.Flags().Bool("verify", false, "verify enriched claims after completion")
+	enrichCmd.Flags().Bool("initial", false, "full-corpus enrichment (unlimited budget and max-symbols)")
+	enrichCmd.Flags().Bool("confirm", false, "confirm cold-cache enrichment (required with --initial)")
 	_ = enrichCmd.MarkFlagRequired("data-dir")
 }
 
 func runEnrich(cmd *cobra.Command, args []string) error {
-	// Reset flag state for any subsequent invocation of this command. See
-	// resetCmdFlags in flags.go for rationale (live_docs-m7v.28, m7v.36).
 	defer resetCmdFlags(cmd)
+
+	dataDir, _ := cmd.Flags().GetString("data-dir")
+	budget, _ := cmd.Flags().GetInt("budget")
+	maxSymbols, _ := cmd.Flags().GetInt("max-symbols")
+	includeInternal, _ := cmd.Flags().GetBool("include-internal")
+	force, _ := cmd.Flags().GetBool("force")
+	dryRun, _ := cmd.Flags().GetBool("dry-run")
+	initial, _ := cmd.Flags().GetBool("initial")
+	confirm, _ := cmd.Flags().GetBool("confirm")
 
 	out := cmd.OutOrStdout()
 
 	// --initial overrides budget and max-symbols to unlimited.
-	if enrichInitial {
-		enrichBudget = 0
-		enrichMaxSymbols = 0
+	if initial {
+		budget = 0
+		maxSymbols = 0
 	}
 
 	// Check for SRC_ACCESS_TOKEN unless dry-run or initial-without-confirm.
-	needsToken := !enrichDryRun && !(enrichInitial && !enrichConfirm)
+	needsToken := !dryRun && !(initial && !confirm)
 	if needsToken && os.Getenv("SRC_ACCESS_TOKEN") == "" {
 		fmt.Fprintln(out, "SRC_ACCESS_TOKEN is not set. Set it to a Sourcegraph access token to enable enrichment.")
 		return nil
 	}
 
 	// Discover claims databases.
-	pattern := filepath.Join(enrichDataDir, "*.claims.db")
+	pattern := filepath.Join(dataDir, "*.claims.db")
 	matches, err := filepath.Glob(pattern)
 	if err != nil {
 		return fmt.Errorf("glob claims DBs: %w", err)
 	}
 	if len(matches) == 0 {
-		fmt.Fprintf(out, "No .claims.db files found in %s\n", enrichDataDir)
+		fmt.Fprintf(out, "No .claims.db files found in %s\n", dataDir)
 		return nil
 	}
 
 	// --initial without --confirm: print cost estimate and exit.
-	if enrichInitial && !enrichConfirm {
-		return runInitialCostEstimate(cmd, matches)
+	if initial && !confirm {
+		return runInitialCostEstimate(cmd, matches, includeInternal)
 	}
 
 	// For non-dry-run, create the Sourcegraph client once.
 	var sgClient *sourcegraph.SourcegraphClient
-	if !enrichDryRun {
+	if !dryRun {
 		sgClient, err = sourcegraph.NewSourcegraphClient()
 		if err != nil {
 			return fmt.Errorf("create sourcegraph client: %w", err)
@@ -127,8 +122,8 @@ func runEnrich(cmd *cobra.Command, args []string) error {
 			continue
 		}
 
-		if enrichDryRun {
-			summary, err := runEnrichDryRun(cmd, cdb, repoName)
+		if dryRun {
+			summary, err := runEnrichDryRun(cmd, cdb, repoName, includeInternal, maxSymbols)
 			cdb.Close()
 			if err != nil {
 				fmt.Fprintf(out, "warning: dry-run %s: %v (skipping)\n", repoName, err)
@@ -144,10 +139,10 @@ func runEnrich(cmd *cobra.Command, args []string) error {
 			}
 
 			opts := sourcegraph.EnrichOpts{
-				Budget:          enrichBudget,
-				MaxSymbols:      enrichMaxSymbols,
-				IncludeInternal: enrichIncludeInternal,
-				Force:           enrichForce,
+				Budget:          budget,
+				MaxSymbols:      maxSymbols,
+				IncludeInternal: includeInternal,
+				Force:           force,
 			}
 
 			summary, err := enricher.Run(cmd.Context(), opts)
@@ -169,10 +164,10 @@ func runEnrich(cmd *cobra.Command, args []string) error {
 	fmt.Fprintln(out, "")
 	fmt.Fprintln(out, "Enrichment Summary")
 	fmt.Fprintln(out, "==================")
-	if enrichDryRun {
+	if dryRun {
 		fmt.Fprintf(out, "  Candidate symbols: %d\n", totalSummary.SymbolsSkipped)
 		fmt.Fprintf(out, "  Estimated calls:   %d (up to budget %d)\n",
-			min(totalSummary.SymbolsSkipped*4, enrichBudget), enrichBudget)
+			min(totalSummary.SymbolsSkipped*4, budget), budget)
 		fmt.Fprintf(out, "  Mode:              dry-run (no Sourcegraph calls made)\n")
 	} else {
 		fmt.Fprintf(out, "  Symbols enriched: %d\n", totalSummary.SymbolsEnriched)
@@ -186,7 +181,7 @@ func runEnrich(cmd *cobra.Command, args []string) error {
 
 // runInitialCostEstimate counts symbols across all DBs and prints
 // a cost/time estimate for --initial mode, then exits without enriching.
-func runInitialCostEstimate(cmd *cobra.Command, matches []string) error {
+func runInitialCostEstimate(cmd *cobra.Command, matches []string, includeInternal bool) error {
 	out := cmd.OutOrStdout()
 	totalSymbols := 0
 
@@ -204,7 +199,7 @@ func runInitialCostEstimate(cmd *cobra.Command, matches []string) error {
 			continue
 		}
 
-		symbols, err := enricher.SelectSymbols(enrichIncludeInternal, 0)
+		symbols, err := enricher.SelectSymbols(includeInternal, 0)
 		cdb.Close()
 		if err != nil {
 			continue
@@ -231,7 +226,7 @@ func runInitialCostEstimate(cmd *cobra.Command, matches []string) error {
 
 // runEnrichDryRun lists candidate symbols for a single repo without calling
 // the router. Returns a summary with SymbolsSkipped set to the candidate count.
-func runEnrichDryRun(cmd *cobra.Command, cdb *db.ClaimsDB, repoName string) (sourcegraph.EnrichmentSummary, error) {
+func runEnrichDryRun(cmd *cobra.Command, cdb *db.ClaimsDB, repoName string, includeInternal bool, maxSymbols int) (sourcegraph.EnrichmentSummary, error) {
 	out := cmd.OutOrStdout()
 	var summary sourcegraph.EnrichmentSummary
 
@@ -243,7 +238,7 @@ func runEnrichDryRun(cmd *cobra.Command, cdb *db.ClaimsDB, repoName string) (sou
 		return summary, err
 	}
 
-	symbols, err := enricher.SelectSymbols(enrichIncludeInternal, enrichMaxSymbols)
+	symbols, err := enricher.SelectSymbols(includeInternal, maxSymbols)
 	if err != nil {
 		return summary, fmt.Errorf("select symbols: %w", err)
 	}

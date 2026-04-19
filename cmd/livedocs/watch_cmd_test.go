@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"testing"
@@ -183,17 +184,11 @@ func TestRepoBaseName(t *testing.T) {
 func TestWatchCmd_SourcegraphRequiresSRCToken(t *testing.T) {
 	t.Setenv("SRC_ACCESS_TOKEN", "")
 
-	// Set global vars directly (RunE reads from package-level vars).
-	oldSource := watchSource
-	oldRepos := watchRepos
-	watchSource = "sourcegraph"
-	watchRepos = "org/*"
-	defer func() {
-		watchSource = oldSource
-		watchRepos = oldRepos
-	}()
-
-	err := watchCmd.RunE(watchCmd, nil)
+	buf := new(bytes.Buffer)
+	rootCmd.SetOut(buf)
+	rootCmd.SetErr(buf)
+	rootCmd.SetArgs([]string{"watch", "--source", "sourcegraph", "--repos", "org/*"})
+	err := rootCmd.Execute()
 	if err == nil {
 		t.Fatal("expected error when SRC_ACCESS_TOKEN is not set")
 	}
@@ -205,16 +200,11 @@ func TestWatchCmd_SourcegraphRequiresSRCToken(t *testing.T) {
 func TestWatchCmd_SourcegraphRequiresRepos(t *testing.T) {
 	t.Setenv("SRC_ACCESS_TOKEN", "test-token")
 
-	oldSource := watchSource
-	oldRepos := watchRepos
-	watchSource = "sourcegraph"
-	watchRepos = ""
-	defer func() {
-		watchSource = oldSource
-		watchRepos = oldRepos
-	}()
-
-	err := watchCmd.RunE(watchCmd, nil)
+	buf := new(bytes.Buffer)
+	rootCmd.SetOut(buf)
+	rootCmd.SetErr(buf)
+	rootCmd.SetArgs([]string{"watch", "--source", "sourcegraph"})
+	err := rootCmd.Execute()
 	if err == nil {
 		t.Fatal("expected error when --repos is not set")
 	}
