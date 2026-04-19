@@ -541,9 +541,23 @@ func (s *TribalMiningService) MineSymbol(
 		r, mineErr := s.MineFile(ctx, p, trigger)
 		if mineErr != nil {
 			var me *MiningError
-			if errors.As(mineErr, &me) && me.Code == "budget_exceeded" {
-				// Stop mining further files on budget exhaustion.
-				return results, mineErr
+			if errors.As(mineErr, &me) {
+				switch me.Code {
+				case "budget_exceeded":
+					// Stop mining further files on budget exhaustion.
+					return results, mineErr
+				case "mine_throttled":
+					// Propagate throttle eagerly so callers see the
+					// retry signal instead of silently skipping. Mirrors
+					// the budget_exceeded eager-exit contract: any work
+					// done before the throttle is preserved in `results`,
+					// and the wrapped ErrMineThrottled chain survives so
+					// the MCP handler's `errors.Is(err,
+					// tribal.ErrMineThrottled)` branch (m7v.30) fires.
+					// Continuing the loop would consume more limiter
+					// slots and defeat the caller's backoff.
+					return results, mineErr
+				}
 			}
 			// Other per-file errors are non-fatal: skip and continue.
 			continue

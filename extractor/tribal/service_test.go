@@ -1288,3 +1288,184 @@ func TestTribalMiningService_MineFile_FirstCallerCancelPropagates(t *testing.T) 
 		t.Errorf("generation = %d, want 0 (nothing was written)", g)
 	}
 }
+
+// TestTribalMiningService_MineSymbol_PropagatesThrottle locks in the m7v.40
+// fix: when MineSymbol's per-file loop encounters a mine_throttled denial
+// from MineFile (limiter rejection), the loop must surface the wrapped
+// ErrMineThrottled to the caller instead of swallowing it via `continue`.
+//
+// Wave 1 review (m7v.30) found that the renderMineError throttle branch in
+// TribalMineOnDemandHandler was dead code via the symbol-mining path because
+// MineSymbol only propagated budget_exceeded; mine_throttled (and every
+// other per-file MiningError code) was discarded silently. Without this
+// propagation, MCP clients cannot distinguish a transient rate-limit denial
+// (retry shortly) from "no facts found" — the exact confusion the m7v.30
+// SafeMessage wording was designed to prevent.
+//
+// Setup: two files mapped to the same symbol; KeyedLimiter with Burst=1
+// admits the first MineFile call and denies the second. Assert:
+//   - MineSymbol returns a non-nil error
+//   - errors.Is(err, ErrMineThrottled) is true (the wrapped sentinel chain
+//     survived the loop's classification)
+//   - The MiningError.Code is "mine_throttled" (not "budget_exceeded")
+//   - Partial results from the first file are preserved alongside the error
+//     (mirrors the budget_exceeded eager-exit semantics)
+func TestTribalMiningService_MineSymbol_PropagatesThrottle(t *testing.T) {
+	cdb := newTestClaimsDB(t)
+
+	// Two files share the same symbol name. resolveSymbolFiles will return
+	// both paths; the loop processes them in insertion order.
+	for _, sym := range []db.Symbol{
+		{Repo: "repo", ImportPath: "pkg/first.go", SymbolName: "DoWork", Language: "go", Kind: "func", Visibility: "public"},
+		{Repo: "repo", ImportPath: "pkg/second.go", SymbolName: "DoWork", Language: "go", Kind: "func", Visibility: "public"},
+	} {
+		if _, err := cdb.UpsertSymbol(sym); err != nil {
+			t.Fatalf("upsert symbol: %v", err)
+		}
+	}
+
+	comment := PRComment{
+		Body:     "first file rationale",
+		DiffHunk: "@@",
+		Path:     "pkg/first.go",
+		HTMLURL:  "https://github.com/org/repo/pull/1#r1",
+		User:     prUser{Login: "r"},
+	}
+	commentJSON, _ := json.Marshal(comment)
+
+	runner := &mockRunnerRecording{
+		prList:  "1\n",
+		apiResp: string(commentJSON),
+	}
+	llm := &mockLLMClient{
+		responses: []string{
+			`{"kind":"rationale","body":"first file body","confidence":0.9}`,
+		},
+	}
+	miner := &prCommentMiner{
+		RepoOwner:   "org",
+		RepoName:    "repo",
+		Client:      llm,
+		Model:       "test",
+		DailyBudget: 1_000,
+		RunCommand:  runner.run,
+	}
+
+	// Burst=1 admits each per-key bucket exactly once; Rate is intentionally
+	// near-zero so buckets cannot refill on test time scales (deterministic
+	// denial). KeyedLimiter is keyed by relPath, so to deny the second file
+	// in MineSymbol we pre-drain its bucket below.
+	lim := NewKeyedLimiter(KeyedLimiterConfig{
+		Rate:  0.001,
+		Burst: 1,
+	})
+	svc := newServiceWithMiner(cdb, miner, "repo", WithMineLimiter(lim))
+
+	// Pre-drain the limiter bucket for pkg/second.go so when MineSymbol's
+	// per-file loop reaches it, the limiter denies the call. The first
+	// file (pkg/first.go) keeps its own bucket and proceeds normally.
+	if !lim.Allow("pkg/second.go") {
+		t.Fatalf("pre-drain Allow(pkg/second.go) should succeed once with Burst=1")
+	}
+
+	results, err := svc.MineSymbol(context.Background(), "DoWork", TriggerJITOnDemand)
+	if err == nil {
+		t.Fatal("MineSymbol: expected error from throttled second file, got nil")
+	}
+	if !errors.Is(err, ErrMineThrottled) {
+		t.Errorf("errors.Is(err, ErrMineThrottled) = false; err=%v", err)
+	}
+	var me *MiningError
+	if !errors.As(err, &me) {
+		t.Fatalf("expected *MiningError, got %T: %v", err, err)
+	}
+	if me.Code != "mine_throttled" {
+		t.Errorf("MiningError.Code = %q, want mine_throttled", me.Code)
+	}
+	// Distinguishability invariant from m7v.30: throttle MUST NOT alias
+	// to budget_exceeded — otherwise the renderMineError fan-out can't
+	// give the caller a retry hint.
+	if errors.Is(err, ErrBudgetExceeded) {
+		t.Error("throttle error must NOT unwrap to ErrBudgetExceeded")
+	}
+
+	// Partial results from the first (admitted) file must be preserved,
+	// matching the budget_exceeded eager-exit contract: callers see the
+	// retry signal alongside whatever work landed before the denial.
+	if len(results) != 1 {
+		t.Fatalf("got %d partial results, want 1 (first file should have completed)", len(results))
+	}
+	if results[0].Path != "pkg/first.go" {
+		t.Errorf("results[0].Path = %q, want pkg/first.go", results[0].Path)
+	}
+	if len(results[0].Facts) != 1 {
+		t.Errorf("results[0].Facts = %d, want 1", len(results[0].Facts))
+	}
+}
+
+// TestTribalMiningService_MineSymbol_BudgetExceededStillStops is a
+// regression guard: the m7v.40 propagation fix must not change the
+// existing budget_exceeded eager-exit behavior. A multi-file symbol
+// whose first file trips the budget cap must surface budget_exceeded
+// (not mine_throttled, not a generic continue) and halt iteration.
+func TestTribalMiningService_MineSymbol_BudgetExceededStillStops(t *testing.T) {
+	cdb := newTestClaimsDB(t)
+
+	for _, sym := range []db.Symbol{
+		{Repo: "repo", ImportPath: "pkg/first.go", SymbolName: "BudgetSym", Language: "go", Kind: "func", Visibility: "public"},
+		{Repo: "repo", ImportPath: "pkg/second.go", SymbolName: "BudgetSym", Language: "go", Kind: "func", Visibility: "public"},
+	} {
+		if _, err := cdb.UpsertSymbol(sym); err != nil {
+			t.Fatalf("upsert symbol: %v", err)
+		}
+	}
+
+	// A real comment payload so ExtractForFile reaches the per-comment
+	// classify loop where checkBudget is consulted.
+	comment := PRComment{
+		Body:     "first file",
+		DiffHunk: "@@",
+		Path:     "pkg/first.go",
+		HTMLURL:  "https://github.com/org/repo/pull/1#r1",
+		User:     prUser{Login: "r"},
+	}
+	commentJSON, _ := json.Marshal(comment)
+
+	runner := &mockRunnerRecording{
+		prList:  "1\n",
+		apiResp: string(commentJSON),
+	}
+	llm := &mockLLMClient{}
+	miner := &prCommentMiner{
+		RepoOwner:   "org",
+		RepoName:    "repo",
+		Client:      llm,
+		Model:       "test",
+		DailyBudget: 1,
+		RunCommand:  runner.run,
+	}
+	miner.mu.Lock()
+	miner.callCount = 1 // already at budget
+	miner.mu.Unlock()
+
+	svc := newServiceWithMiner(cdb, miner, "repo")
+
+	_, err := svc.MineSymbol(context.Background(), "BudgetSym", TriggerJITOnDemand)
+	if err == nil {
+		t.Fatal("MineSymbol: expected budget_exceeded error, got nil")
+	}
+	var me *MiningError
+	if !errors.As(err, &me) {
+		t.Fatalf("expected *MiningError, got %T: %v", err, err)
+	}
+	if me.Code != "budget_exceeded" {
+		t.Errorf("MiningError.Code = %q, want budget_exceeded", me.Code)
+	}
+	if !errors.Is(err, ErrBudgetExceeded) {
+		t.Error("errors.Is(err, ErrBudgetExceeded) = false")
+	}
+	// And the throttle propagation must NOT alias the budget path.
+	if errors.Is(err, ErrMineThrottled) {
+		t.Error("budget error must NOT unwrap to ErrMineThrottled")
+	}
+}
