@@ -191,6 +191,13 @@ func SessionIDFromContext(ctx context.Context) string {
 }
 
 // WrapResult creates a ToolResult from an *mcp.CallToolResult.
+//
+// Results produced this way carry a nil cause field — WrapResult is for
+// adapting transport-layer or externally-produced results that were never
+// constructed with NewErrorResultWithCause. If you are building a new
+// error result in-process and want ResultCause to return a typed sentinel,
+// use NewErrorResultWithCause directly rather than round-tripping through
+// *mcp.CallToolResult (which would silently strip the cause).
 func WrapResult(res *mcp.CallToolResult) ToolResult {
 	return &resultAdapter{raw: res}
 }
@@ -211,16 +218,17 @@ func NewErrorResultf(format string, args ...any) ToolResult {
 }
 
 // NewErrorResultWithCause creates an error ToolResult that additionally
-// carries a typed Go error as its programmatic cause. The user-visible
-// text is `text`; the cause is retrievable server-side via ResultCause and
-// is intended for errors.Is comparisons against exported sentinels (e.g.
-// ErrRateLimited) so middleware and tests can branch on denial class
-// without matching wording in the user-facing message.
+// carries a typed Go error as its programmatic cause. Parameter order
+// matches the NewErrorResult family (text first). The cause is retrievable
+// server-side via ResultCause and is intended for errors.Is comparisons
+// against exported sentinels (e.g. ErrRateLimited) so middleware and
+// tests can branch on denial class without matching wording in the
+// user-facing message.
 //
 // The cause is NEVER serialized to the MCP client: adaptHandler only
 // forwards raw.Unwrap() to the transport. Pass nil for `cause` when no
 // programmatic identification is needed (use NewErrorResult instead).
-func NewErrorResultWithCause(cause error, text string) ToolResult {
+func NewErrorResultWithCause(text string, cause error) ToolResult {
 	return &resultAdapter{
 		raw:   mcp.NewToolResultError(text),
 		cause: cause,
@@ -229,9 +237,12 @@ func NewErrorResultWithCause(cause error, text string) ToolResult {
 
 // ResultCause returns the typed Go error cause attached to `r` (if any)
 // via NewErrorResultWithCause, or nil when no cause is attached or `r` is
-// not a resultAdapter produced by this package. Callers use this with
-// errors.Is to detect specific denial classes without string-matching the
-// user-visible Text().
+// not a resultAdapter produced by this package. Callers MUST use this
+// function (not errors.Is applied to the ToolResult directly) to detect
+// specific denial classes: resultAdapter's Unwrap returns
+// *mcp.CallToolResult rather than satisfying the standard
+// errors.Unwrap() error convention, so the standard errors chain-walk
+// cannot reach the cause field.
 //
 // Returning nil for unknown ToolResult implementations is deliberate — a
 // caller expecting an mcpserver-produced denial must construct its results

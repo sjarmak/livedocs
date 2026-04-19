@@ -93,9 +93,9 @@ func TestTribalMineOnDemand_RateLimitSingleSession(t *testing.T) {
 		if err != nil {
 			t.Fatalf("call %d: unexpected transport err: %v", i, err)
 		}
-		text := result.Text()
-		if strings.Contains(text, "rate") && strings.Contains(text, "limit") {
-			t.Fatalf("call %d: rate-limited within burst: %q", i, text)
+		if errors.Is(ResultCause(result), ErrRateLimited) {
+			t.Fatalf("call %d: rate-limited within burst (text=%q)",
+				i, result.Text())
 		}
 	}
 
@@ -107,20 +107,13 @@ func TestTribalMineOnDemand_RateLimitSingleSession(t *testing.T) {
 	if !result.IsError() {
 		t.Fatalf("3rd call: expected error result, got text: %q", result.Text())
 	}
-	// Primary discriminator: typed sentinel via ResultCause (live_docs-m7v.26).
-	// String-matching the text is fragile against wording changes.
 	if !errors.Is(ResultCause(result), ErrRateLimited) {
 		t.Errorf("3rd call: cause should be ErrRateLimited, got %v (text=%q)",
 			ResultCause(result), result.Text())
 	}
-	text := result.Text()
-	// Secondary smoke check: user-visible text still mentions rate.
-	if !strings.Contains(strings.ToLower(text), "rate") {
-		t.Errorf("3rd call: error text should mention rate limit, got %q", text)
-	}
 	// Error message must be short / safe — no internal paths.
-	if len(text) > 512 {
-		t.Errorf("rate-limit error too long — possible leak: %q", text)
+	if len(result.Text()) > 512 {
+		t.Errorf("rate-limit error too long — possible leak: %q", result.Text())
 	}
 }
 
@@ -171,11 +164,11 @@ func TestTribalMineOnDemand_RateLimitDenialCarriesSentinel(t *testing.T) {
 	if !errors.Is(ResultCause(result), ErrRateLimited) {
 		t.Fatalf("expected cause errors.Is ErrRateLimited, got %v", ResultCause(result))
 	}
-	// User-visible text must NOT embed the raw sentinel string
-	// ("mcpserver: rate limit exceeded") — the cause is for programmatic
-	// identification only; the text stays user-friendly.
-	if strings.Contains(result.Text(), "mcpserver:") {
-		t.Errorf("user-facing text leaked raw sentinel detail: %q", result.Text())
+	// User-visible text must NOT embed the sentinel's Error() string —
+	// the cause is for programmatic identification only; the text stays
+	// user-friendly and can be reworded independently.
+	if strings.Contains(result.Text(), ErrRateLimited.Error()) {
+		t.Errorf("user-facing text leaked sentinel Error() string: %q", result.Text())
 	}
 }
 
@@ -212,6 +205,14 @@ func TestTribalMineOnDemand_AdmittedCallHasNilCause(t *testing.T) {
 	result, err := handler(context.Background(), req)
 	if err != nil {
 		t.Fatalf("unexpected err: %v", err)
+	}
+	// The call was admitted — not an error result at all, and therefore
+	// no rate-limit cause attached. Asserting both pins the invariant
+	// against a future bug where the handler returns a non-rate-limit
+	// error result with a nil cause (which would pass only the sentinel
+	// check).
+	if result.IsError() {
+		t.Fatalf("admitted call must not yield an error result (text=%q)", result.Text())
 	}
 	if errors.Is(ResultCause(result), ErrRateLimited) {
 		t.Errorf("admitted call must not carry ErrRateLimited cause (text=%q)", result.Text())
