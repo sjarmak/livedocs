@@ -696,6 +696,53 @@ func TestTribalMiningService_MineFile_FailedErrorsCapped(t *testing.T) {
 	}
 }
 
+// TestMiningErrorCodes_Pinned pins the wire values of every canonical
+// MiningError code constant (live_docs-m7v.44). External callers
+// (cmd/livedocs/extract_cmd.go, mcpserver tests, scripts/extract-corpus.sh)
+// match on the literal strings, so a rename of a constant's value is a
+// silent contract break — this table catches it as a test failure.
+//
+// The table also asserts that constructing a MiningError with the constant
+// produces an error whose Code field equals the expected literal, which
+// guards against accidental defined-type drift away from the alias contract
+// declared in service.go.
+func TestMiningErrorCodes_Pinned(t *testing.T) {
+	cases := []struct {
+		name string
+		code MiningErrorCode
+		want string
+	}{
+		{"budget_exceeded", CodeBudgetExceeded, "budget_exceeded"},
+		{"cursor_regression", CodeCursorRegression, "cursor_regression"},
+		{"symbol_resolution_failed", CodeSymbolResolutionFailed, "symbol_resolution_failed"},
+		{"symbol_upsert_failed", CodeSymbolUpsertFailed, "symbol_upsert_failed"},
+		{"extraction_failed", CodeExtractionFailed, "extraction_failed"},
+		{"mine_throttled", CodeMineThrottled, "mine_throttled"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if string(tc.code) != tc.want {
+				t.Errorf("constant value = %q, want %q (renaming the wire "+
+					"value silently breaks external string comparisons)",
+					string(tc.code), tc.want)
+			}
+			me := &MiningError{Code: tc.code, Message: "x"}
+			if me.Code != tc.want {
+				t.Errorf("MiningError.Code = %q, want %q", me.Code, tc.want)
+			}
+			// Alias contract: the constant must be assignable to a raw
+			// string and comparable against a string literal without a
+			// conversion. If this stops compiling, the alias has been
+			// changed to a defined type and external callers that compare
+			// `me.Code == "budget_exceeded"` will silently fall through.
+			var asString string = tc.code
+			if asString != tc.want {
+				t.Errorf("alias assignment = %q, want %q", asString, tc.want)
+			}
+		})
+	}
+}
+
 func TestMiningError_Structured(t *testing.T) {
 	me := &MiningError{
 		Code:    "rate_limited",

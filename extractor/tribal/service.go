@@ -50,11 +50,48 @@ const (
 	TriggerBackfill Trigger = "backfill"
 )
 
+// MiningErrorCode is the machine-readable code carried on MiningError. It is
+// a type alias rather than a defined type so existing callers that compare
+// `me.Code == "budget_exceeded"` (e.g. cmd/livedocs/extract_cmd.go) and
+// existing tests/fixtures that construct `&MiningError{Code: "..."}` continue
+// to compile without conversions. Using an alias still gives in-package call
+// sites the rename-safety of named constants while keeping the field's wire
+// contract open for future codes added by callers (live_docs-m7v.44).
+type MiningErrorCode = string
+
+// Canonical MiningError codes. Construction and switch sites within this
+// package MUST use these constants so a rename of the literal value is a
+// compile error rather than a silent fall-through to the default branch.
+// External callers may continue to compare against raw strings — the alias
+// above guarantees that contract.
+const (
+	// CodeBudgetExceeded indicates the daily LLM call budget has been
+	// reached and no more LLM-backed work will run until the window rolls
+	// over. Wraps ErrBudgetExceeded.
+	CodeBudgetExceeded MiningErrorCode = "budget_exceeded"
+	// CodeCursorRegression indicates the stored PR cursor disagreed with
+	// the upstream PR set and the file has been marked needs_remine.
+	CodeCursorRegression MiningErrorCode = "cursor_regression"
+	// CodeSymbolResolutionFailed indicates symbol → file resolution failed
+	// before any mining could be attempted.
+	CodeSymbolResolutionFailed MiningErrorCode = "symbol_resolution_failed"
+	// CodeSymbolUpsertFailed indicates the file-level symbol upsert that
+	// gates fact insertion failed.
+	CodeSymbolUpsertFailed MiningErrorCode = "symbol_upsert_failed"
+	// CodeExtractionFailed is the catch-all for miner-side failures that
+	// are neither budget exhaustion nor cursor regression.
+	CodeExtractionFailed MiningErrorCode = "extraction_failed"
+	// CodeMineThrottled indicates the per-relPath rate limiter denied the
+	// MineFile request before singleflight or the miner ran. Wraps
+	// ErrMineThrottled.
+	CodeMineThrottled MiningErrorCode = "mine_throttled"
+)
+
 // MiningError is a structured error returned by the mining service.
 // It carries a machine-readable Code for callers that need to branch
 // on error type (e.g. MCP returning JSON error envelopes).
 type MiningError struct {
-	Code    string // e.g. "rate_limited", "cursor_regression", "budget_exceeded"
+	Code    MiningErrorCode // see Code* constants above for canonical values
 	Message string
 	Err     error // wrapped underlying error, may be nil
 }
@@ -70,17 +107,17 @@ func (e *MiningError) Error() string {
 // and wrapped error details. Use this in MCP tool responses instead of Error().
 func (e *MiningError) SafeMessage() string {
 	switch e.Code {
-	case "budget_exceeded":
+	case CodeBudgetExceeded:
 		return "daily LLM call budget reached"
-	case "cursor_regression":
+	case CodeCursorRegression:
 		return "file requires re-mining due to cursor state change"
-	case "symbol_resolution_failed":
+	case CodeSymbolResolutionFailed:
 		return "could not resolve symbol to source files"
-	case "symbol_upsert_failed":
+	case CodeSymbolUpsertFailed:
 		return "failed to register file symbol"
-	case "extraction_failed":
+	case CodeExtractionFailed:
 		return "PR comment extraction failed for file"
-	case "mine_throttled":
+	case CodeMineThrottled:
 		return "per-file mining rate limit reached; retry shortly"
 	default:
 		return e.Code
@@ -347,7 +384,7 @@ func (s *TribalMiningService) MineFile(
 	// adversarial enumeration of distinct relPaths.
 	if s.mineLimiter != nil && !s.mineLimiter.Allow(relPath) {
 		return nil, &MiningError{
-			Code: "mine_throttled",
+			Code: CodeMineThrottled,
 			// relPath is attacker-controllable when the mining service is
 			// reachable through an MCP tool. Quote with %q so newlines or
 			// control chars in a hostile path cannot inject log lines that
@@ -401,7 +438,7 @@ func (s *TribalMiningService) mineFileOnce(
 	})
 	if err != nil {
 		return nil, &MiningError{
-			Code:    "symbol_upsert_failed",
+			Code:    CodeSymbolUpsertFailed,
 			Message: fmt.Sprintf("upsert symbol for %s", relPath),
 			Err:     err,
 		}
@@ -424,7 +461,7 @@ func (s *TribalMiningService) mineFileOnce(
 		if errors.Is(extractErr, ErrCursorRegression) {
 			_ = s.claimsDB.MarkNeedsRemine(s.repo, relPath)
 			return nil, &MiningError{
-				Code:    "cursor_regression",
+				Code:    CodeCursorRegression,
 				Message: fmt.Sprintf("cursor regression for %s", relPath),
 				Err:     extractErr,
 			}
@@ -432,14 +469,14 @@ func (s *TribalMiningService) mineFileOnce(
 		// Budget exceeded: return structured error so both callers handle it identically.
 		if errors.Is(extractErr, ErrBudgetExceeded) {
 			return nil, &MiningError{
-				Code:    "budget_exceeded",
+				Code:    CodeBudgetExceeded,
 				Message: "daily LLM call budget reached",
 				Err:     extractErr,
 			}
 		}
 		// Other errors.
 		return nil, &MiningError{
-			Code:    "extraction_failed",
+			Code:    CodeExtractionFailed,
 			Message: fmt.Sprintf("extract PR comments for %s", relPath),
 			Err:     extractErr,
 		}
@@ -521,7 +558,7 @@ func (s *TribalMiningService) MineSymbol(
 	paths, err := s.resolveSymbolFiles(symbolName)
 	if err != nil {
 		return nil, &MiningError{
-			Code:    "symbol_resolution_failed",
+			Code:    CodeSymbolResolutionFailed,
 			Message: fmt.Sprintf("resolve files for symbol %q", symbolName),
 			Err:     err,
 		}
@@ -543,10 +580,10 @@ func (s *TribalMiningService) MineSymbol(
 			var me *MiningError
 			if errors.As(mineErr, &me) {
 				switch me.Code {
-				case "budget_exceeded":
+				case CodeBudgetExceeded:
 					// Stop mining further files on budget exhaustion.
 					return results, mineErr
-				case "mine_throttled":
+				case CodeMineThrottled:
 					// Propagate throttle eagerly so callers see the
 					// retry signal instead of silently skipping. Mirrors
 					// the budget_exceeded eager-exit contract: any work
