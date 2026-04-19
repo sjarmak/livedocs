@@ -186,7 +186,10 @@ install() {
     # bytes match the signed checksum list. Two guards:
     #   1. The archive MUST be listed in checksums.txt. sha256sum
     #      --ignore-missing silently returns 0 when the target is absent —
-    #      we close that bypass with an explicit grep -qF.
+    #      we close that bypass with an explicit grep -qF. The two-space
+    #      separator matches goreleaser's sha256sum-style output format
+    #      ('<hash>  <filename>'); if that format ever changes, both this
+    #      grep and the awk field-split below must be updated together.
     #   2. The sha256 must match. Under set -e any non-zero exit aborts
     #      before install, so an attacker-swapped tarball never lands.
     echo "Verifying checksum..."
