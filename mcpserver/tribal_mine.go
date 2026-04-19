@@ -18,14 +18,46 @@ import (
 	"github.com/sjarmak/livedocs/extractor/tribal"
 )
 
-// sessionIDResolver is overridden by tests to inject deterministic session
-// IDs without building a real mcp-go session. Production paths resolve via
-// adapter.go's SessionIDFromContext.
-var sessionIDResolver = SessionIDFromContext
-
 // ---------------------------------------------------------------------------
 // Public types
 // ---------------------------------------------------------------------------
+
+// SessionIDResolver resolves the MCP client's session identifier for the
+// current request context. Production callers inject
+// adapter.go:SessionIDFromContext; tests inject a deterministic closure via
+// the WithSessionIDResolver option. Resolvers MUST be safe to call
+// concurrently from multiple goroutines.
+type SessionIDResolver func(context.Context) string
+
+// mineHandlerOpts holds configuration overrides for
+// TribalMineOnDemandRateLimitedHandler. Fields are unexported; callers set
+// them exclusively through MineHandlerOption values. Each handler captures
+// a snapshot of its opts at construction time so concurrent handlers never
+// share mutable state (live_docs-m7v.25 — race safety).
+type mineHandlerOpts struct {
+	sessionIDResolver SessionIDResolver
+}
+
+// MineHandlerOption configures an on-demand mining handler. The variadic
+// option pattern preserves source compatibility for callers that want
+// default behavior and keeps the test-injection seam visible in the
+// handler's exported signature.
+type MineHandlerOption func(*mineHandlerOpts)
+
+// WithSessionIDResolver overrides the default MCP session-ID resolver
+// (adapter.go:SessionIDFromContext). Tests use this option to inject a
+// deterministic session ID without constructing a real mcp-go
+// ClientSession. Production callers SHOULD NOT set this — the default
+// correctly resolves the session from ctx.
+//
+// Passing a nil resolver leaves the default in place.
+func WithSessionIDResolver(r SessionIDResolver) MineHandlerOption {
+	return func(o *mineHandlerOpts) {
+		if r != nil {
+			o.sessionIDResolver = r
+		}
+	}
+}
 
 // ErrLLMClientUnavailable is the sentinel MiningServiceFactory
 // implementations return (wrapped) when neither the primary nor the
@@ -333,18 +365,32 @@ type MineLogger interface {
 // the MineFile singleflight dedup boundary tracked by live_docs-m7v.17)
 // may construct their own KeyedLimiter directly without depending on
 // this handler.
+//
+// The opts variadic accepts MineHandlerOption values that further
+// configure the handler. The only option today is WithSessionIDResolver,
+// which tests use to inject a deterministic session ID in place of the
+// default SessionIDFromContext. Options are captured per-handler at
+// construction time, so distinct handlers never share mutable resolver
+// state (live_docs-m7v.25 — replaced the prior package-level var).
 func TribalMineOnDemandRateLimitedHandler(
 	pool *DBPool,
 	factory MiningServiceFactory,
 	limiter *tribal.KeyedLimiter,
 	logger MineLogger,
+	opts ...MineHandlerOption,
 ) ToolHandler {
+	cfg := mineHandlerOpts{sessionIDResolver: SessionIDFromContext}
+	for _, opt := range opts {
+		opt(&cfg)
+	}
+	resolveSessionID := cfg.sessionIDResolver
+
 	inner := TribalMineOnDemandHandler(pool, factory)
 	if limiter == nil {
 		return inner
 	}
 	return func(ctx context.Context, req ToolRequest) (ToolResult, error) {
-		sessionID := sessionIDResolver(ctx)
+		sessionID := resolveSessionID(ctx)
 		if !limiter.Allow(sessionID) {
 			// Log the denial at the same format as admitted calls so the
 			// session is attributable in both directions. %q quotes the
@@ -434,11 +480,16 @@ func logMineAttempt(logger MineLogger, sessionID, repo, symbol, outcome string) 
 // per attempt to logger (or the standard library logger when logger is nil).
 // When limiter is nil, the handler delegates to TribalMineOnDemandHandler
 // directly for parity with legacy wiring.
+//
+// Optional MineHandlerOption values pass through to
+// TribalMineOnDemandRateLimitedHandler. See WithSessionIDResolver for the
+// test-injection seam (live_docs-m7v.25).
 func TribalMineOnDemandToolDef(
 	pool *DBPool,
 	factory MiningServiceFactory,
 	limiter *tribal.KeyedLimiter,
 	logger MineLogger,
+	opts ...MineHandlerOption,
 ) ToolDef {
 	return ToolDef{
 		Name: "tribal_mine_on_demand",
@@ -469,6 +520,6 @@ Behavior:
 				Description: "Repository name (must match an existing .claims.db file in the data directory).",
 			},
 		},
-		Handler: TribalMineOnDemandRateLimitedHandler(pool, factory, limiter, logger),
+		Handler: TribalMineOnDemandRateLimitedHandler(pool, factory, limiter, logger, opts...),
 	}
 }
