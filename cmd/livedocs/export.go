@@ -40,7 +40,7 @@ Cross-Package References sections. Requires --repo flag.`,
 			path = args[0]
 		}
 
-		format, _ := cmd.Flags().GetString("format")
+		format := mustGetString(cmd, "format")
 		switch format {
 		case "markdown":
 			return runMarkdownExport(cmd, path)
@@ -64,8 +64,8 @@ func init() {
 }
 
 func runAuditExport(cmd *cobra.Command, path string) error {
-	output, _ := cmd.Flags().GetString("output")
-	format, _ := cmd.Flags().GetString("format")
+	output := mustGetString(cmd, "output")
+	format := mustGetString(cmd, "format")
 
 	report, err := audit.Generate(path, time.Now())
 	if err != nil {
@@ -97,9 +97,9 @@ func runAuditExport(cmd *cobra.Command, path string) error {
 }
 
 func runMarkdownExport(cmd *cobra.Command, path string) error {
-	repo, _ := cmd.Flags().GetString("repo")
-	output, _ := cmd.Flags().GetString("output")
-	dbFlag, _ := cmd.Flags().GetString("db")
+	repo := mustGetString(cmd, "repo")
+	output := mustGetString(cmd, "output")
+	dbFlag := mustGetString(cmd, "db")
 
 	if repo == "" {
 		return fmt.Errorf("--repo is required for markdown format")

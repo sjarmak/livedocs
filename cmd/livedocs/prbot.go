@@ -27,11 +27,11 @@ on pull_request events.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		defer resetCmdFlags(cmd)
 
-		diffFile, _ := cmd.Flags().GetString("diff-file")
-		dbPath, _ := cmd.Flags().GetString("db")
-		radius, _ := cmd.Flags().GetInt("radius")
-		format, _ := cmd.Flags().GetString("format")
-		diffFormat, _ := cmd.Flags().GetString("diff-format")
+		diffFile := mustGetString(cmd, "diff-file")
+		dbPath := mustGetString(cmd, "db")
+		radius := mustGetInt(cmd, "radius")
+		format := mustGetString(cmd, "format")
+		diffFormat := mustGetString(cmd, "diff-format")
 
 		changes, err := loadChanges(diffFile, diffFormat)
 		if err != nil {

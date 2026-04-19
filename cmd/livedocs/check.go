@@ -34,9 +34,9 @@ Modes:
 			path = args[0]
 		}
 
-		crossRepo, _ := cmd.Flags().GetBool("cross-repo")
-		updateManifest, _ := cmd.Flags().GetBool("update-manifest")
-		manifest, _ := cmd.Flags().GetBool("manifest")
+		crossRepo := mustGetBool(cmd, "cross-repo")
+		updateManifest := mustGetBool(cmd, "update-manifest")
+		manifest := mustGetBool(cmd, "manifest")
 
 		// Mode: cross-repo semantic check
 		if crossRepo {
@@ -72,11 +72,11 @@ func init() {
 }
 
 func runFullCheck(cmd *cobra.Command, path string) error {
-	allMarkdown, _ := cmd.Flags().GetBool("all-markdown")
-	exclude, _ := cmd.Flags().GetStringSlice("exclude")
-	include, _ := cmd.Flags().GetStringSlice("include")
-	semantic, _ := cmd.Flags().GetBool("semantic")
-	format, _ := cmd.Flags().GetString("format")
+	allMarkdown := mustGetBool(cmd, "all-markdown")
+	exclude := mustGetStringSlice(cmd, "exclude")
+	include := mustGetStringSlice(cmd, "include")
+	semantic := mustGetBool(cmd, "semantic")
+	format := mustGetString(cmd, "format")
 
 	opts := check.FindOptions{
 		AllMarkdown:     allMarkdown,
@@ -115,7 +115,7 @@ func runFullCheck(cmd *cobra.Command, path string) error {
 }
 
 func runManifestCheck(cmd *cobra.Command, path string) error {
-	format, _ := cmd.Flags().GetString("format")
+	format := mustGetString(cmd, "format")
 
 	result, err := check.RunManifest(cmd.Context(), path)
 	if err != nil {
@@ -188,9 +188,9 @@ func runSemanticPass(cmd *cobra.Command, result *check.Result, path string) {
 // runCrossRepoCheck runs cross-repo semantic drift detection using a doc-map
 // to validate documentation against code in remote repositories.
 func runCrossRepoCheck(cmd *cobra.Command, _ string) error {
-	docMapPath, _ := cmd.Flags().GetString("doc-map")
-	docsDir, _ := cmd.Flags().GetString("docs-dir")
-	format, _ := cmd.Flags().GetString("format")
+	docMapPath := mustGetString(cmd, "doc-map")
+	docsDir := mustGetString(cmd, "docs-dir")
+	format := mustGetString(cmd, "format")
 
 	if docMapPath == "" {
 		return fmt.Errorf("--doc-map is required with --cross-repo")

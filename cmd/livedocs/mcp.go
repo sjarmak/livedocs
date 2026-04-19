@@ -41,12 +41,12 @@ See SETUP.md for Cursor and Windsurf configuration.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		defer resetCmdFlags(cmd)
 
-		dbFlag, _ := cmd.Flags().GetString("db")
-		dataDir, _ := cmd.Flags().GetString("data-dir")
-		telemetry, _ := cmd.Flags().GetBool("telemetry")
-		enableStaleness, _ := cmd.Flags().GetBool("enable-staleness")
-		transport, _ := cmd.Flags().GetString("transport")
-		portFlag, _ := cmd.Flags().GetInt("port")
+		dbFlag := mustGetString(cmd, "db")
+		dataDir := mustGetString(cmd, "data-dir")
+		telemetry := mustGetBool(cmd, "telemetry")
+		enableStaleness := mustGetBool(cmd, "enable-staleness")
+		transport := mustGetString(cmd, "transport")
+		portFlag := mustGetInt(cmd, "port")
 
 		cfg := mcpserver.Config{}
 

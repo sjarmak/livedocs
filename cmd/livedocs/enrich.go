@@ -56,14 +56,14 @@ func init() {
 func runEnrich(cmd *cobra.Command, args []string) error {
 	defer resetCmdFlags(cmd)
 
-	dataDir, _ := cmd.Flags().GetString("data-dir")
-	budget, _ := cmd.Flags().GetInt("budget")
-	maxSymbols, _ := cmd.Flags().GetInt("max-symbols")
-	includeInternal, _ := cmd.Flags().GetBool("include-internal")
-	force, _ := cmd.Flags().GetBool("force")
-	dryRun, _ := cmd.Flags().GetBool("dry-run")
-	initial, _ := cmd.Flags().GetBool("initial")
-	confirm, _ := cmd.Flags().GetBool("confirm")
+	dataDir := mustGetString(cmd, "data-dir")
+	budget := mustGetInt(cmd, "budget")
+	maxSymbols := mustGetInt(cmd, "max-symbols")
+	includeInternal := mustGetBool(cmd, "include-internal")
+	force := mustGetBool(cmd, "force")
+	dryRun := mustGetBool(cmd, "dry-run")
+	initial := mustGetBool(cmd, "initial")
+	confirm := mustGetBool(cmd, "confirm")
 
 	out := cmd.OutOrStdout()
 

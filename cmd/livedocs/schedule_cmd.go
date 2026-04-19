@@ -236,8 +236,8 @@ type scheduledRun struct {
 func runExtractSchedule(cmd *cobra.Command, _ []string) error {
 	defer resetCmdFlags(cmd)
 
-	configPath, _ := cmd.Flags().GetString("config")
-	dryRun, _ := cmd.Flags().GetBool("dry-run")
+	configPath := mustGetString(cmd, "config")
+	dryRun := mustGetBool(cmd, "dry-run")
 
 	entries, err := loadScheduleConfig(configPath)
 	if err != nil {

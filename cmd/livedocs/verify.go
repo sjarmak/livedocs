@@ -66,8 +66,8 @@ func runVerify(cmd *cobra.Command, args []string) error {
 		path = args[0]
 	}
 
-	format, _ := cmd.Flags().GetString("format")
-	jsonShortcut, _ := cmd.Flags().GetBool("json")
+	format := mustGetString(cmd, "format")
+	jsonShortcut := mustGetBool(cmd, "json")
 	if jsonShortcut {
 		format = "json"
 	}
