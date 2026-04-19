@@ -8,27 +8,45 @@ import (
 	"log"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 
 	"github.com/sjarmak/livedocs/extractor/tribal"
 )
 
 // ---------------------------------------------------------------------------
-// Context helper — ctx-based fake session ID propagation
+// Session-ID injection seam (live_docs-m7v.25)
 //
 // Production code reads the session ID from mcp-go's server.ClientSession via
 // SessionIDFromContext. Tests cannot construct a real ClientSession cheaply
 // (it is interface-only; implementations live in internal mcp-go types), so
-// the handler accepts an override hook that tests install to inject a
-// deterministic session ID. The override is a package-scoped function
-// variable, restored by t.Cleanup after each test.
+// the handler accepts a WithSessionIDResolver option that tests install to
+// inject a deterministic session ID. Unlike the prior package-level var
+// pattern, the resolver is captured in the handler closure at construction
+// time, so concurrent tests (including t.Parallel()) are race-free.
 // ---------------------------------------------------------------------------
 
-func withTestSessionID(t *testing.T, id string) {
-	t.Helper()
-	prev := sessionIDResolver
-	sessionIDResolver = func(_ context.Context) string { return id }
-	t.Cleanup(func() { sessionIDResolver = prev })
+// constSessionID returns a SessionIDResolver that always yields id. Used for
+// tests that need a single fixed session for the lifetime of the handler.
+func constSessionID(id string) SessionIDResolver {
+	return func(_ context.Context) string { return id }
+}
+
+// mutableSessionID returns a (setter, resolver) pair whose resolver reads
+// from a test-local atomic pointer. Tests that need to switch the session ID
+// between handler invocations (e.g., per-session isolation tests) use this
+// helper so each test owns its own resolver state. The atomic load makes the
+// helper safe to use from handler goroutines even when the test drives it
+// serially.
+func mutableSessionID(initial string) (setID func(string), resolver SessionIDResolver) {
+	var cur atomic.Value
+	cur.Store(initial)
+	setID = func(id string) { cur.Store(id) }
+	resolver = func(_ context.Context) string {
+		v, _ := cur.Load().(string)
+		return v
+	}
+	return setID, resolver
 }
 
 // ---------------------------------------------------------------------------
@@ -38,6 +56,7 @@ func withTestSessionID(t *testing.T, id string) {
 // Single-session: N rapid calls — first Burst succeed, the rest are
 // rate-limited with a safe caller-facing message.
 func TestTribalMineOnDemand_RateLimitSingleSession(t *testing.T) {
+	t.Parallel()
 	const (
 		repo    = "test-repo"
 		symbol  = "HandleRequest"
@@ -56,8 +75,10 @@ func TestTribalMineOnDemand_RateLimitSingleSession(t *testing.T) {
 	})
 	t.Cleanup(func() { _ = limiter.Close() })
 
-	withTestSessionID(t, "sess-A")
-	handler := TribalMineOnDemandRateLimitedHandler(pool, factory, limiter, nil)
+	handler := TribalMineOnDemandRateLimitedHandler(
+		pool, factory, limiter, nil,
+		WithSessionIDResolver(constSessionID("sess-A")),
+	)
 
 	req := &tribalFakeRequest{args: map[string]any{
 		"symbol": symbol,
@@ -97,6 +118,7 @@ func TestTribalMineOnDemand_RateLimitSingleSession(t *testing.T) {
 
 // Two sessions: each gets its own bucket (isolated).
 func TestTribalMineOnDemand_RateLimitPerSessionIsolation(t *testing.T) {
+	t.Parallel()
 	const (
 		repo    = "test-repo"
 		symbol  = "HandleRequest"
@@ -115,11 +137,14 @@ func TestTribalMineOnDemand_RateLimitPerSessionIsolation(t *testing.T) {
 	})
 	t.Cleanup(func() { _ = limiter.Close() })
 
-	handler := TribalMineOnDemandRateLimitedHandler(pool, factory, limiter, nil)
+	setSession, resolver := mutableSessionID("sess-A")
+	handler := TribalMineOnDemandRateLimitedHandler(
+		pool, factory, limiter, nil,
+		WithSessionIDResolver(resolver),
+	)
 	req := &tribalFakeRequest{args: map[string]any{"symbol": symbol, "repo": repo}}
 
 	// Session A: first call OK, second rate-limited.
-	withTestSessionID(t, "sess-A")
 	if r, _ := handler(context.Background(), req); strings.Contains(strings.ToLower(r.Text()), "rate limit") {
 		t.Fatal("sess-A first call should not be rate-limited")
 	}
@@ -130,7 +155,7 @@ func TestTribalMineOnDemand_RateLimitPerSessionIsolation(t *testing.T) {
 
 	// Session B: independent bucket — first call must succeed even though
 	// sess-A has exhausted its bucket.
-	withTestSessionID(t, "sess-B")
+	setSession("sess-B")
 	rB, _ := handler(context.Background(), req)
 	if rB.IsError() && strings.Contains(strings.ToLower(rB.Text()), "rate") {
 		t.Errorf("sess-B leaked sess-A bucket — got rate-limit error: %q", rB.Text())
@@ -140,6 +165,7 @@ func TestTribalMineOnDemand_RateLimitPerSessionIsolation(t *testing.T) {
 // Anonymous session (no session ID): falls into shared anonymous bucket.
 // Behaviour documented: not rejected, but quota-limited.
 func TestTribalMineOnDemand_RateLimitAnonymousBucket(t *testing.T) {
+	t.Parallel()
 	const (
 		repo    = "test-repo"
 		symbol  = "HandleRequest"
@@ -158,8 +184,10 @@ func TestTribalMineOnDemand_RateLimitAnonymousBucket(t *testing.T) {
 	})
 	t.Cleanup(func() { _ = limiter.Close() })
 
-	withTestSessionID(t, "") // anonymous
-	handler := TribalMineOnDemandRateLimitedHandler(pool, factory, limiter, nil)
+	handler := TribalMineOnDemandRateLimitedHandler(
+		pool, factory, limiter, nil,
+		WithSessionIDResolver(constSessionID("")), // anonymous
+	)
 	req := &tribalFakeRequest{args: map[string]any{"symbol": symbol, "repo": repo}}
 
 	// First anonymous call succeeds.
@@ -205,15 +233,19 @@ func TestTribalMineOnDemand_LogsSessionIdentity(t *testing.T) {
 	})
 	t.Cleanup(func() { _ = limiter.Close() })
 
-	// Capture log output.
+	// Capture log output. This test mutates the process-global default
+	// logger, so it cannot run in parallel with other tests that do the
+	// same. Keep it serial.
 	var buf bytes.Buffer
 	var bufMu sync.Mutex
 	prev := log.Writer()
 	log.SetOutput(&syncWriter{w: &buf, mu: &bufMu})
 	t.Cleanup(func() { log.SetOutput(prev) })
 
-	withTestSessionID(t, "sess-attributable")
-	handler := TribalMineOnDemandRateLimitedHandler(pool, factory, limiter, nil)
+	handler := TribalMineOnDemandRateLimitedHandler(
+		pool, factory, limiter, nil,
+		WithSessionIDResolver(constSessionID("sess-attributable")),
+	)
 	req := &tribalFakeRequest{args: map[string]any{"symbol": symbol, "repo": repo}}
 
 	if _, err := handler(context.Background(), req); err != nil {
@@ -239,6 +271,7 @@ func TestTribalMineOnDemand_LogsSessionIdentity(t *testing.T) {
 // budget accounting, and a budget-exceeded error is still surfaced
 // normally even under a permissive limiter.
 func TestTribalMineOnDemand_BudgetExceededStillSurfaced(t *testing.T) {
+	t.Parallel()
 	const (
 		repo    = "test-repo"
 		symbol  = "HandleRequest"
@@ -265,8 +298,10 @@ func TestTribalMineOnDemand_BudgetExceededStillSurfaced(t *testing.T) {
 	})
 	t.Cleanup(func() { _ = limiter.Close() })
 
-	withTestSessionID(t, "sess-X")
-	handler := TribalMineOnDemandRateLimitedHandler(pool, factory, limiter, nil)
+	handler := TribalMineOnDemandRateLimitedHandler(
+		pool, factory, limiter, nil,
+		WithSessionIDResolver(constSessionID("sess-X")),
+	)
 	req := &tribalFakeRequest{args: map[string]any{"symbol": symbol, "repo": repo}}
 
 	result, err := handler(context.Background(), req)
@@ -295,6 +330,7 @@ func TestTribalMineOnDemand_BudgetExceededStillSurfaced(t *testing.T) {
 // defaults in tests and legacy callers (parity with existing
 // TribalMineOnDemandHandler).
 func TestTribalMineOnDemand_NilLimiterBehavesAsUnlimited(t *testing.T) {
+	t.Parallel()
 	const (
 		repo    = "test-repo"
 		symbol  = "HandleRequest"
@@ -306,8 +342,10 @@ func TestTribalMineOnDemand_NilLimiterBehavesAsUnlimited(t *testing.T) {
 	llm := &fakeMineLLM{}
 	factory := buildFactory(llm, runner.Run, 10)
 
-	withTestSessionID(t, "any")
-	handler := TribalMineOnDemandRateLimitedHandler(pool, factory, nil, nil)
+	handler := TribalMineOnDemandRateLimitedHandler(
+		pool, factory, nil, nil,
+		WithSessionIDResolver(constSessionID("any")),
+	)
 	req := &tribalFakeRequest{args: map[string]any{"symbol": symbol, "repo": repo}}
 
 	// Even 100 rapid calls must never rate-limit with a nil limiter.
@@ -340,6 +378,8 @@ func TestTribalMineOnDemand_LogFieldsBoundedAndEscaped(t *testing.T) {
 	})
 	t.Cleanup(func() { _ = limiter.Close() })
 
+	// This test mutates the process-global default logger. Keep it serial
+	// so concurrent log-capture tests do not clobber each other.
 	var buf bytes.Buffer
 	var bufMu sync.Mutex
 	prev := log.Writer()
@@ -349,9 +389,11 @@ func TestTribalMineOnDemand_LogFieldsBoundedAndEscaped(t *testing.T) {
 	// 10 KB session ID with embedded newlines — must be truncated and
 	// %q-escaped so no raw newline reaches the log writer.
 	hostileID := strings.Repeat("A\n", 5000)
-	withTestSessionID(t, hostileID)
 
-	handler := TribalMineOnDemandRateLimitedHandler(pool, factory, limiter, nil)
+	handler := TribalMineOnDemandRateLimitedHandler(
+		pool, factory, limiter, nil,
+		WithSessionIDResolver(constSessionID(hostileID)),
+	)
 	req := &tribalFakeRequest{args: map[string]any{
 		"symbol": "Sym",
 		"repo":   repo,
@@ -373,6 +415,57 @@ func TestTribalMineOnDemand_LogFieldsBoundedAndEscaped(t *testing.T) {
 	// Total log bytes must be well under the raw hostile input size.
 	if len(logged) > 2000 {
 		t.Errorf("log not truncated: %d bytes (hostile id was %d bytes)", len(logged), len(hostileID))
+	}
+}
+
+// Race-freedom: multiple handlers, each with its own session resolver,
+// execute in parallel. The old package-level var sessionIDResolver pattern
+// would fail -race under this test because withTestSessionID mutates the
+// shared var while sibling goroutines read it. The constructor-injected
+// seam (WithSessionIDResolver) captures the resolver per-handler, so each
+// parallel goroutine reads only its own closure state. This test exists
+// specifically to pin the m7v.25 fix in place.
+func TestTribalMineOnDemand_ParallelHandlersAreRaceFree(t *testing.T) {
+	t.Parallel()
+	const (
+		repo    = "test-repo"
+		symbol  = "HandleRequest"
+		relPath = "pkg/handler.go"
+	)
+	pool := setupMineTestPool(t, repo, symbol, relPath)
+
+	// Permissive limiter: these sessions should never be rejected by the
+	// bucket; the point is to exercise the resolver under race conditions.
+	limiter := tribal.NewKeyedLimiter(tribal.KeyedLimiterConfig{
+		Rate:    100,
+		Burst:   100,
+		MaxKeys: 64,
+	})
+	t.Cleanup(func() { _ = limiter.Close() })
+
+	sessions := []string{"s1", "s2", "s3", "s4", "s5", "s6", "s7", "s8"}
+	for _, sid := range sessions {
+		sid := sid
+		t.Run(sid, func(t *testing.T) {
+			t.Parallel()
+			runner := &fakeMineRunner{}
+			llm := &fakeMineLLM{}
+			factory := buildFactory(llm, runner.Run, 10)
+
+			handler := TribalMineOnDemandRateLimitedHandler(
+				pool, factory, limiter, nil,
+				WithSessionIDResolver(constSessionID(sid)),
+			)
+			req := &tribalFakeRequest{args: map[string]any{
+				"symbol": symbol,
+				"repo":   repo,
+			}}
+			for i := 0; i < 5; i++ {
+				if _, err := handler(context.Background(), req); err != nil {
+					t.Fatalf("%s call %d: %v", sid, i, err)
+				}
+			}
+		})
 	}
 }
 
