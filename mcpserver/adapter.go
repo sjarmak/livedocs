@@ -137,8 +137,16 @@ func (r *requestAdapter) GetArguments() map[string]any {
 }
 
 // resultAdapter wraps *mcp.CallToolResult to satisfy ToolResult.
+//
+// The optional `cause` field carries a typed Go error for error results so
+// callers (middleware, tests) can use errors.Is to distinguish specific
+// denial classes (e.g., mcpserver.ErrRateLimited) without string-matching
+// the user-visible Text(). The cause is SERVER-SIDE ONLY — adaptHandler
+// forwards only raw.Unwrap() to the mcp-go transport, so cause never
+// crosses the wire. See NewErrorResultWithCause and ResultCause.
 type resultAdapter struct {
-	raw *mcp.CallToolResult
+	raw   *mcp.CallToolResult
+	cause error // optional; nil for non-error results and plain errors
 }
 
 func (r *resultAdapter) IsError() bool {
@@ -200,6 +208,44 @@ func NewErrorResult(text string) ToolResult {
 // NewErrorResultf creates a formatted error ToolResult.
 func NewErrorResultf(format string, args ...any) ToolResult {
 	return &resultAdapter{raw: mcp.NewToolResultError(fmt.Sprintf(format, args...))}
+}
+
+// NewErrorResultWithCause creates an error ToolResult that additionally
+// carries a typed Go error as its programmatic cause. The user-visible
+// text is `text`; the cause is retrievable server-side via ResultCause and
+// is intended for errors.Is comparisons against exported sentinels (e.g.
+// ErrRateLimited) so middleware and tests can branch on denial class
+// without matching wording in the user-facing message.
+//
+// The cause is NEVER serialized to the MCP client: adaptHandler only
+// forwards raw.Unwrap() to the transport. Pass nil for `cause` when no
+// programmatic identification is needed (use NewErrorResult instead).
+func NewErrorResultWithCause(cause error, text string) ToolResult {
+	return &resultAdapter{
+		raw:   mcp.NewToolResultError(text),
+		cause: cause,
+	}
+}
+
+// ResultCause returns the typed Go error cause attached to `r` (if any)
+// via NewErrorResultWithCause, or nil when no cause is attached or `r` is
+// not a resultAdapter produced by this package. Callers use this with
+// errors.Is to detect specific denial classes without string-matching the
+// user-visible Text().
+//
+// Returning nil for unknown ToolResult implementations is deliberate — a
+// caller expecting an mcpserver-produced denial must construct its results
+// through NewErrorResultWithCause; foreign implementations cannot carry a
+// cause and so should be treated as "no cause attached."
+func ResultCause(r ToolResult) error {
+	if r == nil {
+		return nil
+	}
+	ra, ok := r.(*resultAdapter)
+	if !ok {
+		return nil
+	}
+	return ra.cause
 }
 
 // ---------------------------------------------------------------------------

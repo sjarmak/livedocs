@@ -5,6 +5,7 @@ package mcpserver
 import (
 	"bytes"
 	"context"
+	"errors"
 	"log"
 	"strings"
 	"sync"
@@ -106,13 +107,114 @@ func TestTribalMineOnDemand_RateLimitSingleSession(t *testing.T) {
 	if !result.IsError() {
 		t.Fatalf("3rd call: expected error result, got text: %q", result.Text())
 	}
+	// Primary discriminator: typed sentinel via ResultCause (live_docs-m7v.26).
+	// String-matching the text is fragile against wording changes.
+	if !errors.Is(ResultCause(result), ErrRateLimited) {
+		t.Errorf("3rd call: cause should be ErrRateLimited, got %v (text=%q)",
+			ResultCause(result), result.Text())
+	}
 	text := result.Text()
+	// Secondary smoke check: user-visible text still mentions rate.
 	if !strings.Contains(strings.ToLower(text), "rate") {
-		t.Errorf("3rd call: error should mention rate limit, got %q", text)
+		t.Errorf("3rd call: error text should mention rate limit, got %q", text)
 	}
 	// Error message must be short / safe — no internal paths.
 	if len(text) > 512 {
 		t.Errorf("rate-limit error too long — possible leak: %q", text)
+	}
+}
+
+// Regression: the rate-limited denial result carries the exported
+// ErrRateLimited sentinel as its cause so callers can distinguish it
+// from budget-exceeded or transport errors without string-matching the
+// user-facing message (live_docs-m7v.26).
+func TestTribalMineOnDemand_RateLimitDenialCarriesSentinel(t *testing.T) {
+	t.Parallel()
+	const (
+		repo    = "test-repo"
+		symbol  = "HandleRequest"
+		relPath = "pkg/handler.go"
+	)
+	pool := setupMineTestPool(t, repo, symbol, relPath)
+
+	runner := &fakeMineRunner{}
+	llm := &fakeMineLLM{}
+	factory := buildFactory(llm, runner.Run, 100)
+
+	// Burst=1 + practically-zero refill → first call drains the bucket,
+	// second call is guaranteed to be rate-limited (no timing flake).
+	limiter := tribal.NewKeyedLimiter(tribal.KeyedLimiterConfig{
+		Rate:    0.0001,
+		Burst:   1,
+		MaxKeys: 16,
+	})
+	t.Cleanup(func() { _ = limiter.Close() })
+
+	handler := TribalMineOnDemandRateLimitedHandler(
+		pool, factory, limiter, nil,
+		WithSessionIDResolver(constSessionID("sess-sentinel")),
+	)
+	req := &tribalFakeRequest{args: map[string]any{"symbol": symbol, "repo": repo}}
+
+	// Drain the bucket.
+	if _, err := handler(context.Background(), req); err != nil {
+		t.Fatalf("drain call: unexpected transport err: %v", err)
+	}
+
+	result, err := handler(context.Background(), req)
+	if err != nil {
+		t.Fatalf("unexpected transport err: %v", err)
+	}
+	if !result.IsError() {
+		t.Fatalf("expected error result, got text: %q", result.Text())
+	}
+	if !errors.Is(ResultCause(result), ErrRateLimited) {
+		t.Fatalf("expected cause errors.Is ErrRateLimited, got %v", ResultCause(result))
+	}
+	// User-visible text must NOT embed the raw sentinel string
+	// ("mcpserver: rate limit exceeded") — the cause is for programmatic
+	// identification only; the text stays user-friendly.
+	if strings.Contains(result.Text(), "mcpserver:") {
+		t.Errorf("user-facing text leaked raw sentinel detail: %q", result.Text())
+	}
+}
+
+// Regression: admitted calls (not rate-limited) carry a nil cause so
+// callers cannot mistake a successful invocation — or a non-rate-limit
+// error — for a rate-limit denial. Pairs with
+// TestTribalMineOnDemand_RateLimitDenialCarriesSentinel.
+func TestTribalMineOnDemand_AdmittedCallHasNilCause(t *testing.T) {
+	t.Parallel()
+	const (
+		repo    = "test-repo"
+		symbol  = "HandleRequest"
+		relPath = "pkg/handler.go"
+	)
+	pool := setupMineTestPool(t, repo, symbol, relPath)
+
+	runner := &fakeMineRunner{}
+	llm := &fakeMineLLM{}
+	factory := buildFactory(llm, runner.Run, 10)
+
+	limiter := tribal.NewKeyedLimiter(tribal.KeyedLimiterConfig{
+		Rate:    100,
+		Burst:   100,
+		MaxKeys: 16,
+	})
+	t.Cleanup(func() { _ = limiter.Close() })
+
+	handler := TribalMineOnDemandRateLimitedHandler(
+		pool, factory, limiter, nil,
+		WithSessionIDResolver(constSessionID("sess-ok")),
+	)
+	req := &tribalFakeRequest{args: map[string]any{"symbol": symbol, "repo": repo}}
+
+	result, err := handler(context.Background(), req)
+	if err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
+	if errors.Is(ResultCause(result), ErrRateLimited) {
+		t.Errorf("admitted call must not carry ErrRateLimited cause (text=%q)", result.Text())
 	}
 }
 
@@ -145,20 +247,24 @@ func TestTribalMineOnDemand_RateLimitPerSessionIsolation(t *testing.T) {
 	req := &tribalFakeRequest{args: map[string]any{"symbol": symbol, "repo": repo}}
 
 	// Session A: first call OK, second rate-limited.
-	if r, _ := handler(context.Background(), req); strings.Contains(strings.ToLower(r.Text()), "rate limit") {
-		t.Fatal("sess-A first call should not be rate-limited")
+	// Primary discriminator is errors.Is against the exported sentinel
+	// (live_docs-m7v.26); text check kept as a secondary smoke signal.
+	if r, _ := handler(context.Background(), req); errors.Is(ResultCause(r), ErrRateLimited) {
+		t.Fatalf("sess-A first call should not be rate-limited (text=%q)", r.Text())
 	}
 	r2, _ := handler(context.Background(), req)
-	if !r2.IsError() || !strings.Contains(strings.ToLower(r2.Text()), "rate") {
-		t.Fatalf("sess-A second call should be rate-limited, got %q", r2.Text())
+	if !r2.IsError() || !errors.Is(ResultCause(r2), ErrRateLimited) {
+		t.Fatalf("sess-A second call should be rate-limited, got text=%q cause=%v",
+			r2.Text(), ResultCause(r2))
 	}
 
 	// Session B: independent bucket — first call must succeed even though
 	// sess-A has exhausted its bucket.
 	setSession("sess-B")
 	rB, _ := handler(context.Background(), req)
-	if rB.IsError() && strings.Contains(strings.ToLower(rB.Text()), "rate") {
-		t.Errorf("sess-B leaked sess-A bucket — got rate-limit error: %q", rB.Text())
+	if errors.Is(ResultCause(rB), ErrRateLimited) {
+		t.Errorf("sess-B leaked sess-A bucket — got rate-limit cause: %v (text=%q)",
+			ResultCause(rB), rB.Text())
 	}
 }
 
@@ -191,15 +297,18 @@ func TestTribalMineOnDemand_RateLimitAnonymousBucket(t *testing.T) {
 	req := &tribalFakeRequest{args: map[string]any{"symbol": symbol, "repo": repo}}
 
 	// First anonymous call succeeds.
+	// Primary discriminator is errors.Is against ErrRateLimited
+	// (live_docs-m7v.26).
 	r1, _ := handler(context.Background(), req)
-	if r1.IsError() && strings.Contains(strings.ToLower(r1.Text()), "rate") {
+	if errors.Is(ResultCause(r1), ErrRateLimited) {
 		t.Fatalf("anon first call should not be rate-limited: %q", r1.Text())
 	}
 
 	// Second anonymous call hits the shared anon bucket → rate-limited.
 	r2, _ := handler(context.Background(), req)
-	if !r2.IsError() || !strings.Contains(strings.ToLower(r2.Text()), "rate") {
-		t.Errorf("anon second call should be rate-limited (shared bucket), got %q", r2.Text())
+	if !r2.IsError() || !errors.Is(ResultCause(r2), ErrRateLimited) {
+		t.Errorf("anon second call should be rate-limited (shared bucket), got text=%q cause=%v",
+			r2.Text(), ResultCause(r2))
 	}
 }
 
@@ -315,8 +424,12 @@ func TestTribalMineOnDemand_BudgetExceededStillSurfaced(t *testing.T) {
 	// still be observable in the result body — assert that unconditionally
 	// rather than gating the check on IsError().
 	text := strings.ToLower(result.Text())
-	if strings.Contains(text, "rate limit") {
-		t.Fatalf("rate-limit fired before budget — should be orthogonal: %q", result.Text())
+	// Primary discriminator for "rate-limit did not fire" is errors.Is
+	// against the exported sentinel; budget errors never carry this cause
+	// (live_docs-m7v.26).
+	if errors.Is(ResultCause(result), ErrRateLimited) {
+		t.Fatalf("rate-limit fired before budget — should be orthogonal: text=%q cause=%v",
+			result.Text(), ResultCause(result))
 	}
 	if !strings.Contains(text, "budget") {
 		t.Errorf("budget-exceeded path did not surface 'budget' in result text: %q", result.Text())
@@ -349,13 +462,16 @@ func TestTribalMineOnDemand_NilLimiterBehavesAsUnlimited(t *testing.T) {
 	req := &tribalFakeRequest{args: map[string]any{"symbol": symbol, "repo": repo}}
 
 	// Even 100 rapid calls must never rate-limit with a nil limiter.
+	// Primary discriminator is the exported ErrRateLimited sentinel
+	// (live_docs-m7v.26).
 	for i := 0; i < 100; i++ {
 		result, err := handler(context.Background(), req)
 		if err != nil {
 			t.Fatalf("call %d err: %v", i, err)
 		}
-		if result.IsError() && strings.Contains(strings.ToLower(result.Text()), "rate limit") {
-			t.Fatalf("nil limiter unexpectedly rate-limited at call %d: %q", i, result.Text())
+		if errors.Is(ResultCause(result), ErrRateLimited) {
+			t.Fatalf("nil limiter unexpectedly rate-limited at call %d: %q",
+				i, result.Text())
 		}
 	}
 }
