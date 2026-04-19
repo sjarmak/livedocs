@@ -27,7 +27,7 @@ every package found in the repository's claims database.`,
 
 		repoName := args[0]
 
-		dataDir, _ := cmd.Flags().GetString("data-dir")
+		dataDir := mustGetString(cmd, "data-dir")
 
 		pool := mcpserver.NewDBPool(dataDir, mcpserver.DefaultMaxOpenDBs)
 		defer pool.Close()

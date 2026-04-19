@@ -99,7 +99,7 @@ func runDiff(cmd *cobra.Command, repoDir, fromCommit, toCommit string) error {
 	}
 
 	// 2. Set up the pipeline infrastructure.
-	repoName, _ := cmd.Flags().GetString("repo")
+	repoName := mustGetString(cmd, "repo")
 	if repoName == "" {
 		repoName = filepath.Base(repoDir)
 	}
@@ -188,7 +188,7 @@ func runDiff(cmd *cobra.Command, repoDir, fromCommit, toCommit string) error {
 	}
 
 	// 8. Output.
-	format, _ := cmd.Flags().GetString("format")
+	format := mustGetString(cmd, "format")
 	switch format {
 	case "json":
 		enc := json.NewEncoder(out)

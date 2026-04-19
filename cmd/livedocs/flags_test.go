@@ -128,3 +128,112 @@ func TestResetCmdFlags_NoFlags(t *testing.T) {
 
 // Compile-time guard: erroringValue must satisfy pflag.Value.
 var _ pflag.Value = (*erroringValue)(nil)
+
+// --- mustGetX helper tests (live_docs-m7v.46) ---
+//
+// The mustGetX helpers replace the `_, _ := cmd.Flags().GetX(name)` discard
+// convention used by every cmd/livedocs subcommand. They panic when the flag
+// is unknown or has the wrong type — both are structural bugs that should crash
+// the CLI immediately rather than be masked by a zero-value return.
+
+// assertPanicContains runs fn and fails if it does not panic with a message
+// containing every needle.
+func assertPanicContains(t *testing.T, fn func(), needles ...string) {
+	t.Helper()
+	defer func() {
+		r := recover()
+		if r == nil {
+			t.Fatalf("expected panic, got none")
+		}
+		msg := fmt.Sprintf("%v", r)
+		for _, n := range needles {
+			if !strings.Contains(msg, n) {
+				t.Errorf("panic message %q missing %q", msg, n)
+			}
+		}
+	}()
+	fn()
+}
+
+func TestMustGetString(t *testing.T) {
+	cmd := &cobra.Command{Use: "test"}
+	cmd.Flags().String("name", "default-name", "")
+	if got := mustGetString(cmd, "name"); got != "default-name" {
+		t.Errorf("mustGetString = %q, want %q", got, "default-name")
+	}
+	if err := cmd.Flags().Set("name", "v"); err != nil {
+		t.Fatalf("set: %v", err)
+	}
+	if got := mustGetString(cmd, "name"); got != "v" {
+		t.Errorf("mustGetString after Set = %q, want %q", got, "v")
+	}
+	assertPanicContains(t, func() { mustGetString(cmd, "missing") },
+		"missing", "test")
+}
+
+func TestMustGetBool(t *testing.T) {
+	cmd := &cobra.Command{Use: "test"}
+	cmd.Flags().Bool("enabled", false, "")
+	if mustGetBool(cmd, "enabled") {
+		t.Errorf("mustGetBool default = true, want false")
+	}
+	if err := cmd.Flags().Set("enabled", "true"); err != nil {
+		t.Fatalf("set: %v", err)
+	}
+	if !mustGetBool(cmd, "enabled") {
+		t.Errorf("mustGetBool after Set = false, want true")
+	}
+	assertPanicContains(t, func() { mustGetBool(cmd, "missing") },
+		"missing", "test")
+}
+
+func TestMustGetInt(t *testing.T) {
+	cmd := &cobra.Command{Use: "test"}
+	cmd.Flags().Int("count", 7, "")
+	if got := mustGetInt(cmd, "count"); got != 7 {
+		t.Errorf("mustGetInt = %d, want 7", got)
+	}
+	assertPanicContains(t, func() { mustGetInt(cmd, "missing") },
+		"missing", "test")
+}
+
+func TestMustGetInt64(t *testing.T) {
+	cmd := &cobra.Command{Use: "test"}
+	cmd.Flags().Int64("count64", 1234567890123, "")
+	if got := mustGetInt64(cmd, "count64"); got != 1234567890123 {
+		t.Errorf("mustGetInt64 = %d, want 1234567890123", got)
+	}
+	assertPanicContains(t, func() { mustGetInt64(cmd, "missing") },
+		"missing", "test")
+}
+
+func TestMustGetDuration(t *testing.T) {
+	cmd := &cobra.Command{Use: "test"}
+	cmd.Flags().Duration("interval", 30_000_000_000, "") // 30s
+	got := mustGetDuration(cmd, "interval")
+	if got.String() != "30s" {
+		t.Errorf("mustGetDuration = %s, want 30s", got)
+	}
+	assertPanicContains(t, func() { mustGetDuration(cmd, "missing") },
+		"missing", "test")
+}
+
+func TestMustGetStringSlice(t *testing.T) {
+	cmd := &cobra.Command{Use: "test"}
+	cmd.Flags().StringSlice("items", []string{"a", "b"}, "")
+	got := mustGetStringSlice(cmd, "items")
+	if len(got) != 2 || got[0] != "a" || got[1] != "b" {
+		t.Errorf("mustGetStringSlice = %v, want [a b]", got)
+	}
+	assertPanicContains(t, func() { mustGetStringSlice(cmd, "missing") },
+		"missing", "test")
+}
+
+// TestMustGet_WrongType verifies that asking for the wrong type also panics
+// (same code path as unknown flag, but exercised through a real type mismatch).
+func TestMustGet_WrongType(t *testing.T) {
+	cmd := &cobra.Command{Use: "test"}
+	cmd.Flags().String("name", "x", "")
+	assertPanicContains(t, func() { mustGetBool(cmd, "name") },
+		"name", "test")
+}

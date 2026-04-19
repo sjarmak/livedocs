@@ -61,7 +61,7 @@ revision flags, estimates cost and requires --confirm to proceed.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		defer resetCmdFlags(cmd)
 
-		source, _ := cmd.Flags().GetString("source")
+		source := mustGetString(cmd, "source")
 		switch source {
 		case "", "local":
 			return runExtractLocal(cmd, args)
@@ -85,8 +85,8 @@ func runExtractLocal(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("resolve repo path: %w", err)
 	}
 
-	repoFlag, _ := cmd.Flags().GetString("repo")
-	output, _ := cmd.Flags().GetString("output")
+	repoFlag := mustGetString(cmd, "repo")
+	output := mustGetString(cmd, "output")
 
 	repoName := repoFlag
 	if repoName == "" {
@@ -97,8 +97,8 @@ func runExtractLocal(cmd *cobra.Command, args []string) error {
 }
 
 func runExtractClone(cmd *cobra.Command) error {
-	repoFlag, _ := cmd.Flags().GetString("repo")
-	output, _ := cmd.Flags().GetString("output")
+	repoFlag := mustGetString(cmd, "repo")
+	output := mustGetString(cmd, "output")
 
 	if repoFlag == "" {
 		return fmt.Errorf("--repo is required when --source clone is used")
@@ -435,9 +435,9 @@ func runExtract(ctx context.Context, cmd *cobra.Command, repoDir, repoName, outp
 		return fmt.Errorf("walk repo: %w", err)
 	}
 
-	tier2, _ := cmd.Flags().GetBool("tier2")
-	tribalMode, _ := cmd.Flags().GetString("tribal")
-	maxFilesFlag, _ := cmd.Flags().GetInt("max-files")
+	tier2 := mustGetBool(cmd, "tier2")
+	tribalMode := mustGetString(cmd, "tribal")
+	maxFilesFlag := mustGetInt(cmd, "max-files")
 
 	// Phase 3: Tier 2 semantic extraction (if requested).
 	var semanticStored int
@@ -504,8 +504,8 @@ func runExtract(ctx context.Context, cmd *cobra.Command, repoDir, repoName, outp
 				return fmt.Errorf("tribal extraction: %w", err)
 			}
 			fmt.Fprintf(out, "Running tribal knowledge extraction (LLM)...\n")
-			acceptUnknownGh, _ := cmd.Flags().GetBool("accept-unknown-gh-version")
-			forceRemine, _ := cmd.Flags().GetBool("force-remine")
+			acceptUnknownGh := mustGetBool(cmd, "accept-unknown-gh-version")
+			forceRemine := mustGetBool(cmd, "force-remine")
 			if err := runLLMTribalExtraction(ctx, out, claimsDB, repoDir, repoName, maxFiles, acceptUnknownGh, forceRemine); err != nil {
 				return fmt.Errorf("LLM tribal extraction: %w", err)
 			}
@@ -575,12 +575,12 @@ func runExtractSourcegraph(cmd *cobra.Command) error {
 	ctx := cmd.Context()
 	out := cmd.OutOrStdout()
 
-	repoFlag, _ := cmd.Flags().GetString("repo")
-	dataDir, _ := cmd.Flags().GetString("data-dir")
-	fromRevFlag, _ := cmd.Flags().GetString("from-rev")
-	toRevFlag, _ := cmd.Flags().GetString("to-rev")
-	confirm, _ := cmd.Flags().GetBool("confirm")
-	concurrency, _ := cmd.Flags().GetInt("concurrency")
+	repoFlag := mustGetString(cmd, "repo")
+	dataDir := mustGetString(cmd, "data-dir")
+	fromRevFlag := mustGetString(cmd, "from-rev")
+	toRevFlag := mustGetString(cmd, "to-rev")
+	confirm := mustGetBool(cmd, "confirm")
+	concurrency := mustGetInt(cmd, "concurrency")
 
 	// Validate required inputs.
 	if os.Getenv("SRC_ACCESS_TOKEN") == "" {

@@ -43,22 +43,22 @@ is no longer an ancestor of the current HEAD.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		defer resetCmdFlags(cmd)
 
-		source, _ := cmd.Flags().GetString("source")
+		source := mustGetString(cmd, "source")
 
 		// Sourcegraph remote mode.
 		if source == "sourcegraph" {
 			return runWatchSourcegraph(cmd)
 		}
 
-		configPath, _ := cmd.Flags().GetString("config")
-		reposDir, _ := cmd.Flags().GetString("repos-dir")
-		repoName, _ := cmd.Flags().GetString("repo")
-		output, _ := cmd.Flags().GetString("output")
-		stateFile, _ := cmd.Flags().GetString("state-file")
-		interval, _ := cmd.Flags().GetDuration("interval")
-		deepInterval, _ := cmd.Flags().GetDuration("deep-interval")
-		enrich, _ := cmd.Flags().GetBool("enrich")
-		enrichDebounce, _ := cmd.Flags().GetDuration("enrich-debounce")
+		configPath := mustGetString(cmd, "config")
+		reposDir := mustGetString(cmd, "repos-dir")
+		repoName := mustGetString(cmd, "repo")
+		output := mustGetString(cmd, "output")
+		stateFile := mustGetString(cmd, "state-file")
+		interval := mustGetDuration(cmd, "interval")
+		deepInterval := mustGetDuration(cmd, "deep-interval")
+		enrich := mustGetBool(cmd, "enrich")
+		enrichDebounce := mustGetDuration(cmd, "enrich-debounce")
 
 		// Determine which mode we're in.
 		hasPath := len(args) == 1
@@ -321,11 +321,11 @@ func runWatchSourcegraph(cmd *cobra.Command) error {
 	ctx := cmd.Context()
 	out := cmd.OutOrStdout()
 
-	repos, _ := cmd.Flags().GetString("repos")
-	dataDir, _ := cmd.Flags().GetString("data-dir")
-	stateFile, _ := cmd.Flags().GetString("state-file")
-	intervalFlag, _ := cmd.Flags().GetDuration("interval")
-	concurrency, _ := cmd.Flags().GetInt("concurrency")
+	repos := mustGetString(cmd, "repos")
+	dataDir := mustGetString(cmd, "data-dir")
+	stateFile := mustGetString(cmd, "state-file")
+	intervalFlag := mustGetDuration(cmd, "interval")
+	concurrency := mustGetInt(cmd, "concurrency")
 
 	// Validate required inputs.
 	if os.Getenv("SRC_ACCESS_TOKEN") == "" {

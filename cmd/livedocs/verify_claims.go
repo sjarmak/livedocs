@@ -42,10 +42,10 @@ func init() {
 func runVerifyClaims(cmd *cobra.Command, args []string) error {
 	defer resetCmdFlags(cmd)
 
-	dbFlag, _ := cmd.Flags().GetString("db")
-	staleness, _ := cmd.Flags().GetBool("staleness")
-	canary, _ := cmd.Flags().GetBool("canary")
-	checkEx, _ := cmd.Flags().GetBool("check-existing")
+	dbFlag := mustGetString(cmd, "db")
+	staleness := mustGetBool(cmd, "staleness")
+	canary := mustGetBool(cmd, "canary")
+	checkEx := mustGetBool(cmd, "check-existing")
 
 	repoPath := "."
 	if len(args) > 0 {

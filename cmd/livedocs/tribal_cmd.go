@@ -173,10 +173,10 @@ var tribalCorrectCmd = &cobra.Command{
 	RunE: func(cmd *cobra.Command, args []string) error {
 		defer resetCmdFlags(cmd)
 
-		dbPath, _ := cmd.Flags().GetString("db")
-		factID, _ := cmd.Flags().GetInt64("fact-id")
-		body, _ := cmd.Flags().GetString("body")
-		reason, _ := cmd.Flags().GetString("reason")
+		dbPath := mustGetString(cmd, "db")
+		factID := mustGetInt64(cmd, "fact-id")
+		body := mustGetString(cmd, "body")
+		reason := mustGetString(cmd, "reason")
 
 		if err := ValidateDBPath(dbPath, ""); err != nil {
 			return err
@@ -230,10 +230,10 @@ var tribalSupersedeCmd = &cobra.Command{
 	RunE: func(cmd *cobra.Command, args []string) error {
 		defer resetCmdFlags(cmd)
 
-		dbPath, _ := cmd.Flags().GetString("db")
-		factID, _ := cmd.Flags().GetInt64("fact-id")
-		body, _ := cmd.Flags().GetString("body")
-		reason, _ := cmd.Flags().GetString("reason")
+		dbPath := mustGetString(cmd, "db")
+		factID := mustGetInt64(cmd, "fact-id")
+		body := mustGetString(cmd, "body")
+		reason := mustGetString(cmd, "reason")
 
 		if err := ValidateDBPath(dbPath, ""); err != nil {
 			return err
@@ -292,9 +292,9 @@ var tribalDeleteCmd = &cobra.Command{
 	RunE: func(cmd *cobra.Command, args []string) error {
 		defer resetCmdFlags(cmd)
 
-		dbPath, _ := cmd.Flags().GetString("db")
-		factID, _ := cmd.Flags().GetInt64("fact-id")
-		reason, _ := cmd.Flags().GetString("reason")
+		dbPath := mustGetString(cmd, "db")
+		factID := mustGetInt64(cmd, "fact-id")
+		reason := mustGetString(cmd, "reason")
 
 		if err := ValidateDBPath(dbPath, ""); err != nil {
 			return err
@@ -456,10 +456,10 @@ Budget-tracked: stops after --budget LLM calls even if more facts remain.`,
 			return err
 		}
 
-		sampleSize, _ := cmd.Flags().GetInt("sample")
-		maxAgeStr, _ := cmd.Flags().GetString("max-age")
-		budget, _ := cmd.Flags().GetInt("budget")
-		dryRun, _ := cmd.Flags().GetBool("dry-run")
+		sampleSize := mustGetInt(cmd, "sample")
+		maxAgeStr := mustGetString(cmd, "max-age")
+		budget := mustGetInt(cmd, "budget")
+		dryRun := mustGetBool(cmd, "dry-run")
 
 		if sampleSize <= 0 {
 			return fmt.Errorf("--sample must be > 0, got %d", sampleSize)

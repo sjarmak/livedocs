@@ -18,8 +18,8 @@ var initCmd = &cobra.Command{
 	RunE: func(cmd *cobra.Command, args []string) error {
 		defer resetCmdFlags(cmd)
 
-		force, _ := cmd.Flags().GetBool("force")
-		hook, _ := cmd.Flags().GetBool("hook")
+		force := mustGetBool(cmd, "force")
+		hook := mustGetBool(cmd, "hook")
 
 		path := "."
 		if len(args) > 0 {
