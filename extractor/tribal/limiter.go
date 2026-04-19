@@ -66,12 +66,13 @@ type KeyedLimiterConfig struct {
 	// DefaultKeyedLimiterMaxKeys.
 	//
 	// SECURITY-SENSITIVE: sizing this below the expected concurrent
-	// session count enables an LRU-thrash degradation where an adversary
-	// minting distinct synthetic IDs evicts legitimate sessions' buckets.
-	// Each eviction resets the victim's bucket to full burst, so eviction
-	// is net-zero or net-negative for the attacker but disruptive to
-	// accounting. Set MaxKeys well above the expected session population.
-	// See live_docs-m7v.24 for planned state-persistence across eviction.
+	// session count degrades fairness (active sessions may be swapped in
+	// and out of the active map), but as of live_docs-m7v.24 it no longer
+	// grants attackers a burst-refresh advantage: evicted limiters are
+	// preserved in a same-size snapshot cache and restored on re-insertion,
+	// so thrashing MaxKeys+1 distinct IDs cannot reset a victim's drained
+	// bucket. Still prefer to set MaxKeys above the expected session
+	// population to avoid churn between the two caches.
 	MaxKeys int
 
 	// AnonymousID is the bucket used for empty-string keys. All
@@ -101,6 +102,14 @@ type lruEntry struct {
 //
 // The zero value is NOT usable; construct via NewKeyedLimiter. Calling
 // methods on a zero-value KeyedLimiter will panic on the first insert.
+//
+// Thrash-reset defense (live_docs-m7v.24): when a key is evicted from the
+// active LRU its *rate.Limiter is moved into a same-size snapshot LRU
+// instead of being discarded. On re-insertion the snapshot entry is
+// restored, so bucket state (tokens + last-refill timestamp) survives
+// eviction. An adversary cycling MaxKeys+1 distinct IDs therefore cannot
+// grant a victim a fresh burst by triggering eviction. Total resident
+// limiters are bounded at 2 * MaxKeys (active + snapshot).
 type KeyedLimiter struct {
 	mu      sync.Mutex
 	rate    rate.Limit
@@ -109,6 +118,13 @@ type KeyedLimiter struct {
 	anonID  string
 	byKey   map[string]*list.Element // key -> *list.Element whose Value is *lruEntry
 	lru     *list.List               // front = most-recently-used, back = LRU
+
+	// Snapshot cache: preserves evicted limiters so re-inserting the same
+	// key restores (tokens, last-refill) rather than granting a fresh
+	// burst. Same-size LRU as the active map so it cannot become a DoS
+	// surface beyond O(MaxKeys).
+	snapByKey map[string]*list.Element // key -> *list.Element whose Value is *lruEntry
+	snapLRU   *list.List               // front = most-recently-inserted, back = LRU
 }
 
 // NewKeyedLimiter constructs a KeyedLimiter with the given config, applying
@@ -127,12 +143,14 @@ func NewKeyedLimiter(cfg KeyedLimiterConfig) *KeyedLimiter {
 		cfg.AnonymousID = DefaultAnonymousID
 	}
 	return &KeyedLimiter{
-		rate:    rate.Limit(cfg.Rate),
-		burst:   cfg.Burst,
-		maxKeys: cfg.MaxKeys,
-		anonID:  cfg.AnonymousID,
-		byKey:   make(map[string]*list.Element, cfg.MaxKeys),
-		lru:     list.New(),
+		rate:      rate.Limit(cfg.Rate),
+		burst:     cfg.Burst,
+		maxKeys:   cfg.MaxKeys,
+		anonID:    cfg.AnonymousID,
+		byKey:     make(map[string]*list.Element, cfg.MaxKeys),
+		lru:       list.New(),
+		snapByKey: make(map[string]*list.Element, cfg.MaxKeys),
+		snapLRU:   list.New(),
 	}
 }
 
@@ -175,6 +193,14 @@ func (l *KeyedLimiter) hasKey(key string) bool {
 	return ok
 }
 
+// snapshotSize reports the current number of entries in the snapshot
+// cache. Used by tests to assert the snapshot cache stays bounded.
+func (l *KeyedLimiter) snapshotSize() int {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.snapLRU.Len()
+}
+
 // Close releases any resources. Currently a no-op (no goroutines) —
 // retained so callers can use the standard defer-close idiom and so
 // future additions (e.g. a metrics emitter) don't require changing
@@ -199,30 +225,85 @@ func (l *KeyedLimiter) bucketKey(key string) string {
 // limiterForKey returns the *rate.Limiter for bucketKey, inserting a new
 // one if needed and evicting the LRU entry when at capacity. The returned
 // limiter is also promoted to MRU on every call.
+//
+// Eviction semantics (live_docs-m7v.24): an entry evicted from the active
+// LRU is moved into the snapshot LRU rather than discarded. On re-insertion
+// of the same key, the snapshot entry is restored so (tokens, last-refill
+// timestamp) carry over, preventing a thrash-reset burst refresh. The
+// snapshot LRU is itself bounded at maxKeys so the combined resident set
+// stays O(maxKeys).
 func (l *KeyedLimiter) limiterForKey(bucketKey string) *rate.Limiter {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
+	// Already active — MRU promote and return.
 	if el, ok := l.byKey[bucketKey]; ok {
 		l.lru.MoveToFront(el)
 		return el.Value.(*lruEntry).limiter
 	}
 
-	// Evict LRU entries until we have room for a new key.
+	// Pop the snapshot for this key BEFORE we evict anyone from the active
+	// LRU, so that making room here cannot itself push our own snapshot out
+	// of a full snapshot LRU. popSnapshotLocked returns nil for keys with no
+	// saved state, in which case a fresh limiter is allocated below.
+	ent := l.popSnapshotLocked(bucketKey)
+
+	// Make room in the active LRU, moving any evicted entries into the
+	// snapshot LRU so their bucket state survives (live_docs-m7v.24).
 	for l.lru.Len() >= l.maxKeys {
 		back := l.lru.Back()
 		if back == nil {
 			break
 		}
 		l.lru.Remove(back)
-		delete(l.byKey, back.Value.(*lruEntry).key)
+		evicted := back.Value.(*lruEntry)
+		delete(l.byKey, evicted.key)
+		l.storeSnapshotLocked(evicted)
 	}
 
-	ent := &lruEntry{
-		key:     bucketKey,
-		limiter: rate.NewLimiter(l.rate, l.burst),
+	if ent == nil {
+		ent = &lruEntry{
+			key:     bucketKey,
+			limiter: rate.NewLimiter(l.rate, l.burst),
+		}
 	}
 	el := l.lru.PushFront(ent)
 	l.byKey[bucketKey] = el
 	return ent.limiter
+}
+
+// storeSnapshotLocked places an evicted active entry into the snapshot LRU
+// so its *rate.Limiter can be restored if the same key returns. Caller
+// must hold l.mu.
+//
+// Invariant: any given key is in at most one of {active LRU, snapshot LRU}
+// at a time. Insertion pops the snapshot before pushing to active; eviction
+// pushes from active to snapshot. Therefore the key being stored here is
+// guaranteed not to already be present in the snapshot map.
+//
+// If the snapshot LRU is already at maxKeys, the oldest snapshot entry is
+// dropped — this is the only place we truly discard a limiter.
+func (l *KeyedLimiter) storeSnapshotLocked(ent *lruEntry) {
+	for l.snapLRU.Len() >= l.maxKeys {
+		back := l.snapLRU.Back()
+		if back == nil {
+			break
+		}
+		l.snapLRU.Remove(back)
+		delete(l.snapByKey, back.Value.(*lruEntry).key)
+	}
+	el := l.snapLRU.PushFront(ent)
+	l.snapByKey[ent.key] = el
+}
+
+// popSnapshotLocked returns and removes the snapshot entry for bucketKey,
+// or nil if no snapshot exists. Caller must hold l.mu.
+func (l *KeyedLimiter) popSnapshotLocked(bucketKey string) *lruEntry {
+	el, ok := l.snapByKey[bucketKey]
+	if !ok {
+		return nil
+	}
+	l.snapLRU.Remove(el)
+	delete(l.snapByKey, bucketKey)
+	return el.Value.(*lruEntry)
 }
