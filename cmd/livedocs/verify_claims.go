@@ -11,7 +11,6 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
-	"github.com/spf13/pflag"
 
 	"github.com/sjarmak/livedocs/db"
 	"github.com/sjarmak/livedocs/drift"
@@ -48,12 +47,9 @@ func init() {
 }
 
 func runVerifyClaims(cmd *cobra.Command, args []string) error {
-	// Reset flag state for any subsequent invocation of this command.
-	// pflag.Parse only mutates flags named in the current args, so previously
-	// set values persist across Execute() calls. Without this reset, a test
-	// (or process) that runs `verify-claims --check-existing` leaves the flag
-	// set to true for every later invocation that omits --check-existing.
-	defer resetVerifyClaimsFlags(cmd)
+	// Reset flag state for any subsequent invocation of this command. See
+	// resetCmdFlags in flags.go for rationale (live_docs-m7v.28, m7v.36).
+	defer resetCmdFlags(cmd)
 
 	repoPath := "."
 	if len(args) > 0 {
@@ -91,19 +87,6 @@ func runVerifyClaims(cmd *cobra.Command, args []string) error {
 	}
 
 	return runBasicVerify(cdb, absRepo, out)
-}
-
-// resetVerifyClaimsFlags restores every local flag on cmd to its default value
-// so state does not leak between successive invocations of verify-claims.
-// Cobra/pflag does not reset flag values between Execute() calls — unset flags
-// retain whatever value a previous call assigned.
-func resetVerifyClaimsFlags(cmd *cobra.Command) {
-	cmd.Flags().VisitAll(func(f *pflag.Flag) {
-		if err := f.Value.Set(f.DefValue); err != nil {
-			fmt.Fprintf(os.Stderr, "warning: failed to reset flag %q to default %q: %v\n", f.Name, f.DefValue, err)
-		}
-		f.Changed = false
-	})
 }
 
 // resolveClaimsDBPath determines the database file path. If dbFlag is set,

@@ -9,7 +9,6 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
-	"github.com/spf13/pflag"
 
 	"github.com/sjarmak/livedocs/db"
 	"github.com/sjarmak/livedocs/extractor"
@@ -67,13 +66,9 @@ func init() {
 }
 
 func runEnrich(cmd *cobra.Command, args []string) error {
-	// Reset flag state for any subsequent invocation of this command.
-	// pflag.Parse only mutates flags named in the current args, so previously
-	// set values persist across Execute() calls. Without this reset, a test
-	// (or process) that runs `enrich --dry-run` leaves the flag set to true
-	// for every later invocation that omits --dry-run. Same pattern as
-	// resetVerifyClaimsFlags in verify_claims.go (see m7v.28).
-	defer resetEnrichFlags(cmd)
+	// Reset flag state for any subsequent invocation of this command. See
+	// resetCmdFlags in flags.go for rationale (live_docs-m7v.28, m7v.36).
+	defer resetCmdFlags(cmd)
 
 	out := cmd.OutOrStdout()
 
@@ -187,20 +182,6 @@ func runEnrich(cmd *cobra.Command, args []string) error {
 	fmt.Fprintf(out, "  Elapsed time:     %s\n", totalSummary.ElapsedTime.Round(time.Millisecond))
 
 	return nil
-}
-
-// resetEnrichFlags restores every local flag on cmd to its default value so
-// state does not leak between successive invocations of enrich. Cobra/pflag
-// does not reset flag values between Execute() calls — unset flags retain
-// whatever value a previous call assigned. See m7v.28 for the same pattern
-// applied to verify-claims.
-func resetEnrichFlags(cmd *cobra.Command) {
-	cmd.Flags().VisitAll(func(f *pflag.Flag) {
-		if err := f.Value.Set(f.DefValue); err != nil {
-			fmt.Fprintf(os.Stderr, "warning: failed to reset flag %q to default %q: %v\n", f.Name, f.DefValue, err)
-		}
-		f.Changed = false
-	})
 }
 
 // runInitialCostEstimate counts symbols across all DBs and prints
