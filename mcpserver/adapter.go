@@ -48,6 +48,27 @@ type ToolResult interface {
 	Unwrap() *mcp.CallToolResult
 }
 
+// Causer is an optional interface that a ToolResult implementation may
+// satisfy to expose a typed Go error cause for programmatic inspection
+// (e.g., errors.Is against an exported sentinel like ErrRateLimited).
+//
+// ResultCause checks for this interface, so foreign ToolResult
+// implementations — including test doubles defined in other packages —
+// can participate in cause propagation simply by adding a Cause() method.
+// Implementations with no cause to expose should return nil.
+//
+// Why a separate interface (instead of folding Cause into ToolResult):
+// adding Cause() to ToolResult would be a breaking change for every
+// implementer that does not care about typed causes. Causer is purely
+// additive — opt-in for implementers that want the contract, transparent
+// for those that do not. See live_docs-m7v.38 for the design rationale.
+type Causer interface {
+	// Cause returns the typed Go error cause of this result, or nil if
+	// none. This is server-side only and is never serialized to the MCP
+	// transport.
+	Cause() error
+}
+
 // ToolHandler is the adapter-level handler signature. Handlers accept a
 // ToolRequest (not mcp.CallToolRequest) and return a ToolResult.
 type ToolHandler func(ctx context.Context, req ToolRequest) (ToolResult, error)
@@ -167,6 +188,15 @@ func (r *resultAdapter) Unwrap() *mcp.CallToolResult {
 	return r.raw
 }
 
+// Cause satisfies the Causer interface for *resultAdapter, returning the
+// typed Go error attached via NewErrorResultWithCause (or nil for plain
+// text/error results). Callers should normally use the package-level
+// ResultCause helper rather than calling this directly, both for nil
+// safety and so foreign ToolResult implementations are handled uniformly.
+func (r *resultAdapter) Cause() error {
+	return r.cause
+}
+
 // WrapRequest creates a ToolRequest from an mcp.CallToolRequest.
 func WrapRequest(req mcp.CallToolRequest) ToolRequest {
 	return &requestAdapter{raw: req}
@@ -235,28 +265,28 @@ func NewErrorResultWithCause(text string, cause error) ToolResult {
 	}
 }
 
-// ResultCause returns the typed Go error cause attached to `r` (if any)
-// via NewErrorResultWithCause, or nil when no cause is attached or `r` is
-// not a resultAdapter produced by this package. Callers MUST use this
-// function (not errors.Is applied to the ToolResult directly) to detect
-// specific denial classes: resultAdapter's Unwrap returns
-// *mcp.CallToolResult rather than satisfying the standard
+// ResultCause returns the typed Go error cause attached to `r` (if any),
+// or nil when no cause is attached or `r` does not satisfy the Causer
+// interface. Callers MUST use this function (not errors.Is applied to the
+// ToolResult directly) to detect specific denial classes: resultAdapter's
+// Unwrap returns *mcp.CallToolResult rather than satisfying the standard
 // errors.Unwrap() error convention, so the standard errors chain-walk
 // cannot reach the cause field.
 //
-// Returning nil for unknown ToolResult implementations is deliberate — a
-// caller expecting an mcpserver-produced denial must construct its results
-// through NewErrorResultWithCause; foreign implementations cannot carry a
-// cause and so should be treated as "no cause attached."
+// Foreign ToolResult implementations (e.g., test doubles in other
+// packages) may participate in cause propagation by also implementing
+// Causer. Implementations that do not opt in are treated as "no cause
+// attached" and yield nil — which is the safe default for code that uses
+// errors.Is to branch on denial classes.
 func ResultCause(r ToolResult) error {
 	if r == nil {
 		return nil
 	}
-	ra, ok := r.(*resultAdapter)
+	c, ok := r.(Causer)
 	if !ok {
 		return nil
 	}
-	return ra.cause
+	return c.Cause()
 }
 
 // ---------------------------------------------------------------------------
