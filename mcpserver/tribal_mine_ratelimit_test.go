@@ -60,12 +60,12 @@ func TestTribalMineOnDemand_RateLimitSingleSession(t *testing.T) {
 	t.Parallel()
 	// rate=0.0001 → practically zero refill during the test window so the
 	// burst-then-deny sequencing is deterministic.
-	handler, req := buildRateLimitHandler(t,
-		2,        // burst
-		0.0001,   // rate
-		"sess-A", // sessionID
-		100,      // dailyBudget
-	)
+	handler, req := buildRateLimitHandler(t, rateLimitFixture{
+		Burst:       2,
+		Rate:        0.0001,
+		SessionID:   "sess-A",
+		DailyBudget: 100,
+	})
 
 	// First 2 calls: within burst — not blocked by the limiter (though
 	// they may produce empty-result text since miner finds no PRs).
@@ -106,12 +106,12 @@ func TestTribalMineOnDemand_RateLimitDenialCarriesSentinel(t *testing.T) {
 	t.Parallel()
 	// Burst=1 + practically-zero refill → first call drains the bucket,
 	// second call is guaranteed to be rate-limited (no timing flake).
-	handler, req := buildRateLimitHandler(t,
-		1,               // burst
-		0.0001,          // rate
-		"sess-sentinel", // sessionID
-		100,             // dailyBudget
-	)
+	handler, req := buildRateLimitHandler(t, rateLimitFixture{
+		Burst:       1,
+		Rate:        0.0001,
+		SessionID:   "sess-sentinel",
+		DailyBudget: 100,
+	})
 
 	// Drain the bucket.
 	if _, err := handler(context.Background(), req); err != nil {
@@ -144,12 +144,12 @@ func TestTribalMineOnDemand_AdmittedCallHasNilCause(t *testing.T) {
 	t.Parallel()
 	// Permissive limiter (100/100): the call is always admitted; this
 	// test pins the cause-is-nil invariant for the admitted path.
-	handler, req := buildRateLimitHandler(t,
-		100,       // burst
-		100,       // rate
-		"sess-ok", // sessionID
-		10,        // dailyBudget
-	)
+	handler, req := buildRateLimitHandler(t, rateLimitFixture{
+		Burst:       100,
+		Rate:        100,
+		SessionID:   "sess-ok",
+		DailyBudget: 10,
+	})
 
 	result, err := handler(context.Background(), req)
 	if err != nil {
@@ -549,6 +549,17 @@ const (
 	rlTestRelPath = "pkg/handler.go"
 )
 
+// rateLimitFixture bundles the per-test variation axes for
+// buildRateLimitHandler. Burst (int) and DailyBudget (int) share a type
+// and were silently transposable when passed positionally, so callers
+// must now use named-field struct literals (live_docs-m7v.45).
+type rateLimitFixture struct {
+	Burst       int
+	Rate        float64
+	SessionID   string
+	DailyBudget int
+}
+
 // buildRateLimitHandler assembles the standard rate-limit test scaffolding
 // (pool, no-op runner+llm, factory, keyed limiter with MaxKeys=16, handler
 // with a constant session-ID resolver) and returns the constructed handler
@@ -556,39 +567,33 @@ const (
 // is registered for cleanup via t.Cleanup; the pool registers its own
 // cleanup inside setupMineTestPool.
 //
-// burst, rate, sessionID, and dailyBudget are explicit parameters because
-// they are the per-test variation axes — collapsing them would hide test
-// intent. burst+rate determine whether a call is admitted or denied;
-// sessionID determines bucket attribution; dailyBudget is included so
-// tests that want to exercise the orthogonal budget path can do so without
-// reaching for the lower-level setupMineTestPool/buildFactory primitives.
+// fx carries the per-test variation axes: Burst+Rate determine whether a
+// call is admitted or denied; SessionID determines bucket attribution;
+// DailyBudget is included so tests that want to exercise the orthogonal
+// budget path can do so without reaching for the lower-level
+// setupMineTestPool/buildFactory primitives.
 //
 // Extracted under live_docs-m7v.39 from RateLimitSingleSession,
-// RateLimitDenialCarriesSentinel, and AdmittedCallHasNilCause.
-func buildRateLimitHandler(
-	t *testing.T,
-	burst int,
-	rate float64,
-	sessionID string,
-	dailyBudget int,
-) (ToolHandler, *tribalFakeRequest) {
+// RateLimitDenialCarriesSentinel, and AdmittedCallHasNilCause; collapsed
+// from 5 positional args to a fixture struct under live_docs-m7v.45.
+func buildRateLimitHandler(t *testing.T, fx rateLimitFixture) (ToolHandler, *tribalFakeRequest) {
 	t.Helper()
 	pool := setupMineTestPool(t, rlTestRepo, rlTestSymbol, rlTestRelPath)
 
 	runner := &fakeMineRunner{}
 	llm := &fakeMineLLM{}
-	factory := buildFactory(llm, runner.Run, dailyBudget)
+	factory := buildFactory(llm, runner.Run, fx.DailyBudget)
 
 	limiter := tribal.NewKeyedLimiter(tribal.KeyedLimiterConfig{
-		Rate:    rate,
-		Burst:   burst,
+		Rate:    fx.Rate,
+		Burst:   fx.Burst,
 		MaxKeys: 16,
 	})
 	t.Cleanup(func() { _ = limiter.Close() })
 
 	handler := TribalMineOnDemandRateLimitedHandler(
 		pool, factory, limiter, nil,
-		WithSessionIDResolver(constSessionID(sessionID)),
+		WithSessionIDResolver(constSessionID(fx.SessionID)),
 	)
 	req := &tribalFakeRequest{args: map[string]any{
 		"symbol": rlTestSymbol,
