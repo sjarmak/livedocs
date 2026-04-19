@@ -117,7 +117,14 @@ type tribalMineResponse struct {
 //     loading, budget enforcement, fact upsert, and generation bumping.
 //   - Returns a JSON response with provenance envelopes for each newly
 //     inserted fact, or a safe error message on failure.
-func TribalMineOnDemandHandler(pool *DBPool, factory MiningServiceFactory) ToolHandler {
+//
+// logger receives the server-side log lines this handler emits (factory
+// errors, ErrLLMClientUnavailable diagnostics, partial-upsert failures).
+// A nil logger falls back to the package-default log.Printf so legacy
+// callers retain their previous behavior. Tests inject a recording
+// logger to capture and assert the lines without relying on
+// log.SetOutput stderr-redirection (live_docs-m7v.31).
+func TribalMineOnDemandHandler(pool *DBPool, factory MiningServiceFactory, logger MineLogger) ToolHandler {
 	return func(ctx context.Context, req ToolRequest) (ToolResult, error) {
 		// --- Parameter parsing ---
 		symbol, err := req.RequireString("symbol")
@@ -173,7 +180,7 @@ func TribalMineOnDemandHandler(pool *DBPool, factory MiningServiceFactory) ToolH
 				// CLI name, specific env-var name) must not reach remote
 				// agents. Operators see the detail in their logs and can
 				// surface it through their own tooling.
-				log.Printf("tribal_mine_on_demand: llm client unreachable at call time: %v", err)
+				mineLogf(logger, "tribal_mine_on_demand: llm client unreachable at call time: %v", err)
 				return NewErrorResult(
 					"tribal_mine_on_demand: LLM provider unavailable; contact the server operator",
 				), nil
@@ -181,7 +188,7 @@ func TribalMineOnDemandHandler(pool *DBPool, factory MiningServiceFactory) ToolH
 			// Log the underlying error so operators can diagnose, but
 			// return only a generic message to the caller to avoid
 			// leaking internal paths or DB details via %w chains.
-			log.Printf("tribal_mine_on_demand: factory error for repo=%q: %v", repo, err)
+			mineLogf(logger, "tribal_mine_on_demand: factory error for repo=%q: %v", repo, err)
 			return NewErrorResult("tribal_mine_on_demand: mining service unavailable"), nil
 		}
 		if svc == nil {
@@ -201,7 +208,7 @@ func TribalMineOnDemandHandler(pool *DBPool, factory MiningServiceFactory) ToolH
 		// the response. FailedErrors may carry raw DB constraint text or
 		// paths, so they never leave the server (m7v.21); only aggregated
 		// counts reach the JSON envelope.
-		logMiningFailures(repo, results)
+		logMiningFailures(repo, results, logger)
 
 		resp, textMsg, err := buildTribalMineResponse(symbol, repo, results)
 		if err != nil {
@@ -336,7 +343,10 @@ func buildTribalMineResponse(symbol, repo string, results []*tribal.MiningResult
 // FailedCount is the authoritative total. Raw error details are logged
 // by the mining service at capture time — this log line intentionally
 // does not attempt to reconstruct them.
-func logMiningFailures(repo string, results []*tribal.MiningResult) {
+//
+// logger is the injected MineLogger; a nil logger falls back to
+// log.Printf via mineLogf (live_docs-m7v.31).
+func logMiningFailures(repo string, results []*tribal.MiningResult, logger MineLogger) {
 	for _, r := range results {
 		if r == nil || r.FailedCount == 0 {
 			continue
@@ -345,11 +355,23 @@ func logMiningFailures(repo string, results []*tribal.MiningResult) {
 		if len(r.FailedErrors) > 0 {
 			firstCategory = r.FailedErrors[0]
 		}
-		log.Printf(
+		mineLogf(logger,
 			"tribal_mine_on_demand: partial upsert failure repo=%q path=%q failed_count=%d retained_errors=%d first_category=%q",
 			repo, r.Path, r.FailedCount, len(r.FailedErrors), firstCategory,
 		)
 	}
+}
+
+// mineLogf routes a server-side log line through the injected MineLogger
+// or falls back to the package default log.Printf when logger is nil.
+// Centralising the nil check here keeps each call site readable and
+// guarantees consistent fallback behaviour. Live_docs-m7v.31.
+func mineLogf(logger MineLogger, format string, args ...any) {
+	if logger != nil {
+		logger.Printf(format, args...)
+		return
+	}
+	log.Printf(format, args...)
 }
 
 // ---------------------------------------------------------------------------
@@ -407,7 +429,7 @@ func TribalMineOnDemandRateLimitedHandler(
 	}
 	resolveSessionID := cfg.sessionIDResolver
 
-	inner := TribalMineOnDemandHandler(pool, factory)
+	inner := TribalMineOnDemandHandler(pool, factory, logger)
 	if limiter == nil {
 		return inner
 	}

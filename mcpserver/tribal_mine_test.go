@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -13,6 +14,35 @@ import (
 	"github.com/sjarmak/livedocs/db"
 	"github.com/sjarmak/livedocs/extractor/tribal"
 )
+
+// recordingMineLogger is a test-only MineLogger that captures every emitted
+// line into an in-memory slice. Goroutine-safe so tests can run handler
+// invocations concurrently with assertions. Mirrors the bytes.Buffer +
+// syncWriter pattern used by tribal_mine_ratelimit_test.go but at the
+// MineLogger level instead of the package-default log.SetOutput level —
+// removing the need for stderr-redirection hacks (live_docs-m7v.31).
+type recordingMineLogger struct {
+	mu    sync.Mutex
+	lines []string
+}
+
+func (r *recordingMineLogger) Printf(format string, args ...any) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.lines = append(r.lines, fmt.Sprintf(format, args...))
+}
+
+func (r *recordingMineLogger) Lines() []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := make([]string, len(r.lines))
+	copy(out, r.lines)
+	return out
+}
+
+func (r *recordingMineLogger) Joined() string {
+	return strings.Join(r.Lines(), "\n")
+}
 
 // ---------------------------------------------------------------------------
 // Local test fakes (mcpserver-scoped — mirror tribal-package fakes without
@@ -170,7 +200,7 @@ func TestTribalMineOnDemand_FirstCallMinesFacts(t *testing.T) {
 	}}
 
 	factory := buildFactory(llm, runner.Run, 100)
-	handler := TribalMineOnDemandHandler(pool, factory)
+	handler := TribalMineOnDemandHandler(pool, factory, nil)
 
 	req := &tribalFakeRequest{args: map[string]any{
 		"symbol": symbol,
@@ -250,7 +280,7 @@ func TestTribalMineOnDemand_IdempotentSecondCall(t *testing.T) {
 	}}
 
 	factory := buildFactory(llm, runner.Run, 100)
-	handler := TribalMineOnDemandHandler(pool, factory)
+	handler := TribalMineOnDemandHandler(pool, factory, nil)
 
 	req := &tribalFakeRequest{args: map[string]any{
 		"symbol": symbol,
@@ -330,7 +360,7 @@ func TestTribalMineOnDemand_BudgetExceeded(t *testing.T) {
 	}}
 
 	factory := buildFactory(llm, runner.Run, 1) // budget=1
-	handler := TribalMineOnDemandHandler(pool, factory)
+	handler := TribalMineOnDemandHandler(pool, factory, nil)
 
 	req := &tribalFakeRequest{args: map[string]any{
 		"symbol": symbol,
@@ -383,7 +413,7 @@ func TestTribalMineOnDemand_MissingRepo(t *testing.T) {
 	llm := &fakeMineLLM{}
 	runner := &fakeMineRunner{}
 	factory := buildFactory(llm, runner.Run, 10)
-	handler := TribalMineOnDemandHandler(pool, factory)
+	handler := TribalMineOnDemandHandler(pool, factory, nil)
 
 	req := &tribalFakeRequest{args: map[string]any{
 		"symbol": "AnyThing",
@@ -409,7 +439,7 @@ func TestTribalMineOnDemand_UnknownSymbol(t *testing.T) {
 	llm := &fakeMineLLM{}
 	runner := &fakeMineRunner{}
 	factory := buildFactory(llm, runner.Run, 10)
-	handler := TribalMineOnDemandHandler(pool, factory)
+	handler := TribalMineOnDemandHandler(pool, factory, nil)
 
 	req := &tribalFakeRequest{args: map[string]any{
 		"symbol": "NonexistentSymbol",
@@ -433,7 +463,7 @@ func TestTribalMineOnDemand_MissingParams(t *testing.T) {
 	llm := &fakeMineLLM{}
 	runner := &fakeMineRunner{}
 	factory := buildFactory(llm, runner.Run, 10)
-	handler := TribalMineOnDemandHandler(pool, factory)
+	handler := TribalMineOnDemandHandler(pool, factory, nil)
 
 	tests := []struct {
 		name string
@@ -464,7 +494,7 @@ func TestTribalMineOnDemand_PathTraversalRepo(t *testing.T) {
 	llm := &fakeMineLLM{}
 	runner := &fakeMineRunner{}
 	factory := buildFactory(llm, runner.Run, 10)
-	handler := TribalMineOnDemandHandler(pool, factory)
+	handler := TribalMineOnDemandHandler(pool, factory, nil)
 
 	for _, repo := range []string{"../evil", "..", "foo/bar", "a/../b"} {
 		t.Run(repo, func(t *testing.T) {
@@ -484,12 +514,18 @@ func TestTribalMineOnDemand_PathTraversalRepo(t *testing.T) {
 }
 
 // MiningError propagation: factory error is surfaced as a safe error result.
+//
+// live_docs-m7v.31: the server-side log line is captured via the injected
+// MineLogger, not via stderr redirection. Both the captured-log assertion
+// AND the caller-facing assertions must hold so a regression in either
+// layer is caught.
 func TestTribalMineOnDemand_FactoryError(t *testing.T) {
 	pool := setupMineTestPool(t, "test-repo", "X", "pkg/x.go")
 	factory := MiningServiceFactory(func(_ string, _ *db.ClaimsDB) (*tribal.TribalMiningService, error) {
 		return nil, errors.New("factory: unspecified internal failure")
 	})
-	handler := TribalMineOnDemandHandler(pool, factory)
+	logger := &recordingMineLogger{}
+	handler := TribalMineOnDemandHandler(pool, factory, logger)
 
 	req := &tribalFakeRequest{args: map[string]any{
 		"symbol": "X",
@@ -512,6 +548,21 @@ func TestTribalMineOnDemand_FactoryError(t *testing.T) {
 	if got := result.Text(); strings.Contains(got, "claude") || strings.Contains(got, "ANTHROPIC_API_KEY") {
 		t.Fatalf("generic factory error must NOT surface LLM-client-specific guidance; got %q", got)
 	}
+
+	// Captured log line must surface the server-side detail (factory error
+	// chain) so operators can diagnose without inspecting the MCP wire
+	// response. The injected logger replaces the previous stderr-capture
+	// pattern that motivated this bead (live_docs-m7v.31).
+	logged := logger.Joined()
+	if !strings.Contains(logged, "factory error") {
+		t.Errorf("expected captured log to contain 'factory error'; got %q", logged)
+	}
+	if !strings.Contains(logged, "test-repo") {
+		t.Errorf("expected captured log to identify repo; got %q", logged)
+	}
+	if !strings.Contains(logged, "unspecified internal failure") {
+		t.Errorf("expected captured log to surface underlying error message; got %q", logged)
+	}
 }
 
 // TestTribalMineOnDemand_LLMUnavailableError verifies the handler
@@ -527,7 +578,8 @@ func TestTribalMineOnDemand_LLMUnavailableError(t *testing.T) {
 	factory := MiningServiceFactory(func(_ string, _ *db.ClaimsDB) (*tribal.TribalMiningService, error) {
 		return nil, errors.Join(ErrLLMClientUnavailable, errors.New("claude CLI not on PATH and ANTHROPIC_API_KEY unset"))
 	})
-	handler := TribalMineOnDemandHandler(pool, factory)
+	logger := &recordingMineLogger{}
+	handler := TribalMineOnDemandHandler(pool, factory, logger)
 
 	req := &tribalFakeRequest{args: map[string]any{
 		"symbol": "X",
@@ -559,6 +611,73 @@ func TestTribalMineOnDemand_LLMUnavailableError(t *testing.T) {
 		strings.Contains(got, "PATH") {
 		t.Fatalf("client-facing message leaks LLM auth model (claude / ANTHROPIC_API_KEY / PATH); got %q", got)
 	}
+
+	// live_docs-m7v.31: server-side log MUST carry the actionable detail
+	// (CLI name, env-var name) so operators can diagnose without re-running
+	// the call under stderr capture. Captured via the injected MineLogger,
+	// not the package-default log.SetOutput.
+	logged := logger.Joined()
+	if !strings.Contains(logged, "llm client unreachable") {
+		t.Errorf("expected captured log to mention 'llm client unreachable'; got %q", logged)
+	}
+	if !strings.Contains(logged, "claude") || !strings.Contains(logged, "ANTHROPIC_API_KEY") {
+		t.Errorf("server-side log must include actionable LLM auth detail (claude / ANTHROPIC_API_KEY); got %q", logged)
+	}
+}
+
+// live_docs-m7v.31: logMiningFailures must route through the injected
+// MineLogger so partial-upsert failures are observable in tests without
+// stderr redirection. Direct exercise of the helper since the full mining
+// path is covered by TestTribalMineOnDemand_FirstCallMinesFacts.
+func TestLogMiningFailures_UsesInjectedLogger(t *testing.T) {
+	logger := &recordingMineLogger{}
+	results := []*tribal.MiningResult{
+		{
+			Path:         "pkg/a.go",
+			FailedCount:  2,
+			FailedErrors: []string{"database_error", "unique_constraint_violation"},
+		},
+		nil,                // nil-safe
+		{Path: "pkg/b.go"}, // zero failures — must not log
+	}
+
+	logMiningFailures("test-repo", results, logger)
+
+	lines := logger.Lines()
+	if len(lines) != 1 {
+		t.Fatalf("expected exactly one log line for the only result with failures; got %d: %v",
+			len(lines), lines)
+	}
+	got := lines[0]
+	for _, want := range []string{
+		"partial upsert failure",
+		"test-repo",
+		"pkg/a.go",
+		"failed_count=2",
+		"first_category=\"database_error\"",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("log line missing %q: got %q", want, got)
+		}
+	}
+}
+
+// live_docs-m7v.31: when no logger is injected, the helpers fall back to
+// the package default log.Printf so production callers that have not yet
+// wired a logger keep their previous behavior.
+func TestLogMiningFailures_NilLoggerFallback(t *testing.T) {
+	// Just exercise the nil path — assertion is "does not panic". Output
+	// goes to the standard library default writer (stderr); we do not
+	// inspect it here because that would re-introduce the stderr-capture
+	// hack this bead is removing.
+	results := []*tribal.MiningResult{
+		{
+			Path:         "pkg/a.go",
+			FailedCount:  1,
+			FailedErrors: []string{"database_error"},
+		},
+	}
+	logMiningFailures("test-repo", results, nil)
 }
 
 // ---------------------------------------------------------------------------
