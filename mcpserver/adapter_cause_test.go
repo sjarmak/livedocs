@@ -125,10 +125,8 @@ func TestResultCause_ForeignImplementationWithoutCauser(t *testing.T) {
 	}
 }
 
-// TestResultAdapterImplementsCauser is a compile-time check that the
-// concrete adapter satisfies the new Causer interface, so production code
-// (NewErrorResultWithCause) keeps participating in the contract.
-func TestResultAdapterImplementsCauser(t *testing.T) {
-	t.Parallel()
-	var _ Causer = (*resultAdapter)(nil)
-}
+// Compile-time assertion: the concrete adapter must satisfy Causer so
+// production code (NewErrorResultWithCause) keeps participating in the
+// contract. Lives at package scope so the failure surface is the build,
+// not a test run.
+var _ Causer = (*resultAdapter)(nil)

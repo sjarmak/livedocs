@@ -57,15 +57,34 @@ type ToolResult interface {
 // can participate in cause propagation simply by adding a Cause() method.
 // Implementations with no cause to expose should return nil.
 //
+// Consumers MUST retrieve the cause via ResultCause(r) rather than
+// type-asserting to Causer and calling Cause() directly: ResultCause adds
+// the nil-result guard and is the supported entry point. Asserting
+// directly bypasses that guard and is fragile against future ToolResult
+// changes.
+//
 // Why a separate interface (instead of folding Cause into ToolResult):
 // adding Cause() to ToolResult would be a breaking change for every
 // implementer that does not care about typed causes. Causer is purely
 // additive — opt-in for implementers that want the contract, transparent
 // for those that do not. See live_docs-m7v.38 for the design rationale.
+//
+// Note: github.com/pkg/errors defines an identically-named Causer
+// interface with the same Cause() error signature. The interfaces are
+// structurally identical but semantically distinct — pkg/errors uses
+// Causer to walk a wrapped-error chain, this Causer attaches an internal
+// cause to a ToolResult value. Foreign types that already satisfy
+// pkg/errors.Causer will satisfy this interface as well, which is
+// intentional: a wrapped error and an internal cause are interchangeable
+// for the consumer's purpose (errors.Is matching against a sentinel).
+// Foreign implementations should be careful not to return sentinels they
+// do not own, as server-side middleware that branches on
+// errors.Is(ResultCause(r), <sentinel>) would be affected.
 type Causer interface {
 	// Cause returns the typed Go error cause of this result, or nil if
 	// none. This is server-side only and is never serialized to the MCP
-	// transport.
+	// transport. Consumers should call ResultCause(r) instead of invoking
+	// this method directly.
 	Cause() error
 }
 

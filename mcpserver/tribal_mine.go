@@ -259,22 +259,34 @@ func TribalMineOnDemandHandler(pool *DBPool, factory MiningServiceFactory) ToolH
 }
 
 // renderMineError translates a non-nil mining error from MineSymbol/MineFile
-// into a caller-safe ToolResult. Classification order matters:
+// into a caller-safe ToolResult. Classification order matters and is part of
+// the contract: any future *tribal.MiningError code that wraps
+// ErrMineThrottled for non-throttle semantics MUST be inserted before step 1
+// with its own guard, otherwise it will be misclassified.
 //
 //  1. tribal.ErrMineThrottled — surfaced FIRST so MCP clients can detect
 //     the per-file rate-limit denial via
 //     errors.Is(ResultCause(r), tribal.ErrMineThrottled) and implement
 //     backoff. Mirrors the ErrRateLimited cause-attachment pattern in
-//     TribalMineOnDemandRateLimitedHandler. The user-visible text reuses
-//     the wording from MiningError.SafeMessage("mine_throttled") and adds
-//     a brief retry hint; the typed cause is never serialized to the wire
-//     (server-side discriminator only).
+//     TribalMineOnDemandRateLimitedHandler. The user-visible text is
+//     authored inline (intentionally distinct from MiningError.SafeMessage
+//     so the wordings can evolve independently — SafeMessage is shaped for
+//     log/diagnostic contexts, this text is shaped for MCP clients with an
+//     explicit retry hint). The typed cause is never serialized to the
+//     wire (server-side discriminator only).
 //  2. context.Canceled / context.DeadlineExceeded — request lifecycle, not
 //     a mining-domain failure. Distinct generic message.
 //  3. Any *tribal.MiningError — render via SafeMessage() which omits paths
 //     and wrapped error chains.
 //  4. Anything else — a single safe fallback so internal error text never
 //     reaches the caller.
+//
+// Reachability: throttle currently propagates only when MineFile is invoked
+// directly. TribalMiningService.MineSymbol's per-file loop discards all
+// non-budget errors via `continue` (extractor/tribal/service.go MineSymbol),
+// so throttle from the symbol-mining path is silently dropped today. The
+// fix belongs in the service loop and is tracked separately; this branch is
+// kept correct so the handler is ready when the suppression is lifted.
 //
 // renderMineError MUST NOT be invoked with a nil error; callers gate this on
 // `mineErr != nil` upstream.
