@@ -74,6 +74,26 @@ func WithSessionIDResolver(r SessionIDResolver) MineHandlerOption {
 // stable errors.Is target across implementations.
 var ErrLLMClientUnavailable = errors.New("llm client unavailable")
 
+// ErrRateLimited is the stable sentinel carried (via NewErrorResultWithCause)
+// on the rate-limit denial ToolResult returned by the per-session wrapper
+// installed in TribalMineOnDemandRateLimitedHandler. Middleware and tests
+// detect rate-limit denials with `errors.Is(ResultCause(result),
+// mcpserver.ErrRateLimited)` — a string-stable discriminator that cannot
+// drift when the caller-facing text is reworded.
+//
+// Scope notes (live_docs-m7v.26):
+//   - The sentinel is attached ONLY to the per-session rate-limit denial
+//     in the rate-limited wrapper — NOT to budget-exceeded, LLM-unavailable,
+//     or other mining errors. Those have their own discriminators
+//     (MiningError.Code="budget_exceeded", ErrLLMClientUnavailable, etc.).
+//   - The sentinel is server-side only: adaptHandler forwards only the raw
+//     *mcp.CallToolResult to the mcp-go transport, so the cause never
+//     crosses the wire and clients see only the user-visible Text().
+//   - The sentinel's Error() string ("mcpserver: rate limit exceeded") is
+//     deliberately distinct from the user-facing text so the text can be
+//     reworded without breaking `errors.Is` semantics.
+var ErrRateLimited = errors.New("mcpserver: rate limit exceeded")
+
 // MiningServiceFactory constructs a tribal.TribalMiningService bound to the
 // given repo and claims DB. Callers that expose the tribal_mine_on_demand
 // tool must supply a factory that wires in the appropriate LLM client,
@@ -399,8 +419,15 @@ func TribalMineOnDemandRateLimitedHandler(
 			logMineAttempt(logger, sessionID,
 				safeArg(req, "repo"), safeArg(req, "symbol"),
 				"rate_limited")
-			return NewErrorResult(
-				"tribal_mine_on_demand: rate limit exceeded for this session; " +
+			// Attach ErrRateLimited as the typed cause so callers can
+			// distinguish this denial from budget or transport errors via
+			// errors.Is(ResultCause(r), ErrRateLimited) without
+			// string-matching the user-visible text (live_docs-m7v.26).
+			// The cause stays server-side — the mcp-go transport only
+			// ever sees the caller-friendly text.
+			return NewErrorResultWithCause(
+				ErrRateLimited,
+				"tribal_mine_on_demand: rate limit exceeded for this session; "+
 					"retry after a short pause",
 			), nil
 		}
