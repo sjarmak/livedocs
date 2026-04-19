@@ -1171,7 +1171,7 @@ mineLoop:
 		result, mineErr := svc.MineFile(ctx, relPath, tribal.TriggerBatchSchedule)
 		if mineErr != nil {
 			var me *tribal.MiningError
-			if errors.As(mineErr, &me) && me.Code == "budget_exceeded" {
+			if errors.As(mineErr, &me) && me.Code == tribal.CodeBudgetExceeded {
 				fmt.Fprintf(out, "LLM tribal: daily budget reached, stopping extraction\n")
 				break mineLoop
 			}

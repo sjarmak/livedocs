@@ -182,8 +182,8 @@ func TestTribalMiningService_MineFile_BudgetExceeded(t *testing.T) {
 	if !errors.As(err, &me) {
 		t.Fatalf("expected *MiningError, got %T", err)
 	}
-	if me.Code != "budget_exceeded" {
-		t.Errorf("code = %q, want budget_exceeded", me.Code)
+	if me.Code != CodeBudgetExceeded {
+		t.Errorf("code = %q, want %s", me.Code, CodeBudgetExceeded)
 	}
 }
 
@@ -216,8 +216,8 @@ func TestTribalMiningService_MineFile_CursorRegression(t *testing.T) {
 	if !errors.As(err, &me) {
 		t.Fatalf("expected *MiningError, got %T", err)
 	}
-	if me.Code != "cursor_regression" {
-		t.Errorf("code = %q, want cursor_regression", me.Code)
+	if me.Code != CodeCursorRegression {
+		t.Errorf("code = %q, want %s", me.Code, CodeCursorRegression)
 	}
 }
 
@@ -1060,8 +1060,8 @@ func TestTribalMiningService_MineFile_LimiterDenial(t *testing.T) {
 	if !errors.As(err, &me) {
 		t.Fatalf("expected *MiningError, got %T: %v", err, err)
 	}
-	if me.Code != "mine_throttled" {
-		t.Errorf("Code = %q, want mine_throttled", me.Code)
+	if me.Code != CodeMineThrottled {
+		t.Errorf("Code = %q, want %s", me.Code, CodeMineThrottled)
 	}
 	if !errors.Is(err, ErrMineThrottled) {
 		t.Error("error should unwrap to ErrMineThrottled")
@@ -1117,7 +1117,7 @@ func TestTribalMiningService_MineFile_NilLimiterUnlimited(t *testing.T) {
 		path := fmt.Sprintf("pkg/f_%d.go", i)
 		if _, err := svc.MineFile(context.Background(), path, TriggerBatchSchedule); err != nil {
 			var me *MiningError
-			if errors.As(err, &me) && me.Code == "mine_throttled" {
+			if errors.As(err, &me) && me.Code == CodeMineThrottled {
 				t.Fatalf("nil limiter must never throttle; got %v", err)
 			}
 			t.Fatalf("MineFile(%d): %v", i, err)
@@ -1426,8 +1426,8 @@ func TestTribalMiningService_MineSymbol_PropagatesThrottle(t *testing.T) {
 	if !errors.As(err, &me) {
 		t.Fatalf("expected *MiningError, got %T: %v", err, err)
 	}
-	if me.Code != "mine_throttled" {
-		t.Errorf("MiningError.Code = %q, want mine_throttled", me.Code)
+	if me.Code != CodeMineThrottled {
+		t.Errorf("MiningError.Code = %q, want %s", me.Code, CodeMineThrottled)
 	}
 	// Distinguishability invariant from m7v.30: throttle MUST NOT alias
 	// to budget_exceeded — otherwise the renderMineError fan-out can't
@@ -1505,8 +1505,8 @@ func TestTribalMiningService_MineSymbol_BudgetExceededStillStops(t *testing.T) {
 	if !errors.As(err, &me) {
 		t.Fatalf("expected *MiningError, got %T: %v", err, err)
 	}
-	if me.Code != "budget_exceeded" {
-		t.Errorf("MiningError.Code = %q, want budget_exceeded", me.Code)
+	if me.Code != CodeBudgetExceeded {
+		t.Errorf("MiningError.Code = %q, want %s", me.Code, CodeBudgetExceeded)
 	}
 	if !errors.Is(err, ErrBudgetExceeded) {
 		t.Error("errors.Is(err, ErrBudgetExceeded) = false")
