@@ -59,45 +59,6 @@ func WithSessionIDResolver(r SessionIDResolver) MineHandlerOption {
 	}
 }
 
-// ErrLLMClientUnavailable is the sentinel MiningServiceFactory
-// implementations return (wrapped) when neither the primary nor the
-// fallback LLM client can be resolved at call time. The handler uses
-// errors.Is to classify this distinct from generic factory failures
-// (missing git metadata, DB error, etc.) so the MCP client sees an
-// actionable message rather than the generic
-// "mining service unavailable" fallback.
-//
-// The factory MAY wrap the sentinel with additional context (e.g. "claude
-// CLI not on PATH and ANTHROPIC_API_KEY unset") — that context is
-// preserved when the handler renders the caller-facing message. The
-// sentinel itself never embeds provider-specific details so it remains a
-// stable errors.Is target across implementations.
-var ErrLLMClientUnavailable = errors.New("llm client unavailable")
-
-// ErrRateLimited is the stable sentinel carried (via NewErrorResultWithCause)
-// on the rate-limit denial ToolResult returned by the per-session wrapper
-// installed in TribalMineOnDemandRateLimitedHandler. Middleware and tests
-// detect rate-limit denials with `errors.Is(ResultCause(result),
-// ErrRateLimited)` — a string-stable discriminator that cannot drift when
-// the caller-facing text is reworded.
-//
-// Callers MUST retrieve the cause through ResultCause; `errors.Is` applied
-// directly to a ToolResult value will return false because resultAdapter's
-// Unwrap returns *mcp.CallToolResult rather than satisfying the standard
-// errors.Unwrap() error convention (deliberate: keeps cause off the wire).
-//
-//   - Attached ONLY to the per-session rate-limit denial in the
-//     rate-limited wrapper — NOT to budget-exceeded, LLM-unavailable, or
-//     other mining errors. Those have their own discriminators
-//     (MiningError.Code="budget_exceeded", ErrLLMClientUnavailable, etc.).
-//   - Server-side only: adaptHandler forwards only the raw
-//     *mcp.CallToolResult to the mcp-go transport, so the cause never
-//     crosses the wire and clients see only the user-visible Text().
-//   - Error() string ("mcpserver: rate limit exceeded") is deliberately
-//     distinct from the user-facing text so the text can be reworded
-//     without breaking `errors.Is` semantics.
-var ErrRateLimited = errors.New("mcpserver: rate limit exceeded")
-
 // MiningServiceFactory constructs a tribal.TribalMiningService bound to the
 // given repo and claims DB. Callers that expose the tribal_mine_on_demand
 // tool must supply a factory that wires in the appropriate LLM client,
