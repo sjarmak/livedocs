@@ -736,19 +736,36 @@ type countingRunner struct {
 	// goroutines have arrived to guarantee true concurrency.
 	barrier chan struct{}
 
+	// ctxAware, if true, makes the barrier wait cancel-aware: the runner
+	// returns ctx.Err() when the caller's context is cancelled while
+	// parked at the barrier. This models real IO (subprocess, network)
+	// which returns a cancellation error rather than blocking forever.
+	// Tests that need to exercise cancellation paths through the runner
+	// must set this; the default (false) preserves the original
+	// "wait-forever" semantics used by existing dedup tests.
+	ctxAware bool
+
 	// prListArrived is closed once prListArrivals reaches the expected
 	// count, letting the test harness synchronize on "all N goroutines are
 	// parked at the barrier". Optional; zero-value disables the signal.
 	prListArrivals int64
 }
 
-func (r *countingRunner) run(_ context.Context, name string, args ...string) ([]byte, error) {
+func (r *countingRunner) run(ctx context.Context, name string, args ...string) ([]byte, error) {
 	atomic.AddInt64(&r.totalCalls, 1)
 	for _, a := range args {
 		if a == "pr" {
 			atomic.AddInt64(&r.prListArrivals, 1)
 			if r.barrier != nil {
-				<-r.barrier
+				if r.ctxAware {
+					select {
+					case <-r.barrier:
+					case <-ctx.Done():
+						return nil, ctx.Err()
+					}
+				} else {
+					<-r.barrier
+				}
 			}
 			return []byte(r.prList), nil
 		}
@@ -1106,5 +1123,168 @@ func TestTribalMiningService_MineFile_LimiterBoundedKeyspace(t *testing.T) {
 
 	if sz := lim.Size(); sz > maxKeys {
 		t.Errorf("limiter Size() = %d, want <= %d (LRU bound)", sz, maxKeys)
+	}
+}
+
+// TestTribalMiningService_MineFile_FirstCallerCancelPropagates locks in the
+// documented singleflight trade-off: when the first caller's context is
+// cancelled mid-extract, the shared operation aborts and ALL concurrent
+// waiters (which used their own independent contexts) observe the
+// cancellation error. This is an intentional property — the alternative
+// would duplicate budget spend — and is called out in MineFile's doc
+// comment. A regression that silently swapped singleflight.Do for per-call
+// execution would pass every other test in this file because none of them
+// exercise the "first caller cancels while waiters are parked" path.
+//
+// Regression signals this test detects:
+//  1. prListArrivals > 1 — if singleflight is removed, each goroutine
+//     reaches `gh pr list` independently.
+//  2. Any waiter returns a non-cancellation result — if singleflight is
+//     swapped for per-goroutine execution, waiters 1 and 2 (whose own
+//     ctxs were never cancelled) would complete the mine successfully.
+func TestTribalMiningService_MineFile_FirstCallerCancelPropagates(t *testing.T) {
+	const N = 3
+	svc, runner, _ := newConcurrentTestService(t, "pkg/cancelled.go", N)
+	runner.barrier = make(chan struct{})
+	runner.ctxAware = true // the first caller's cancel must unblock the barrier wait
+
+	// Defensive cleanup: if the test aborts mid-flight (e.g. t.Fatalf
+	// before cancel0 fires), close the barrier so any parked mock-runner
+	// call returns and its goroutine cannot leak past the test boundary.
+	// Ordinarily the cancellation path frees the runner via ctx.Done, but
+	// an assertion failure in pre-cancel setup would otherwise strand the
+	// runner's goroutine on the barrier.
+	var barrierClosed atomic.Bool
+	closeBarrierOnce := func() {
+		if barrierClosed.CompareAndSwap(false, true) {
+			close(runner.barrier)
+		}
+	}
+	t.Cleanup(closeBarrierOnce)
+
+	// Only goroutine 0's context is cancellable. Per the singleflight
+	// contract, the first caller's ctx is the authoritative one — it's
+	// what mineFileOnce runs under. Waiters use Background so the test
+	// isolates "first-caller cancel propagates to waiters" from
+	// "everyone cancelled their own ctx".
+	//
+	// singleflight.Group chooses "the first caller" by whoever wins the
+	// race into Do(), so we must serialize g0 before the others:
+	// (1) launch g0 alone, (2) wait until g0 is parked at the runner's
+	// barrier (meaning g0's call is the one running mineFileOnce), then
+	// (3) launch the N-1 waiters — they'll find g0's in-flight key and
+	// park as waiters. Without this ordering the "first caller" is
+	// non-deterministic and the test flakes.
+	ctx0, cancel0 := context.WithCancel(context.Background())
+	defer cancel0()
+
+	var wgDone sync.WaitGroup
+	errs := make([]error, N)
+	results := make([]*MiningResult, N)
+
+	// Launch goroutine 0 (the designated first caller).
+	wgDone.Add(1)
+	go func() {
+		defer wgDone.Done()
+		r, err := svc.MineFile(ctx0, "pkg/cancelled.go", TriggerJITOnDemand)
+		results[0] = r
+		errs[0] = err
+	}()
+
+	// Wait until g0 has arrived at the runner (i.e. it is the singleflight
+	// leader, currently running mineFileOnce and parked at the barrier).
+	// Only once this holds is it safe to launch the waiters; otherwise
+	// one of them could win the race into Do() and become leader with a
+	// non-cancellable ctx. The deadline is generous (2s) and bounded so
+	// a stuck test still terminates rather than hanging.
+	deadline := time.Now().Add(2 * time.Second)
+	for atomic.LoadInt64(&runner.prListArrivals) < 1 && time.Now().Before(deadline) {
+		runtime.Gosched()
+	}
+	if got := atomic.LoadInt64(&runner.prListArrivals); got != 1 {
+		t.Fatalf("pre-waiter prListArrivals = %d, want 1 (g0 should be alone at barrier)", got)
+	}
+
+	// Launch the N-1 waiter goroutines. They enter MineFile with
+	// Background ctx, hit singleflight.Do, find g0's in-flight key, and
+	// park waiting for the shared result.
+	//
+	// We rely on waitForSettle (below) as the sole synchronization gate:
+	// a prior attempt used a WaitGroup signalled before MineFile was
+	// called, which fires too early (goroutine had received from the
+	// start channel but not yet entered singleflight.Do) and left a
+	// scheduler-race window. waitForSettle checks the real invariant:
+	// prListArrivals stays at 1 because waiters dedup into the leader.
+	waiterStart := make(chan struct{})
+	for i := 1; i < N; i++ {
+		wgDone.Add(1)
+		go func(idx int) {
+			defer wgDone.Done()
+			<-waiterStart
+			r, err := svc.MineFile(context.Background(), "pkg/cancelled.go", TriggerJITOnDemand)
+			results[idx] = r
+			errs[idx] = err
+		}(i)
+	}
+	close(waiterStart)
+
+	// waitForSettle is the anti-regression check: if singleflight
+	// were removed and each goroutine ran its own mine, arrivals would
+	// climb from 1 toward N. We confirm it stays at 1 (leader only),
+	// which also proves all waiters have reached singleflight.Do.
+	waitForSettle(runner, N)
+
+	if got := atomic.LoadInt64(&runner.prListArrivals); got != 1 {
+		t.Fatalf("pre-cancel prListArrivals = %d, want 1 (singleflight dedup broken before we even cancel)", got)
+	}
+
+	// Cancel the first caller's ctx. The ctx-aware runner wakes from its
+	// barrier wait and returns ctx.Err(). mineFileOnce wraps that in a
+	// MiningError{Code:"extraction_failed"} and singleflight.Do returns
+	// the same (nil, err) pair to all N waiters.
+	cancel0()
+
+	wgDone.Wait()
+
+	// All N callers see a cancellation-derived error.
+	for i, err := range errs {
+		if err == nil {
+			t.Errorf("goroutine %d: err = nil, want context.Canceled (shared via singleflight)", i)
+			continue
+		}
+		if !errors.Is(err, context.Canceled) {
+			t.Errorf("goroutine %d: err = %v, want errors.Is(..., context.Canceled)", i, err)
+		}
+		// Waiters also get a nil result alongside the shared error —
+		// the read-only contract in MineFile's doc comment says they
+		// receive the same (result, err) pair; on error that result
+		// pointer must be nil so a nil-check on the result is safe.
+		if results[i] != nil {
+			t.Errorf("goroutine %d: result = %+v, want nil on cancelled extraction", i, results[i])
+		}
+	}
+
+	// Singleflight dedup invariant: even after cancellation, exactly one
+	// goroutine reached `gh pr list`. The other N-1 never entered the
+	// shared work; they were parked waiting for it.
+	if got := atomic.LoadInt64(&runner.prListArrivals); got != 1 {
+		t.Errorf("prListArrivals = %d, want 1 (singleflight must dedup even on cancel)", got)
+	}
+	// The miner never got to the LLM step because findPRsForFile returned
+	// ctx.Err() before classification. callCount is the budget counter
+	// (incremented per LLM call, not per MineFile invocation), so when
+	// cancellation fires at the pr list step we expect 0, not 1. The
+	// direct singleflight-dedup signal is the prListArrivals==1 check
+	// above; callCount here is the consequential "budget not
+	// double-charged" invariant.
+	svc.miner.mu.Lock()
+	calls := svc.miner.callCount
+	svc.miner.mu.Unlock()
+	if calls != 0 {
+		t.Errorf("miner callCount = %d, want 0 (budget must not be charged when extract is cancelled)", calls)
+	}
+	// Generation counter never bumps: no facts were written.
+	if g := svc.FactsGeneration(); g != 0 {
+		t.Errorf("generation = %d, want 0 (nothing was written)", g)
 	}
 }
