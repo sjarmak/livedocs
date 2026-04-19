@@ -16,13 +16,6 @@ import (
 	"github.com/sjarmak/livedocs/drift"
 )
 
-var (
-	verifyClaimsDB        string
-	verifyClaimsStaleness bool
-	verifyClaimsCanary    bool
-	verifyClaimsCheckEx   bool
-)
-
 var verifyClaimsCmd = &cobra.Command{
 	Use:   "verify-claims [path]",
 	Short: "Verify claims in a SQLite DB against current source code",
@@ -40,16 +33,19 @@ Flags:
 }
 
 func init() {
-	verifyClaimsCmd.Flags().StringVar(&verifyClaimsDB, "db", "", "path to claims SQLite database (default: <dirname>.claims.db)")
-	verifyClaimsCmd.Flags().BoolVar(&verifyClaimsStaleness, "staleness", false, "report per-claim staleness scores")
-	verifyClaimsCmd.Flags().BoolVar(&verifyClaimsCanary, "canary", false, "sample 50 random claims and re-verify; exit non-zero if >2% stale")
-	verifyClaimsCmd.Flags().BoolVar(&verifyClaimsCheckEx, "check-existing", false, "scan README.md files for contradicting claims")
+	verifyClaimsCmd.Flags().String("db", "", "path to claims SQLite database (default: <dirname>.claims.db)")
+	verifyClaimsCmd.Flags().Bool("staleness", false, "report per-claim staleness scores")
+	verifyClaimsCmd.Flags().Bool("canary", false, "sample 50 random claims and re-verify; exit non-zero if >2% stale")
+	verifyClaimsCmd.Flags().Bool("check-existing", false, "scan README.md files for contradicting claims")
 }
 
 func runVerifyClaims(cmd *cobra.Command, args []string) error {
-	// Reset flag state for any subsequent invocation of this command. See
-	// resetCmdFlags in flags.go for rationale (live_docs-m7v.28, m7v.36).
 	defer resetCmdFlags(cmd)
+
+	dbFlag, _ := cmd.Flags().GetString("db")
+	staleness, _ := cmd.Flags().GetBool("staleness")
+	canary, _ := cmd.Flags().GetBool("canary")
+	checkEx, _ := cmd.Flags().GetBool("check-existing")
 
 	repoPath := "."
 	if len(args) > 0 {
@@ -61,7 +57,7 @@ func runVerifyClaims(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("resolve path: %w", err)
 	}
 
-	dbPath, err := resolveClaimsDBPath(absRepo, verifyClaimsDB)
+	dbPath, err := resolveClaimsDBPath(absRepo, dbFlag)
 	if err != nil {
 		return err
 	}
@@ -74,15 +70,15 @@ func runVerifyClaims(cmd *cobra.Command, args []string) error {
 
 	out := cmd.OutOrStdout()
 
-	if verifyClaimsCheckEx {
+	if checkEx {
 		return runCheckExisting(cdb, absRepo, out)
 	}
 
-	if verifyClaimsCanary {
+	if canary {
 		return runCanary(cdb, absRepo, out)
 	}
 
-	if verifyClaimsStaleness {
+	if staleness {
 		return runStaleness(cdb, absRepo, out)
 	}
 

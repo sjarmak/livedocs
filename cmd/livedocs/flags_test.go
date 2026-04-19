@@ -13,16 +13,10 @@ import (
 // TestResetCmdFlags_RestoresDefaults verifies that string, bool, and int flags
 // are restored to their declared default values after mutation.
 func TestResetCmdFlags_RestoresDefaults(t *testing.T) {
-	var (
-		strFlag  string
-		boolFlag bool
-		intFlag  int
-	)
-
 	cmd := &cobra.Command{Use: "test"}
-	cmd.Flags().StringVar(&strFlag, "name", "default-name", "")
-	cmd.Flags().BoolVar(&boolFlag, "enabled", false, "")
-	cmd.Flags().IntVar(&intFlag, "count", 42, "")
+	cmd.Flags().String("name", "default-name", "")
+	cmd.Flags().Bool("enabled", false, "")
+	cmd.Flags().Int("count", 42, "")
 
 	// Mutate every flag and mark them as Changed.
 	if err := cmd.Flags().Set("name", "mutated"); err != nil {
@@ -35,21 +29,16 @@ func TestResetCmdFlags_RestoresDefaults(t *testing.T) {
 		t.Fatalf("set count: %v", err)
 	}
 
-	// Sanity check: mutations took effect.
-	if strFlag != "mutated" || !boolFlag || intFlag != 99 {
-		t.Fatalf("pre-reset state wrong: name=%q enabled=%v count=%d", strFlag, boolFlag, intFlag)
-	}
-
 	resetCmdFlags(cmd)
 
-	if strFlag != "default-name" {
-		t.Errorf("strFlag = %q, want %q", strFlag, "default-name")
+	if got, _ := cmd.Flags().GetString("name"); got != "default-name" {
+		t.Errorf("name = %q, want %q", got, "default-name")
 	}
-	if boolFlag != false {
-		t.Errorf("boolFlag = %v, want false", boolFlag)
+	if got, _ := cmd.Flags().GetBool("enabled"); got != false {
+		t.Errorf("enabled = %v, want false", got)
 	}
-	if intFlag != 42 {
-		t.Errorf("intFlag = %d, want 42", intFlag)
+	if got, _ := cmd.Flags().GetInt("count"); got != 42 {
+		t.Errorf("count = %d, want 42", got)
 	}
 }
 
@@ -57,9 +46,8 @@ func TestResetCmdFlags_RestoresDefaults(t *testing.T) {
 // after calling resetCmdFlags, so that subsequent Execute() calls do not see
 // stale "user-supplied" markers.
 func TestResetCmdFlags_ClearsChanged(t *testing.T) {
-	var s string
 	cmd := &cobra.Command{Use: "test"}
-	cmd.Flags().StringVar(&s, "name", "default", "")
+	cmd.Flags().String("name", "default", "")
 
 	if err := cmd.Flags().Set("name", "user-supplied"); err != nil {
 		t.Fatalf("set: %v", err)
@@ -90,12 +78,11 @@ func (e *erroringValue) Set(string) error {
 // an error, resetCmdFlags writes a warning to cmd.ErrOrStderr() and continues
 // processing remaining flags (does not panic or short-circuit).
 func TestResetCmdFlags_WarnsOnSetError(t *testing.T) {
-	var s string
 	cmd := &cobra.Command{Use: "test"}
 
 	// Register an erroring flag and a normal flag — the helper must process both.
 	cmd.Flags().Var(&erroringValue{}, "broken", "always errors on Set")
-	cmd.Flags().StringVar(&s, "good", "default-good", "")
+	cmd.Flags().String("good", "default-good", "")
 
 	if err := cmd.Flags().Set("good", "mutated"); err != nil {
 		t.Fatalf("set good: %v", err)
@@ -119,13 +106,12 @@ func TestResetCmdFlags_WarnsOnSetError(t *testing.T) {
 	}
 
 	// The good flag must still have been reset despite the broken one erroring.
-	if s != "default-good" {
+	if s, _ := cmd.Flags().GetString("good"); s != "default-good" {
 		t.Errorf("good flag = %q, want %q (helper short-circuited on error)", s, "default-good")
 	}
 
-	// Changed must be cleared on the broken flag too (this matches original
-	// resetEnrichFlags / resetVerifyClaimsFlags semantics: Changed is unconditionally
-	// cleared regardless of Set error).
+	// Changed must be cleared on the broken flag too — this matches the
+	// semantics needed to prevent leak between invocations.
 	brokenFlag := cmd.Flags().Lookup("broken")
 	if brokenFlag.Changed {
 		t.Errorf("broken flag Changed = true, want false (must clear even on Set error)")

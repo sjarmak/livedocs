@@ -171,6 +171,8 @@ var tribalCorrectCmd = &cobra.Command{
 	Short: "Correct an existing tribal fact",
 	Long:  "Inserts a correction row with action='correct' and creates a new replacement fact with the updated body.",
 	RunE: func(cmd *cobra.Command, args []string) error {
+		defer resetCmdFlags(cmd)
+
 		dbPath, _ := cmd.Flags().GetString("db")
 		factID, _ := cmd.Flags().GetInt64("fact-id")
 		body, _ := cmd.Flags().GetString("body")
@@ -226,6 +228,8 @@ var tribalSupersedeCmd = &cobra.Command{
 	Short: "Supersede an existing tribal fact",
 	Long:  "Sets the original fact to status='superseded', records a correction, and creates a replacement fact.",
 	RunE: func(cmd *cobra.Command, args []string) error {
+		defer resetCmdFlags(cmd)
+
 		dbPath, _ := cmd.Flags().GetString("db")
 		factID, _ := cmd.Flags().GetInt64("fact-id")
 		body, _ := cmd.Flags().GetString("body")
@@ -286,6 +290,8 @@ var tribalDeleteCmd = &cobra.Command{
 	Short: "Delete a tribal fact",
 	Long:  "Sets the fact status to 'deleted' and records a correction row with action='delete'.",
 	RunE: func(cmd *cobra.Command, args []string) error {
+		defer resetCmdFlags(cmd)
+
 		dbPath, _ := cmd.Flags().GetString("db")
 		factID, _ := cmd.Flags().GetInt64("fact-id")
 		reason, _ := cmd.Flags().GetString("reason")
@@ -340,6 +346,8 @@ Hallucination rubric: wrong feedback reports, delete corrections, and
 supersede corrections each count as a hallucination label.`,
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
+		defer resetCmdFlags(cmd)
+
 		dbPath := args[0]
 
 		if err := ValidateDBPath(dbPath, ""); err != nil {
@@ -440,6 +448,8 @@ verification call per fact, and applies the verdict:
 Budget-tracked: stops after --budget LLM calls even if more facts remain.`,
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
+		defer resetCmdFlags(cmd)
+
 		dbPath := args[0]
 
 		if err := ValidateDBPath(dbPath, ""); err != nil {

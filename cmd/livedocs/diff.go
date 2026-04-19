@@ -20,9 +20,6 @@ import (
 	"github.com/sjarmak/livedocs/pipeline"
 )
 
-var diffFormat string
-var diffRepo string
-
 var diffCmd = &cobra.Command{
 	Use:   "diff <from-commit> <to-commit> [repo-path]",
 	Short: "Show documentation impact of code changes between two commits",
@@ -36,6 +33,8 @@ var diffCmd = &cobra.Command{
 This is the core "code changed → docs affected" flow.`,
 	Args: cobra.RangeArgs(2, 3),
 	RunE: func(cmd *cobra.Command, args []string) error {
+		defer resetCmdFlags(cmd)
+
 		fromCommit := args[0]
 		toCommit := args[1]
 		repoPath := "."
@@ -53,8 +52,8 @@ This is the core "code changed → docs affected" flow.`,
 }
 
 func init() {
-	diffCmd.Flags().StringVar(&diffFormat, "format", "text", "output format: text or json")
-	diffCmd.Flags().StringVar(&diffRepo, "repo", "", "repository name (defaults to directory basename)")
+	diffCmd.Flags().String("format", "text", "output format: text or json")
+	diffCmd.Flags().String("repo", "", "repository name (defaults to directory basename)")
 }
 
 // DiffReport is the output of the diff command.
@@ -100,7 +99,7 @@ func runDiff(cmd *cobra.Command, repoDir, fromCommit, toCommit string) error {
 	}
 
 	// 2. Set up the pipeline infrastructure.
-	repoName := diffRepo
+	repoName, _ := cmd.Flags().GetString("repo")
 	if repoName == "" {
 		repoName = filepath.Base(repoDir)
 	}
@@ -189,7 +188,8 @@ func runDiff(cmd *cobra.Command, repoDir, fromCommit, toCommit string) error {
 	}
 
 	// 8. Output.
-	switch diffFormat {
+	format, _ := cmd.Flags().GetString("format")
+	switch format {
 	case "json":
 		enc := json.NewEncoder(out)
 		enc.SetIndent("", "  ")
@@ -197,7 +197,7 @@ func runDiff(cmd *cobra.Command, repoDir, fromCommit, toCommit string) error {
 	case "text":
 		return formatDiffText(out, report)
 	default:
-		return fmt.Errorf("unknown format %q", diffFormat)
+		return fmt.Errorf("unknown format %q", format)
 	}
 }
 

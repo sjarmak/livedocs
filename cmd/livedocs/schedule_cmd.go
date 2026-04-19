@@ -22,11 +22,6 @@ import (
 	"github.com/sjarmak/livedocs/sourcegraph"
 )
 
-var (
-	scheduleConfigPath string
-	scheduleDryRun     bool
-)
-
 var extractScheduleCmd = &cobra.Command{
 	Use:   "extract-schedule",
 	Short: "Run scheduled extractions based on cron expressions",
@@ -51,8 +46,8 @@ Use --dry-run to print the schedule without executing extractions.`,
 }
 
 func init() {
-	extractScheduleCmd.Flags().StringVar(&scheduleConfigPath, "config", "", "path to JSON schedule config file (required)")
-	extractScheduleCmd.Flags().BoolVar(&scheduleDryRun, "dry-run", false, "print schedule without executing extractions")
+	extractScheduleCmd.Flags().String("config", "", "path to JSON schedule config file (required)")
+	extractScheduleCmd.Flags().Bool("dry-run", false, "print schedule without executing extractions")
 	_ = extractScheduleCmd.MarkFlagRequired("config")
 }
 
@@ -239,7 +234,12 @@ type scheduledRun struct {
 }
 
 func runExtractSchedule(cmd *cobra.Command, _ []string) error {
-	entries, err := loadScheduleConfig(scheduleConfigPath)
+	defer resetCmdFlags(cmd)
+
+	configPath, _ := cmd.Flags().GetString("config")
+	dryRun, _ := cmd.Flags().GetBool("dry-run")
+
+	entries, err := loadScheduleConfig(configPath)
 	if err != nil {
 		return err
 	}
@@ -266,7 +266,7 @@ func runExtractSchedule(cmd *cobra.Command, _ []string) error {
 	}
 
 	// Dry-run mode: print next 5 scheduled times per entry and exit.
-	if scheduleDryRun {
+	if dryRun {
 		return printDryRun(out, entries, runs)
 	}
 

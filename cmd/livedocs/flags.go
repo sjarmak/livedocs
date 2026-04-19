@@ -11,16 +11,19 @@ import (
 // and clears the Changed marker, so flag state does not leak between successive
 // invocations of the same cobra.Command.
 //
-// Background: pflag.Parse only mutates flags named in the current args, so
-// previously set values persist across Execute() calls. Without this reset,
-// a test (or process) that runs `<cmd> --some-flag` leaves --some-flag set
-// for every later invocation that omits it. See live_docs-m7v.28 for the
-// original observation on verify-claims, and live_docs-m7v.36 for the
-// extraction of this shared helper.
+// Background: pflag.Parse only mutates flags named in the current args. Even
+// though m7v.35 moved flag reads inside RunE via cmd.Flags().GetX(), the
+// underlying pflag.Flag still stores the parsed value across Execute() calls.
+// In a long-lived process (or test process), a previous invocation that set
+// --some-flag leaves --some-flag set for every later invocation that omits it.
+//
+// The recommended pattern is to call this helper at the END of RunE (via defer)
+// so the next invocation starts from defaults and only the args explicitly in
+// that invocation take effect. See live_docs-m7v.28 for the original observation
+// on verify-claims and live_docs-m7v.35 for the converged refactor.
 //
 // On Set error the helper logs a warning to cmd.ErrOrStderr() and continues
-// processing remaining flags. Changed is cleared unconditionally — preserving
-// the behavior of the original per-command reset functions.
+// processing remaining flags. Changed is cleared unconditionally.
 func resetCmdFlags(cmd *cobra.Command) {
 	cmd.Flags().VisitAll(func(f *pflag.Flag) {
 		if err := f.Value.Set(f.DefValue); err != nil {

@@ -11,8 +11,6 @@ import (
 	"github.com/sjarmak/livedocs/renderer"
 )
 
-var contextDataDir string
-
 var contextCmd = &cobra.Command{
 	Use:   "context <repo> [package]",
 	Short: "Generate claims-backed context documentation",
@@ -25,9 +23,13 @@ With one argument (repo only), generates .livedocs/CONTEXT.md files for
 every package found in the repository's claims database.`,
 	Args: cobra.RangeArgs(1, 2),
 	RunE: func(cmd *cobra.Command, args []string) error {
+		defer resetCmdFlags(cmd)
+
 		repoName := args[0]
 
-		pool := mcpserver.NewDBPool(contextDataDir, mcpserver.DefaultMaxOpenDBs)
+		dataDir, _ := cmd.Flags().GetString("data-dir")
+
+		pool := mcpserver.NewDBPool(dataDir, mcpserver.DefaultMaxOpenDBs)
 		defer pool.Close()
 
 		cdb, err := pool.Open(repoName)
@@ -100,5 +102,5 @@ func sanitizePath(importPath string) string {
 }
 
 func init() {
-	contextCmd.Flags().StringVar(&contextDataDir, "data-dir", "data/claims/", "directory containing per-repo .claims.db files")
+	contextCmd.Flags().String("data-dir", "data/claims/", "directory containing per-repo .claims.db files")
 }

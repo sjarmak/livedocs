@@ -22,22 +22,6 @@ import (
 	"github.com/sjarmak/livedocs/watch"
 )
 
-var (
-	watchInterval       time.Duration
-	watchDeepInterval   time.Duration
-	watchRepo           string
-	watchOutput         string
-	watchStateFile      string
-	watchConfig         string
-	watchReposDir       string
-	watchEnrich         bool
-	watchEnrichDebounce time.Duration
-	watchSource         string
-	watchRepos          string
-	watchConcurrency    int
-	watchDataDir        string
-)
-
 var watchCmd = &cobra.Command{
 	Use:   "watch [path]",
 	Short: "Watch a repository for changes and incrementally extract claims",
@@ -57,15 +41,29 @@ Handles force-push by falling back to full extraction when the stored SHA
 is no longer an ancestor of the current HEAD.`,
 	Args: cobra.MaximumNArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
+		defer resetCmdFlags(cmd)
+
+		source, _ := cmd.Flags().GetString("source")
+
 		// Sourcegraph remote mode.
-		if watchSource == "sourcegraph" {
+		if source == "sourcegraph" {
 			return runWatchSourcegraph(cmd)
 		}
 
+		configPath, _ := cmd.Flags().GetString("config")
+		reposDir, _ := cmd.Flags().GetString("repos-dir")
+		repoName, _ := cmd.Flags().GetString("repo")
+		output, _ := cmd.Flags().GetString("output")
+		stateFile, _ := cmd.Flags().GetString("state-file")
+		interval, _ := cmd.Flags().GetDuration("interval")
+		deepInterval, _ := cmd.Flags().GetDuration("deep-interval")
+		enrich, _ := cmd.Flags().GetBool("enrich")
+		enrichDebounce, _ := cmd.Flags().GetDuration("enrich-debounce")
+
 		// Determine which mode we're in.
 		hasPath := len(args) == 1
-		hasConfig := watchConfig != ""
-		hasReposDir := watchReposDir != ""
+		hasConfig := configPath != ""
+		hasReposDir := reposDir != ""
 
 		// Exactly one source must be specified.
 		sources := 0
@@ -91,12 +89,12 @@ is no longer an ancestor of the current HEAD.`,
 
 		switch {
 		case hasConfig:
-			entries, err = watch.LoadConfig(watchConfig)
+			entries, err = watch.LoadConfig(configPath)
 			if err != nil {
 				return err
 			}
 		case hasReposDir:
-			entries, err = watch.ScanReposDir(watchReposDir)
+			entries, err = watch.ScanReposDir(reposDir)
 			if err != nil {
 				return err
 			}
@@ -106,23 +104,22 @@ is no longer an ancestor of the current HEAD.`,
 			if absErr != nil {
 				return fmt.Errorf("resolve repo path: %w", absErr)
 			}
-			name := watchRepo
+			name := repoName
 			if name == "" {
 				name = filepath.Base(absRepo)
 			}
-			output := watchOutput
-			if output == "" {
-				output = name + ".claims.db"
+			outputPath := output
+			if outputPath == "" {
+				outputPath = name + ".claims.db"
 			}
 			entries = []watch.RepoEntry{{
 				Path:   absRepo,
 				Name:   name,
-				Output: output,
+				Output: outputPath,
 			}}
 		}
 
 		// Determine state file.
-		stateFile := watchStateFile
 		if stateFile == "" {
 			// Place state file next to first output, or in current dir.
 			if len(entries) > 0 {
@@ -132,24 +129,24 @@ is no longer an ancestor of the current HEAD.`,
 			}
 		}
 
-		return runWatchMulti(cmd, entries, stateFile, watchInterval, watchDeepInterval, watchEnrich, watchEnrichDebounce)
+		return runWatchMulti(cmd, entries, stateFile, interval, deepInterval, enrich, enrichDebounce)
 	},
 }
 
 func init() {
-	watchCmd.Flags().DurationVar(&watchInterval, "interval", 5*time.Second, "polling interval (e.g. 5s, 1m)")
-	watchCmd.Flags().DurationVar(&watchDeepInterval, "deep-interval", 10*time.Minute, "Go deep extractor interval (e.g. 10m, 1h; 0 to disable)")
-	watchCmd.Flags().StringVar(&watchRepo, "repo", "", "repository name (default: directory basename)")
-	watchCmd.Flags().StringVarP(&watchOutput, "output", "o", "", "output SQLite file path (default: <repo>.claims.db)")
-	watchCmd.Flags().StringVar(&watchStateFile, "state-file", "", "state file path (default: .livedocs-watch-state.json next to output)")
-	watchCmd.Flags().StringVar(&watchConfig, "config", "", "JSON config file listing repos to watch")
-	watchCmd.Flags().StringVar(&watchReposDir, "repos-dir", "", "directory of git repos to watch")
-	watchCmd.Flags().BoolVar(&watchEnrich, "enrich", false, "enable semantic enrichment via Sourcegraph after each extraction")
-	watchCmd.Flags().DurationVar(&watchEnrichDebounce, "enrich-debounce", 5*time.Second, "debounce interval for enrichment queue (e.g. 5s, 10s)")
-	watchCmd.Flags().StringVar(&watchSource, "source", "local", "extraction source: 'local' or 'sourcegraph'")
-	watchCmd.Flags().StringVar(&watchRepos, "repos", "", "repo pattern for Sourcegraph discovery (e.g. 'kubernetes/*')")
-	watchCmd.Flags().IntVar(&watchConcurrency, "concurrency", 10, "max concurrent MCP calls per repo (sourcegraph mode)")
-	watchCmd.Flags().StringVar(&watchDataDir, "data-dir", "", "output directory for .claims.db files (sourcegraph mode)")
+	watchCmd.Flags().Duration("interval", 5*time.Second, "polling interval (e.g. 5s, 1m)")
+	watchCmd.Flags().Duration("deep-interval", 10*time.Minute, "Go deep extractor interval (e.g. 10m, 1h; 0 to disable)")
+	watchCmd.Flags().String("repo", "", "repository name (default: directory basename)")
+	watchCmd.Flags().StringP("output", "o", "", "output SQLite file path (default: <repo>.claims.db)")
+	watchCmd.Flags().String("state-file", "", "state file path (default: .livedocs-watch-state.json next to output)")
+	watchCmd.Flags().String("config", "", "JSON config file listing repos to watch")
+	watchCmd.Flags().String("repos-dir", "", "directory of git repos to watch")
+	watchCmd.Flags().Bool("enrich", false, "enable semantic enrichment via Sourcegraph after each extraction")
+	watchCmd.Flags().Duration("enrich-debounce", 5*time.Second, "debounce interval for enrichment queue (e.g. 5s, 10s)")
+	watchCmd.Flags().String("source", "local", "extraction source: 'local' or 'sourcegraph'")
+	watchCmd.Flags().String("repos", "", "repo pattern for Sourcegraph discovery (e.g. 'kubernetes/*')")
+	watchCmd.Flags().Int("concurrency", 10, "max concurrent MCP calls per repo (sourcegraph mode)")
+	watchCmd.Flags().String("data-dir", "", "output directory for .claims.db files (sourcegraph mode)")
 }
 
 // runWatchMulti launches one watcher per repo entry, all sharing the same
@@ -324,20 +321,25 @@ func runWatchSourcegraph(cmd *cobra.Command) error {
 	ctx := cmd.Context()
 	out := cmd.OutOrStdout()
 
+	repos, _ := cmd.Flags().GetString("repos")
+	dataDir, _ := cmd.Flags().GetString("data-dir")
+	stateFile, _ := cmd.Flags().GetString("state-file")
+	intervalFlag, _ := cmd.Flags().GetDuration("interval")
+	concurrency, _ := cmd.Flags().GetInt("concurrency")
+
 	// Validate required inputs.
 	if os.Getenv("SRC_ACCESS_TOKEN") == "" {
 		return fmt.Errorf("SRC_ACCESS_TOKEN environment variable is required for --source sourcegraph")
 	}
-	if watchRepos == "" {
+	if repos == "" {
 		return fmt.Errorf("--repos is required when --source sourcegraph is used")
 	}
 	// Default interval for remote mode is 5m (local default is 5s).
-	interval := watchInterval
+	interval := intervalFlag
 	if !cmd.Flags().Changed("interval") {
 		interval = 5 * time.Minute
 	}
 
-	dataDir := watchDataDir
 	if dataDir == "" {
 		dataDir = "."
 	}
@@ -353,15 +355,15 @@ func runWatchSourcegraph(cmd *cobra.Command) error {
 	defer sgClient.Close()
 
 	// Discover repos matching the pattern.
-	repos, err := discoverSourcegraphRepos(ctx, sgClient, watchRepos)
+	discoveredRepos, err := discoverSourcegraphRepos(ctx, sgClient, repos)
 	if err != nil {
 		return fmt.Errorf("discover repos: %w", err)
 	}
-	if len(repos) == 0 {
-		return fmt.Errorf("no repos found matching pattern %q", watchRepos)
+	if len(discoveredRepos) == 0 {
+		return fmt.Errorf("no repos found matching pattern %q", repos)
 	}
 
-	fmt.Fprintf(out, "watch: discovered %d repos matching %q\n", len(repos), watchRepos)
+	fmt.Fprintf(out, "watch: discovered %d repos matching %q\n", len(discoveredRepos), repos)
 
 	// Set up signal handling for clean shutdown.
 	ctx, cancel := context.WithCancel(ctx)
@@ -379,7 +381,6 @@ func runWatchSourcegraph(cmd *cobra.Command) error {
 	}()
 
 	// Determine state file.
-	stateFile := watchStateFile
 	if stateFile == "" {
 		stateFile = filepath.Join(dataDir, ".livedocs-watch-state.json")
 	}
@@ -392,7 +393,7 @@ func runWatchSourcegraph(cmd *cobra.Command) error {
 		claimsDB   *db.ClaimsDB
 		cacheStore *cache.SQLiteStore
 	}
-	resources := make([]remoteResources, 0, len(repos))
+	resources := make([]remoteResources, 0, len(discoveredRepos))
 	defer func() {
 		for _, r := range resources {
 			r.cacheStore.Close()
@@ -401,15 +402,15 @@ func runWatchSourcegraph(cmd *cobra.Command) error {
 	}()
 
 	// Create a SourcegraphFileSource shared across repos (one MCP client).
-	fileSource, err := pipeline.NewSourcegraphFileSource(sgClient, sgToolLister{}, pipeline.WithConcurrency(watchConcurrency))
+	fileSource, err := pipeline.NewSourcegraphFileSource(sgClient, sgToolLister{}, pipeline.WithConcurrency(concurrency))
 	if err != nil {
 		return fmt.Errorf("create sourcegraph file source: %w", err)
 	}
 
 	var wg sync.WaitGroup
-	errCh := make(chan error, len(repos))
+	errCh := make(chan error, len(discoveredRepos))
 
-	for _, repo := range repos {
+	for _, repo := range discoveredRepos {
 		repoName := repoBaseName(repo)
 		dbPath := filepath.Join(dataDir, repoName+".claims.db")
 

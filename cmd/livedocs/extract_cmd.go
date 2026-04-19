@@ -28,22 +28,6 @@ import (
 	"github.com/sjarmak/livedocs/sourcegraph"
 )
 
-var (
-	extractSource                 string
-	extractRepo                   string
-	extractOutput                 string
-	extractTier2                  bool
-	extractTribal                 string
-	extractDataDir                string
-	extractFromRev                string
-	extractToRev                  string
-	extractConfirm                bool
-	extractConcurrency            int
-	extractAcceptUnknownGhVersion bool
-	extractForceRemine            bool
-	extractMaxFiles               int
-)
-
 // newLLMClient creates the LLM client for semantic extraction.
 // Overridable in tests to inject a mock.
 var newLLMClient = func(apiKey string) (semantic.LLMClient, error) {
@@ -75,7 +59,10 @@ Supports --from-rev and --to-rev for incremental extraction. Without
 revision flags, estimates cost and requires --confirm to proceed.`,
 	Args: cobra.MaximumNArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
-		switch extractSource {
+		defer resetCmdFlags(cmd)
+
+		source, _ := cmd.Flags().GetString("source")
+		switch source {
 		case "", "local":
 			return runExtractLocal(cmd, args)
 		case "clone":
@@ -83,7 +70,7 @@ revision flags, estimates cost and requires --confirm to proceed.`,
 		case "sourcegraph":
 			return runExtractSourcegraph(cmd)
 		default:
-			return fmt.Errorf("unknown --source value: %q (valid: local, clone, sourcegraph)", extractSource)
+			return fmt.Errorf("unknown --source value: %q (valid: local, clone, sourcegraph)", source)
 		}
 	},
 }
@@ -98,20 +85,26 @@ func runExtractLocal(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("resolve repo path: %w", err)
 	}
 
-	repoName := extractRepo
+	repoFlag, _ := cmd.Flags().GetString("repo")
+	output, _ := cmd.Flags().GetString("output")
+
+	repoName := repoFlag
 	if repoName == "" {
 		repoName = filepath.Base(absRepo)
 	}
 
-	return runExtract(cmd.Context(), cmd, absRepo, repoName, extractOutput)
+	return runExtract(cmd.Context(), cmd, absRepo, repoName, output)
 }
 
 func runExtractClone(cmd *cobra.Command) error {
-	if extractRepo == "" {
+	repoFlag, _ := cmd.Flags().GetString("repo")
+	output, _ := cmd.Flags().GetString("output")
+
+	if repoFlag == "" {
 		return fmt.Errorf("--repo is required when --source clone is used")
 	}
 
-	repoURL := extractRepo
+	repoURL := repoFlag
 	repoName := repoNameFromURL(repoURL)
 
 	tmpDir, err := os.MkdirTemp("", "livedocs-clone-*")
@@ -129,7 +122,7 @@ func runExtractClone(cmd *cobra.Command) error {
 		return fmt.Errorf("git clone --depth=1 %s: %w", repoURL, err)
 	}
 
-	return runExtract(cmd.Context(), cmd, tmpDir, repoName, extractOutput)
+	return runExtract(cmd.Context(), cmd, tmpDir, repoName, output)
 }
 
 // repoNameFromURL extracts a repository name from a URL.
@@ -148,20 +141,20 @@ func repoNameFromURL(rawURL string) string {
 }
 
 func init() {
-	extractCmd.Flags().StringVar(&extractSource, "source", "", "extraction source: local (default), clone, sourcegraph")
-	extractCmd.Flags().StringVar(&extractRepo, "repo", "", "repository name or URL (URL when --source clone)")
-	extractCmd.Flags().StringVarP(&extractOutput, "output", "o", "", "output SQLite file path (default: <repo>.claims.db)")
-	extractCmd.Flags().BoolVar(&extractTier2, "tier2", false, "generate Tier 2 semantic claims via LLM (requires ANTHROPIC_API_KEY)")
-	tribalFlag := extractCmd.Flags().VarPF(&tribalFlagValue{val: &extractTribal}, "tribal", "", "tribal knowledge extraction mode: deterministic (default when flag present), llm")
+	extractCmd.Flags().String("source", "", "extraction source: local (default), clone, sourcegraph")
+	extractCmd.Flags().String("repo", "", "repository name or URL (URL when --source clone)")
+	extractCmd.Flags().StringP("output", "o", "", "output SQLite file path (default: <repo>.claims.db)")
+	extractCmd.Flags().Bool("tier2", false, "generate Tier 2 semantic claims via LLM (requires ANTHROPIC_API_KEY)")
+	tribalFlag := extractCmd.Flags().VarPF(&tribalFlagValue{}, "tribal", "", "tribal knowledge extraction mode: deterministic (default when flag present), llm")
 	tribalFlag.NoOptDefVal = "deterministic"
-	extractCmd.Flags().StringVar(&extractDataDir, "data-dir", "", "directory for output .claims.db (used with --source sourcegraph)")
-	extractCmd.Flags().StringVar(&extractFromRev, "from-rev", "", "start revision for incremental extraction (used with --source sourcegraph)")
-	extractCmd.Flags().StringVar(&extractToRev, "to-rev", "", "end revision for incremental extraction (used with --source sourcegraph)")
-	extractCmd.Flags().BoolVar(&extractConfirm, "confirm", false, "confirm full extraction after cost estimate (used with --source sourcegraph)")
-	extractCmd.Flags().IntVar(&extractConcurrency, "concurrency", 10, "max concurrent MCP calls (used with --source sourcegraph)")
-	extractCmd.Flags().BoolVar(&extractAcceptUnknownGhVersion, "accept-unknown-gh-version", false, "accept a gh CLI version not in the advisory allowlist (used with --tribal=llm)")
-	extractCmd.Flags().BoolVar(&extractForceRemine, "force-remine", false, "clear the stored PR cursor and re-mine every file from scratch (used with --tribal=llm)")
-	extractCmd.Flags().IntVar(&extractMaxFiles, "max-files", 0, "override tribal.max_files_per_run: cap files processed by tribal mining per invocation (0 = use config default)")
+	extractCmd.Flags().String("data-dir", "", "directory for output .claims.db (used with --source sourcegraph)")
+	extractCmd.Flags().String("from-rev", "", "start revision for incremental extraction (used with --source sourcegraph)")
+	extractCmd.Flags().String("to-rev", "", "end revision for incremental extraction (used with --source sourcegraph)")
+	extractCmd.Flags().Bool("confirm", false, "confirm full extraction after cost estimate (used with --source sourcegraph)")
+	extractCmd.Flags().Int("concurrency", 10, "max concurrent MCP calls (used with --source sourcegraph)")
+	extractCmd.Flags().Bool("accept-unknown-gh-version", false, "accept a gh CLI version not in the advisory allowlist (used with --tribal=llm)")
+	extractCmd.Flags().Bool("force-remine", false, "clear the stored PR cursor and re-mine every file from scratch (used with --tribal=llm)")
+	extractCmd.Flags().Int("max-files", 0, "override tribal.max_files_per_run: cap files processed by tribal mining per invocation (0 = use config default)")
 }
 
 // rankedFilesTrace is a package-level hook used by tests to observe which
@@ -181,12 +174,12 @@ var skipDirs = map[string]bool{
 }
 
 // resolveMaxFilesForTribal returns the cap on files processed by the tribal
-// mining loop per invocation. If --max-files was set to a positive value it
-// takes precedence; otherwise we fall back to cfg.Tribal.MaxFilesPerRun from
-// the repo's .livedocs.yaml (which defaults to config.DefaultTribalMaxFilesPerRun).
-func resolveMaxFilesForTribal(repoDir string) int {
-	if extractMaxFiles > 0 {
-		return extractMaxFiles
+// mining loop per invocation. If maxFilesFlag is positive it takes precedence;
+// otherwise we fall back to cfg.Tribal.MaxFilesPerRun from the repo's
+// .livedocs.yaml (which defaults to config.DefaultTribalMaxFilesPerRun).
+func resolveMaxFilesForTribal(repoDir string, maxFilesFlag int) int {
+	if maxFilesFlag > 0 {
+		return maxFilesFlag
 	}
 	cfg, err := config.Load(config.ConfigPath(repoDir))
 	if err != nil || cfg.Tribal.MaxFilesPerRun <= 0 {
@@ -442,10 +435,14 @@ func runExtract(ctx context.Context, cmd *cobra.Command, repoDir, repoName, outp
 		return fmt.Errorf("walk repo: %w", err)
 	}
 
+	tier2, _ := cmd.Flags().GetBool("tier2")
+	tribalMode, _ := cmd.Flags().GetString("tribal")
+	maxFilesFlag, _ := cmd.Flags().GetInt("max-files")
+
 	// Phase 3: Tier 2 semantic extraction (if requested).
 	var semanticStored int
 	var semanticFiltered int64
-	if extractTier2 {
+	if tier2 {
 		apiKey := os.Getenv("ANTHROPIC_API_KEY")
 		if apiKey == "" {
 			return fmt.Errorf("ANTHROPIC_API_KEY environment variable is required for --tier2 semantic extraction")
@@ -490,11 +487,11 @@ func runExtract(ctx context.Context, cmd *cobra.Command, repoDir, repoName, outp
 	}
 
 	// Phase 4: Tribal knowledge extraction (if requested).
-	if extractTribal != "" {
+	if tribalMode != "" {
 		// Resolve the files-per-run cap from --max-files flag or config default.
-		maxFiles := resolveMaxFilesForTribal(repoDir)
+		maxFiles := resolveMaxFilesForTribal(repoDir, maxFilesFlag)
 
-		switch extractTribal {
+		switch tribalMode {
 		case "deterministic":
 			fmt.Fprintf(out, "Running tribal knowledge extraction (deterministic)...\n")
 			if err := runTribalExtraction(ctx, out, claimsDB, repoDir, repoName, maxFiles); err != nil {
@@ -507,11 +504,13 @@ func runExtract(ctx context.Context, cmd *cobra.Command, repoDir, repoName, outp
 				return fmt.Errorf("tribal extraction: %w", err)
 			}
 			fmt.Fprintf(out, "Running tribal knowledge extraction (LLM)...\n")
-			if err := runLLMTribalExtraction(ctx, out, claimsDB, repoDir, repoName, maxFiles); err != nil {
+			acceptUnknownGh, _ := cmd.Flags().GetBool("accept-unknown-gh-version")
+			forceRemine, _ := cmd.Flags().GetBool("force-remine")
+			if err := runLLMTribalExtraction(ctx, out, claimsDB, repoDir, repoName, maxFiles, acceptUnknownGh, forceRemine); err != nil {
 				return fmt.Errorf("LLM tribal extraction: %w", err)
 			}
 		default:
-			return fmt.Errorf("unknown --tribal value: %q (valid: deterministic, llm)", extractTribal)
+			return fmt.Errorf("unknown --tribal value: %q (valid: deterministic, llm)", tribalMode)
 		}
 	}
 
@@ -530,7 +529,7 @@ func runExtract(ctx context.Context, cmd *cobra.Command, repoDir, repoName, outp
 	fmt.Fprintf(out, "- **Non-Go files extracted**: %d\n", extractedFiles)
 	fmt.Fprintf(out, "- **Files skipped**: %d\n", skippedFiles)
 	fmt.Fprintf(out, "- **Errors**: %d\n", errorCount)
-	if extractTier2 {
+	if tier2 {
 		fmt.Fprintf(out, "- **Semantic claims stored**: %d\n", semanticStored)
 		fmt.Fprintf(out, "- **Semantic claims filtered**: %d\n", semanticFiltered)
 	}
@@ -576,19 +575,26 @@ func runExtractSourcegraph(cmd *cobra.Command) error {
 	ctx := cmd.Context()
 	out := cmd.OutOrStdout()
 
+	repoFlag, _ := cmd.Flags().GetString("repo")
+	dataDir, _ := cmd.Flags().GetString("data-dir")
+	fromRevFlag, _ := cmd.Flags().GetString("from-rev")
+	toRevFlag, _ := cmd.Flags().GetString("to-rev")
+	confirm, _ := cmd.Flags().GetBool("confirm")
+	concurrency, _ := cmd.Flags().GetInt("concurrency")
+
 	// Validate required inputs.
 	if os.Getenv("SRC_ACCESS_TOKEN") == "" {
 		return fmt.Errorf("SRC_ACCESS_TOKEN environment variable is required for --source sourcegraph")
 	}
-	if extractRepo == "" {
+	if repoFlag == "" {
 		return fmt.Errorf("--repo is required when --source sourcegraph is used")
 	}
-	if extractDataDir == "" {
+	if dataDir == "" {
 		return fmt.Errorf("--data-dir is required when --source sourcegraph is used")
 	}
 
 	// Derive repo name for the DB file (last path component).
-	repoName := extractRepo
+	repoName := repoFlag
 	if idx := strings.LastIndex(repoName, "/"); idx >= 0 {
 		repoName = repoName[idx+1:]
 	}
@@ -601,20 +607,20 @@ func runExtractSourcegraph(cmd *cobra.Command) error {
 	defer sgClient.Close()
 
 	// Create SourcegraphFileSource with concurrency control.
-	fileSource, err := pipeline.NewSourcegraphFileSource(sgClient, sgToolLister{}, pipeline.WithConcurrency(extractConcurrency))
+	fileSource, err := pipeline.NewSourcegraphFileSource(sgClient, sgToolLister{}, pipeline.WithConcurrency(concurrency))
 	if err != nil {
 		return fmt.Errorf("create sourcegraph file source: %w", err)
 	}
 
 	// Determine extraction mode: incremental (--from-rev/--to-rev) or full.
-	isIncremental := extractFromRev != "" || extractToRev != ""
+	isIncremental := fromRevFlag != "" || toRevFlag != ""
 
 	var changes []gitdiff.FileChange
 
 	if !isIncremental {
 		// Full extraction: list all files, estimate cost, require --confirm.
-		fmt.Fprintf(out, "Listing files in %s...\n", extractRepo)
-		files, err := fileSource.ListFiles(ctx, extractRepo, "", "*")
+		fmt.Fprintf(out, "Listing files in %s...\n", repoFlag)
+		files, err := fileSource.ListFiles(ctx, repoFlag, "", "*")
 		if err != nil {
 			return fmt.Errorf("list files: %w", err)
 		}
@@ -622,18 +628,18 @@ func runExtractSourcegraph(cmd *cobra.Command) error {
 		fileCount := len(files)
 		estimatedCalls := fileCount // 1 read_file call per file
 		estimatedCost := float64(estimatedCalls) * sgCostPerCall
-		estimatedTime := float64(estimatedCalls) * sgSecondsPerCall / float64(extractConcurrency)
+		estimatedTime := float64(estimatedCalls) * sgSecondsPerCall / float64(concurrency)
 
 		fmt.Fprintf(out, "\nFull Extraction Cost Estimate\n")
 		fmt.Fprintf(out, "============================\n")
-		fmt.Fprintf(out, "  Repository:      %s\n", extractRepo)
+		fmt.Fprintf(out, "  Repository:      %s\n", repoFlag)
 		fmt.Fprintf(out, "  Files:           %d\n", fileCount)
 		fmt.Fprintf(out, "  MCP calls:       %d\n", estimatedCalls)
-		fmt.Fprintf(out, "  Concurrency:     %d\n", extractConcurrency)
+		fmt.Fprintf(out, "  Concurrency:     %d\n", concurrency)
 		fmt.Fprintf(out, "  Estimated cost:  $%.2f\n", estimatedCost)
 		fmt.Fprintf(out, "  Estimated time:  %.0fs\n", estimatedTime)
 
-		if !extractConfirm {
+		if !confirm {
 			fmt.Fprintf(out, "\nRun with --confirm to proceed with extraction.\n")
 			return nil
 		}
@@ -646,15 +652,15 @@ func runExtractSourcegraph(cmd *cobra.Command) error {
 	}
 
 	// Set up output path.
-	outputPath := filepath.Join(extractDataDir, repoName+".claims.db")
+	outputPath := filepath.Join(dataDir, repoName+".claims.db")
 
 	// Ensure data-dir exists.
-	if err := os.MkdirAll(extractDataDir, 0o755); err != nil {
+	if err := os.MkdirAll(dataDir, 0o755); err != nil {
 		return fmt.Errorf("create data-dir: %w", err)
 	}
 
 	// Use atomic file replacement.
-	tmpFile, err := os.CreateTemp(extractDataDir, repoName+".claims.db.tmp.*")
+	tmpFile, err := os.CreateTemp(dataDir, repoName+".claims.db.tmp.*")
 	if err != nil {
 		return fmt.Errorf("create temp file: %w", err)
 	}
@@ -719,7 +725,7 @@ func runExtractSourcegraph(cmd *cobra.Command) error {
 	// Run the pipeline.
 	start := time.Now()
 	p := pipeline.New(pipeline.Config{
-		Repo:       extractRepo,
+		Repo:       repoFlag,
 		RepoDir:    "",
 		Cache:      cacheStore,
 		ClaimsDB:   claimsDB,
@@ -731,7 +737,7 @@ func runExtractSourcegraph(cmd *cobra.Command) error {
 	// pre-fetched file list instead of making a second compare_revisions call.
 	if !isIncremental {
 		p = pipeline.New(pipeline.Config{
-			Repo:       extractRepo,
+			Repo:       repoFlag,
 			RepoDir:    "",
 			Cache:      cacheStore,
 			ClaimsDB:   claimsDB,
@@ -742,8 +748,8 @@ func runExtractSourcegraph(cmd *cobra.Command) error {
 
 	var result pipeline.Result
 	if isIncremental {
-		fromRev := extractFromRev
-		toRev := extractToRev
+		fromRev := fromRevFlag
+		toRev := toRevFlag
 		if toRev == "" {
 			toRev = "HEAD"
 		}
@@ -761,7 +767,7 @@ func runExtractSourcegraph(cmd *cobra.Command) error {
 
 	// Print summary.
 	fmt.Fprintf(out, "\n## Sourcegraph Extract Summary\n\n")
-	fmt.Fprintf(out, "- **Repository**: %s\n", extractRepo)
+	fmt.Fprintf(out, "- **Repository**: %s\n", repoFlag)
 	fmt.Fprintf(out, "- **Output**: %s\n", outputPath)
 	fmt.Fprintf(out, "- **Files changed**: %d\n", result.FilesChanged)
 	fmt.Fprintf(out, "- **Files extracted**: %d\n", result.FilesExtracted)
@@ -779,7 +785,7 @@ func runExtractSourcegraph(cmd *cobra.Command) error {
 	// Store extraction metadata.
 	if err := claimsDB.SetExtractionMeta(db.ExtractionMeta{
 		ExtractedAt: db.Now(),
-		RepoRoot:    extractRepo,
+		RepoRoot:    repoFlag,
 	}); err != nil {
 		return fmt.Errorf("set extraction meta: %w", err)
 	}
@@ -886,22 +892,22 @@ func countSymbols(claimsDB *db.ClaimsDB) int {
 	return len(symbols)
 }
 
-// tribalFlagValue implements pflag.Value for the --tribal flag.
+// tribalFlagValue implements pflag.Value for the --tribal flag. It validates
+// that the value is one of the allowed modes (deterministic, llm) and stores
+// it internally so flag state is owned by the cobra.Flag, not by a package
+// variable. RunE reads the current value via cmd.Flags().GetString("tribal").
 type tribalFlagValue struct {
-	val *string
+	val string
 }
 
 func (t *tribalFlagValue) String() string {
-	if t.val == nil {
-		return ""
-	}
-	return *t.val
+	return t.val
 }
 
 func (t *tribalFlagValue) Set(s string) error {
 	switch s {
 	case "deterministic", "llm":
-		*t.val = s
+		t.val = s
 		return nil
 	default:
 		return fmt.Errorf("invalid --tribal value: %q (valid: deterministic, llm)", s)
@@ -1049,7 +1055,7 @@ func runTribalExtraction(ctx context.Context, out io.Writer, claimsDB *db.Claims
 // It validates config opt-in, API key presence, and git remote parsing, then
 // selects files via ClaimsDB.RankFilesForMining (capped at maxFiles) before
 // classifying PR comments via LLM.
-func runLLMTribalExtraction(ctx context.Context, out io.Writer, claimsDB *db.ClaimsDB, repoDir, repoName string, maxFiles int) error {
+func runLLMTribalExtraction(ctx context.Context, out io.Writer, claimsDB *db.ClaimsDB, repoDir, repoName string, maxFiles int, acceptUnknownGhVersion, forceRemine bool) error {
 	// 1. Load config and check opt-in gate.
 	cfg, err := config.Load(config.ConfigPath(repoDir))
 	if err != nil {
@@ -1067,7 +1073,7 @@ func runLLMTribalExtraction(ctx context.Context, out io.Writer, claimsDB *db.Cla
 	}
 
 	// 3. gh CLI version preflight.
-	ghVersion, ghErr := tribal.CheckGhVersion(ctx, nil, extractAcceptUnknownGhVersion)
+	ghVersion, ghErr := tribal.CheckGhVersion(ctx, nil, acceptUnknownGhVersion)
 	if ghErr != nil {
 		return fmt.Errorf("gh CLI preflight: %w (rerun with --accept-unknown-gh-version to bypass)", ghErr)
 	}
@@ -1075,7 +1081,7 @@ func runLLMTribalExtraction(ctx context.Context, out io.Writer, claimsDB *db.Cla
 	minerVersion := "gh-" + ghVersion
 
 	// 4. Optional force-remine: clear all stored PR cursors for this repo.
-	if extractForceRemine {
+	if forceRemine {
 		if err := claimsDB.ClearPRIDSet(repoName); err != nil {
 			return fmt.Errorf("force-remine: clear pr id set: %w", err)
 		}

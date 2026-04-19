@@ -15,19 +15,6 @@ import (
 	"github.com/sjarmak/livedocs/sourcegraph"
 )
 
-var (
-	checkFormat         string
-	checkUpdateManifest bool
-	checkManifest       bool
-	checkSemantic       bool
-	checkCrossRepo      bool
-	checkDocMap         string
-	checkDocsDir        string
-	checkAllMarkdown    bool
-	checkExclude        []string
-	checkInclude        []string
-)
-
 var checkCmd = &cobra.Command{
 	Use:   "check [path]",
 	Short: "Detect documentation drift",
@@ -40,23 +27,29 @@ Modes:
   --update-manifest  Generate or update the .livedocs/manifest file`,
 	Args: cobra.MaximumNArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
+		defer resetCmdFlags(cmd)
+
 		path := "."
 		if len(args) > 0 {
 			path = args[0]
 		}
 
+		crossRepo, _ := cmd.Flags().GetBool("cross-repo")
+		updateManifest, _ := cmd.Flags().GetBool("update-manifest")
+		manifest, _ := cmd.Flags().GetBool("manifest")
+
 		// Mode: cross-repo semantic check
-		if checkCrossRepo {
+		if crossRepo {
 			return runCrossRepoCheck(cmd, path)
 		}
 
 		// Mode: update manifest
-		if checkUpdateManifest {
+		if updateManifest {
 			return runUpdateManifest(cmd, path)
 		}
 
 		// Mode: manifest-based stateless check
-		if checkManifest {
+		if manifest {
 			return runManifestCheck(cmd, path)
 		}
 
@@ -66,23 +59,29 @@ Modes:
 }
 
 func init() {
-	checkCmd.Flags().StringVar(&checkFormat, "format", "text", "output format: text or json")
-	checkCmd.Flags().BoolVar(&checkUpdateManifest, "update-manifest", false, "generate or update the .livedocs/manifest file")
-	checkCmd.Flags().BoolVar(&checkManifest, "manifest", false, "use fast manifest-based check (no SQLite)")
-	checkCmd.Flags().BoolVar(&checkSemantic, "semantic", false, "run semantic drift detection via Sourcegraph deepsearch")
-	checkCmd.Flags().BoolVar(&checkCrossRepo, "cross-repo", false, "run cross-repo semantic drift detection using doc-map")
-	checkCmd.Flags().StringVar(&checkDocMap, "doc-map", "", "path to doc-map.yaml (required with --cross-repo)")
-	checkCmd.Flags().StringVar(&checkDocsDir, "docs-dir", "", "directory containing documentation files (for --cross-repo)")
-	checkCmd.Flags().BoolVar(&checkAllMarkdown, "all-markdown", false, "scan all *.md files (legacy behavior)")
-	checkCmd.Flags().StringSliceVar(&checkExclude, "exclude", nil, "exclude patterns (directory/ or glob)")
-	checkCmd.Flags().StringSliceVar(&checkInclude, "include", nil, "include only files matching these patterns (overrides defaults)")
+	checkCmd.Flags().String("format", "text", "output format: text or json")
+	checkCmd.Flags().Bool("update-manifest", false, "generate or update the .livedocs/manifest file")
+	checkCmd.Flags().Bool("manifest", false, "use fast manifest-based check (no SQLite)")
+	checkCmd.Flags().Bool("semantic", false, "run semantic drift detection via Sourcegraph deepsearch")
+	checkCmd.Flags().Bool("cross-repo", false, "run cross-repo semantic drift detection using doc-map")
+	checkCmd.Flags().String("doc-map", "", "path to doc-map.yaml (required with --cross-repo)")
+	checkCmd.Flags().String("docs-dir", "", "directory containing documentation files (for --cross-repo)")
+	checkCmd.Flags().Bool("all-markdown", false, "scan all *.md files (legacy behavior)")
+	checkCmd.Flags().StringSlice("exclude", nil, "exclude patterns (directory/ or glob)")
+	checkCmd.Flags().StringSlice("include", nil, "include only files matching these patterns (overrides defaults)")
 }
 
 func runFullCheck(cmd *cobra.Command, path string) error {
+	allMarkdown, _ := cmd.Flags().GetBool("all-markdown")
+	exclude, _ := cmd.Flags().GetStringSlice("exclude")
+	include, _ := cmd.Flags().GetStringSlice("include")
+	semantic, _ := cmd.Flags().GetBool("semantic")
+	format, _ := cmd.Flags().GetString("format")
+
 	opts := check.FindOptions{
-		AllMarkdown:     checkAllMarkdown,
-		ExcludePatterns: checkExclude,
-		IncludePatterns: checkInclude,
+		AllMarkdown:     allMarkdown,
+		ExcludePatterns: exclude,
+		IncludePatterns: include,
 	}
 	result, err := check.RunWithOptions(cmd.Context(), path, opts)
 	if err != nil {
@@ -90,12 +89,12 @@ func runFullCheck(cmd *cobra.Command, path string) error {
 	}
 
 	// Optional semantic pass: validate README descriptions against code intent.
-	if checkSemantic {
+	if semantic {
 		runSemanticPass(cmd, result, path)
 	}
 
 	out := cmd.OutOrStdout()
-	switch checkFormat {
+	switch format {
 	case "json":
 		enc := json.NewEncoder(out)
 		enc.SetIndent("", "  ")
@@ -105,7 +104,7 @@ func runFullCheck(cmd *cobra.Command, path string) error {
 	case "text":
 		fmt.Fprint(out, check.FormatText(result))
 	default:
-		return fmt.Errorf("unknown format %q: use \"text\" or \"json\"", checkFormat)
+		return fmt.Errorf("unknown format %q: use \"text\" or \"json\"", format)
 	}
 
 	if result.HasDrift {
@@ -116,13 +115,15 @@ func runFullCheck(cmd *cobra.Command, path string) error {
 }
 
 func runManifestCheck(cmd *cobra.Command, path string) error {
+	format, _ := cmd.Flags().GetString("format")
+
 	result, err := check.RunManifest(cmd.Context(), path)
 	if err != nil {
 		return fmt.Errorf("manifest check failed: %w", err)
 	}
 
 	out := cmd.OutOrStdout()
-	switch checkFormat {
+	switch format {
 	case "json":
 		enc := json.NewEncoder(out)
 		enc.SetIndent("", "  ")
@@ -132,7 +133,7 @@ func runManifestCheck(cmd *cobra.Command, path string) error {
 	case "text":
 		fmt.Fprint(out, check.FormatManifestResult(result))
 	default:
-		return fmt.Errorf("unknown format %q: use \"text\" or \"json\"", checkFormat)
+		return fmt.Errorf("unknown format %q: use \"text\" or \"json\"", format)
 	}
 
 	if result.HasAffected {
@@ -187,11 +188,15 @@ func runSemanticPass(cmd *cobra.Command, result *check.Result, path string) {
 // runCrossRepoCheck runs cross-repo semantic drift detection using a doc-map
 // to validate documentation against code in remote repositories.
 func runCrossRepoCheck(cmd *cobra.Command, _ string) error {
-	if checkDocMap == "" {
+	docMapPath, _ := cmd.Flags().GetString("doc-map")
+	docsDir, _ := cmd.Flags().GetString("docs-dir")
+	format, _ := cmd.Flags().GetString("format")
+
+	if docMapPath == "" {
 		return fmt.Errorf("--doc-map is required with --cross-repo")
 	}
 
-	docMap, err := drift.LoadDocMap(checkDocMap)
+	docMap, err := drift.LoadDocMap(docMapPath)
 	if err != nil {
 		return err
 	}
@@ -212,7 +217,7 @@ func runCrossRepoCheck(cmd *cobra.Command, _ string) error {
 	checker := drift.NewCrossRepoChecker(llm, searcher, docMap)
 
 	ctx := cmd.Context()
-	reports, err := checker.CheckAllDocs(ctx, checkDocsDir)
+	reports, err := checker.CheckAllDocs(ctx, docsDir)
 	if err != nil {
 		return fmt.Errorf("cross-repo check: %w", err)
 	}
@@ -220,7 +225,7 @@ func runCrossRepoCheck(cmd *cobra.Command, _ string) error {
 	out := cmd.OutOrStdout()
 	hasDrift := false
 
-	switch checkFormat {
+	switch format {
 	case "json":
 		enc := json.NewEncoder(out)
 		enc.SetIndent("", "  ")
@@ -232,7 +237,7 @@ func runCrossRepoCheck(cmd *cobra.Command, _ string) error {
 			fmt.Fprint(out, drift.FormatCrossRepoReport(r))
 		}
 	default:
-		return fmt.Errorf("unknown format %q", checkFormat)
+		return fmt.Errorf("unknown format %q", format)
 	}
 
 	for _, r := range reports {

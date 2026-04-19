@@ -10,14 +10,6 @@ import (
 	"github.com/sjarmak/livedocs/db"
 )
 
-// resetExportFlags resets global flag state to avoid leaking between tests.
-func resetExportFlags() {
-	exportFormat = "audit-json"
-	exportOutput = ""
-	exportRepo = ""
-	exportDB = ""
-}
-
 func TestExportCommandRegistered(t *testing.T) {
 	registered := make(map[string]bool)
 	for _, cmd := range rootCmd.Commands() {
@@ -44,7 +36,6 @@ func TestExportCommandFlags(t *testing.T) {
 }
 
 func TestExportMarkdownRequiresRepo(t *testing.T) {
-	resetExportFlags()
 	buf := new(bytes.Buffer)
 	rootCmd.SetOut(buf)
 	rootCmd.SetErr(buf)
@@ -59,8 +50,6 @@ func TestExportMarkdownRequiresRepo(t *testing.T) {
 }
 
 func TestExportMarkdownFromDB(t *testing.T) {
-	resetExportFlags()
-
 	// Create a temporary directory structure with go.mod.
 	repoDir := t.TempDir()
 	subPkg := filepath.Join(repoDir, "tools", "cache")
@@ -162,8 +151,6 @@ func TestExportMarkdownFromDB(t *testing.T) {
 }
 
 func TestExportMarkdownToFile(t *testing.T) {
-	resetExportFlags()
-
 	// Set up the same way as TestExportMarkdownFromDB but write to a file.
 	repoDir := t.TempDir()
 	goMod := filepath.Join(repoDir, "go.mod")
@@ -215,7 +202,6 @@ func TestExportMarkdownToFile(t *testing.T) {
 }
 
 func TestExportUnknownFormat(t *testing.T) {
-	resetExportFlags()
 	buf := new(bytes.Buffer)
 	rootCmd.SetOut(buf)
 	rootCmd.SetErr(buf)

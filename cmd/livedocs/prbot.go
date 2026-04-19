@@ -12,14 +12,6 @@ import (
 	"github.com/sjarmak/livedocs/prbot"
 )
 
-var (
-	prbotDiffFile   string
-	prbotDBPath     string
-	prbotRadius     int
-	prbotFormat     string
-	prbotDiffFormat string
-)
-
 var prbotCmd = &cobra.Command{
 	Use:   "prbot",
 	Short: "Analyze PR diff for documentation impact",
@@ -33,20 +25,28 @@ a claims database path. The command prints the PR comment body to stdout.
 As a GitHub App webhook handler, this logic is invoked automatically
 on pull_request events.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		changes, err := loadChanges(prbotDiffFile, prbotDiffFormat)
+		defer resetCmdFlags(cmd)
+
+		diffFile, _ := cmd.Flags().GetString("diff-file")
+		dbPath, _ := cmd.Flags().GetString("db")
+		radius, _ := cmd.Flags().GetInt("radius")
+		format, _ := cmd.Flags().GetString("format")
+		diffFormat, _ := cmd.Flags().GetString("diff-format")
+
+		changes, err := loadChanges(diffFile, diffFormat)
 		if err != nil {
 			return fmt.Errorf("load diff: %w", err)
 		}
 
-		claims, err := loadClaims(prbotDBPath)
+		claims, err := loadClaims(dbPath)
 		if err != nil {
 			return fmt.Errorf("load claims: %w", err)
 		}
 
-		report := prbot.Analyze(changes, claims, prbotRadius)
+		report := prbot.Analyze(changes, claims, radius)
 
 		out := cmd.OutOrStdout()
-		switch prbotFormat {
+		switch format {
 		case "markdown":
 			fmt.Fprint(out, prbot.FormatComment(report))
 		case "json":
@@ -56,7 +56,7 @@ on pull_request events.`,
 				return fmt.Errorf("encode JSON: %w", err)
 			}
 		default:
-			return fmt.Errorf("unknown format %q: use \"markdown\" or \"json\"", prbotFormat)
+			return fmt.Errorf("unknown format %q: use \"markdown\" or \"json\"", format)
 		}
 
 		return nil
@@ -64,11 +64,11 @@ on pull_request events.`,
 }
 
 func init() {
-	prbotCmd.Flags().StringVar(&prbotDiffFile, "diff-file", "", "path to git diff output file (required)")
-	prbotCmd.Flags().StringVar(&prbotDBPath, "db", ".livedocs/claims.db", "path to claims database")
-	prbotCmd.Flags().IntVar(&prbotRadius, "radius", 5, "line radius for anchor matching")
-	prbotCmd.Flags().StringVar(&prbotFormat, "format", "markdown", "output format: markdown or json")
-	prbotCmd.Flags().StringVar(&prbotDiffFormat, "diff-format", "name-status", "diff input format: name-status or unified")
+	prbotCmd.Flags().String("diff-file", "", "path to git diff output file (required)")
+	prbotCmd.Flags().String("db", ".livedocs/claims.db", "path to claims database")
+	prbotCmd.Flags().Int("radius", 5, "line radius for anchor matching")
+	prbotCmd.Flags().String("format", "markdown", "output format: markdown or json")
+	prbotCmd.Flags().String("diff-format", "name-status", "diff input format: name-status or unified")
 	_ = prbotCmd.MarkFlagRequired("diff-file")
 }
 

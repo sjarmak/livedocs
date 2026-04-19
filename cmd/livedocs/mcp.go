@@ -17,15 +17,6 @@ import (
 	"github.com/sjarmak/livedocs/sourcegraph"
 )
 
-var (
-	mcpDBPath          string
-	mcpDataDir         string
-	mcpTelemetry       bool
-	mcpEnableStaleness bool
-	mcpTransport       string
-	mcpPort            int
-)
-
 var mcpCmd = &cobra.Command{
 	Use:   "mcp",
 	Short: "Start MCP server mode",
@@ -48,13 +39,22 @@ Examples:
 Setup: claude mcp add livedocs -- livedocs mcp
 See SETUP.md for Cursor and Windsurf configuration.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
+		defer resetCmdFlags(cmd)
+
+		dbFlag, _ := cmd.Flags().GetString("db")
+		dataDir, _ := cmd.Flags().GetString("data-dir")
+		telemetry, _ := cmd.Flags().GetBool("telemetry")
+		enableStaleness, _ := cmd.Flags().GetBool("enable-staleness")
+		transport, _ := cmd.Flags().GetString("transport")
+		portFlag, _ := cmd.Flags().GetInt("port")
+
 		cfg := mcpserver.Config{}
 
-		if mcpDataDir != "" {
-			cfg.DataDir = mcpDataDir
+		if dataDir != "" {
+			cfg.DataDir = dataDir
 		}
-		if mcpDBPath != "" {
-			cfg.DBPath = mcpDBPath
+		if dbFlag != "" {
+			cfg.DBPath = dbFlag
 		}
 		// If neither flag is set, fall back to the default single-DB path.
 		if cfg.DBPath == "" && cfg.DataDir == "" {
@@ -62,8 +62,8 @@ See SETUP.md for Cursor and Windsurf configuration.`,
 		}
 
 		// Auto-discover repo roots from claims DBs for staleness checking.
-		if mcpEnableStaleness && mcpDataDir != "" {
-			roots, err := discoverRepoRoots(mcpDataDir)
+		if enableStaleness && dataDir != "" {
+			roots, err := discoverRepoRoots(dataDir)
 			if err != nil {
 				log.Printf("warning: discover repo roots: %v", err)
 			} else if len(roots) > 0 {
@@ -73,12 +73,12 @@ See SETUP.md for Cursor and Windsurf configuration.`,
 		}
 
 		// Wire up ExtractionRunner when data-dir is set and Sourcegraph is configured.
-		if mcpDataDir != "" && os.Getenv("SRC_ACCESS_TOKEN") != "" {
+		if dataDir != "" && os.Getenv("SRC_ACCESS_TOKEN") != "" {
 			sgClient, sgErr := sourcegraph.NewSourcegraphClient()
 			if sgErr != nil {
 				log.Printf("warning: create sourcegraph client for extraction runner: %v (extraction disabled)", sgErr)
 			} else {
-				cfg.ExtractionRunner = newExtractionRunner(sgClient, mcpDataDir, 10)
+				cfg.ExtractionRunner = newExtractionRunner(sgClient, dataDir, 10)
 				defer sgClient.Close()
 			}
 		}
@@ -89,24 +89,24 @@ See SETUP.md for Cursor and Windsurf configuration.`,
 		// LLM client (Claude CLI or Anthropic API key) is reachable. When any
 		// precondition fails, the tool is silently omitted from the registry
 		// — the safe default for a long-running server.
-		if mcpDataDir != "" {
+		if dataDir != "" {
 			tribalCfg := loadTribalConfigForMCP()
 			cfg.MiningFactory = buildMiningFactory(tribalCfg, defaultLLMClientFactory)
 			logMiningFactoryWireup(cfg.MiningFactory, tribalCfg)
 		}
 
-		cfg.Telemetry = mcpTelemetry || os.Getenv("LIVEDOCS_TELEMETRY") == "1"
+		cfg.Telemetry = telemetry || os.Getenv("LIVEDOCS_TELEMETRY") == "1"
 		srv, err := mcpserver.New(cfg)
 		if err != nil {
 			return fmt.Errorf("create mcp server: %w", err)
 		}
 		defer srv.Close()
 
-		switch mcpTransport {
+		switch transport {
 		case "stdio":
 			return srv.Serve()
 		case "http":
-			port := mcpPort
+			port := portFlag
 			if envPort := os.Getenv("PORT"); envPort != "" {
 				if p, err := strconv.Atoi(envPort); err == nil {
 					port = p
@@ -115,18 +115,18 @@ See SETUP.md for Cursor and Windsurf configuration.`,
 			addr := fmt.Sprintf(":%d", port)
 			return srv.ServeHTTP(addr)
 		default:
-			return fmt.Errorf("unknown transport %q: supported values are \"stdio\" and \"http\"", mcpTransport)
+			return fmt.Errorf("unknown transport %q: supported values are \"stdio\" and \"http\"", transport)
 		}
 	},
 }
 
 func init() {
-	mcpCmd.Flags().StringVar(&mcpDBPath, "db", "", "path to claims database (default: .livedocs/claims.db)")
-	mcpCmd.Flags().StringVar(&mcpDataDir, "data-dir", "", "directory containing per-repo .claims.db files (multi-repo mode)")
-	mcpCmd.Flags().BoolVar(&mcpTelemetry, "telemetry", false, "enable anonymous usage telemetry (writes daily metrics to ~/.livedocs/telemetry/)")
-	mcpCmd.Flags().BoolVar(&mcpEnableStaleness, "enable-staleness", true, "auto-discover repo roots and enable lazy staleness checking")
-	mcpCmd.Flags().StringVar(&mcpTransport, "transport", "stdio", "transport type: \"stdio\" (default) or \"http\" (HTTP/SSE for multi-client access)")
-	mcpCmd.Flags().IntVar(&mcpPort, "port", 8080, "port for HTTP transport (only used with --transport http)")
+	mcpCmd.Flags().String("db", "", "path to claims database (default: .livedocs/claims.db)")
+	mcpCmd.Flags().String("data-dir", "", "directory containing per-repo .claims.db files (multi-repo mode)")
+	mcpCmd.Flags().Bool("telemetry", false, "enable anonymous usage telemetry (writes daily metrics to ~/.livedocs/telemetry/)")
+	mcpCmd.Flags().Bool("enable-staleness", true, "auto-discover repo roots and enable lazy staleness checking")
+	mcpCmd.Flags().String("transport", "stdio", "transport type: \"stdio\" (default) or \"http\" (HTTP/SSE for multi-client access)")
+	mcpCmd.Flags().Int("port", 8080, "port for HTTP transport (only used with --transport http)")
 }
 
 // loadTribalConfigForMCP loads the repo-root .livedocs.yaml and returns the

@@ -10,17 +10,17 @@ import (
 	"github.com/sjarmak/livedocs/initcmd"
 )
 
-var (
-	initForce bool
-	initHook  bool
-)
-
 var initCmd = &cobra.Command{
 	Use:   "init [path]",
 	Short: "Initialize livedocs in a repository",
 	Long:  "Scaffold a .livedocs.yaml configuration file and run the first extraction pass.",
 	Args:  cobra.MaximumNArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
+		defer resetCmdFlags(cmd)
+
+		force, _ := cmd.Flags().GetBool("force")
+		hook, _ := cmd.Flags().GetBool("hook")
+
 		path := "."
 		if len(args) > 0 {
 			path = args[0]
@@ -42,7 +42,7 @@ var initCmd = &cobra.Command{
 		result, err := initcmd.Run(cmd.Context(), initcmd.Options{
 			RepoRoot: absPath,
 			Writer:   cmd.OutOrStdout(),
-			Force:    initForce,
+			Force:    force,
 		})
 		if err != nil {
 			return err
@@ -75,7 +75,7 @@ var initCmd = &cobra.Command{
 		}
 
 		// Install post-commit hook if requested.
-		if initHook {
+		if hook {
 			installed, err := initcmd.InstallPostCommitHook(absPath)
 			if err != nil {
 				return fmt.Errorf("install hook: %w", err)
@@ -92,6 +92,6 @@ var initCmd = &cobra.Command{
 }
 
 func init() {
-	initCmd.Flags().BoolVar(&initForce, "force", false, "overwrite existing .livedocs.yaml")
-	initCmd.Flags().BoolVar(&initHook, "hook", false, "install git post-commit hook for automatic extraction")
+	initCmd.Flags().Bool("force", false, "overwrite existing .livedocs.yaml")
+	initCmd.Flags().Bool("hook", false, "install git post-commit hook for automatic extraction")
 }

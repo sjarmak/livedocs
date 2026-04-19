@@ -17,13 +17,9 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-// resetExtractFlags resets global flag state to avoid leaking between tests.
+// resetExtractFlags resets the test-only rankedFilesTrace hook between tests.
+// (Flag state is no longer stored in package-level vars — see live_docs-m7v.35.)
 func resetExtractFlags() {
-	extractRepo = ""
-	extractOutput = ""
-	extractTier2 = false
-	extractTribal = ""
-	extractMaxFiles = 0
 	rankedFilesTrace = nil
 }
 
