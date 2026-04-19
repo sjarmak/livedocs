@@ -242,12 +242,11 @@ func TribalMineOnDemandHandler(pool *DBPool, factory MiningServiceFactory) ToolH
 //  4. Anything else — a single safe fallback so internal error text never
 //     reaches the caller.
 //
-// Reachability: throttle currently propagates only when MineFile is invoked
-// directly. TribalMiningService.MineSymbol's per-file loop discards all
-// non-budget errors via `continue` (extractor/tribal/service.go MineSymbol),
-// so throttle from the symbol-mining path is silently dropped today. The
-// fix belongs in the service loop and is tracked separately; this branch is
-// kept correct so the handler is ready when the suppression is lifted.
+// Reachability: throttle propagates from both call paths — direct MineFile
+// invocation and TribalMiningService.MineSymbol's per-file loop, which now
+// switches on MiningError.Code and eagerly returns on mine_throttled
+// alongside budget_exceeded (live_docs-m7v.40). The branch below is
+// exercised by both paths.
 //
 // renderMineError MUST NOT be invoked with a nil error; callers gate this on
 // `mineErr != nil` upstream.

@@ -896,6 +896,13 @@ func countSymbols(claimsDB *db.ClaimsDB) int {
 // that the value is one of the allowed modes (deterministic, llm) and stores
 // it internally so flag state is owned by the cobra.Flag, not by a package
 // variable. RunE reads the current value via cmd.Flags().GetString("tribal").
+//
+// Empty string is accepted as the "unset" state: pflag captures the
+// DefValue at registration time from String() — which is "" because the
+// zero-valued tribalFlagValue stores "" — so resetCmdFlags must be able to
+// call Set("") without erroring. Without this case, --tribal state leaks
+// across invocations because resetCmdFlags logs the Set error and clears
+// Changed but does NOT revert val (live_docs-m7v.35 wave-2 review).
 type tribalFlagValue struct {
 	val string
 }
@@ -906,7 +913,7 @@ func (t *tribalFlagValue) String() string {
 
 func (t *tribalFlagValue) Set(s string) error {
 	switch s {
-	case "deterministic", "llm":
+	case "", "deterministic", "llm":
 		t.val = s
 		return nil
 	default:

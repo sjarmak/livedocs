@@ -19,10 +19,12 @@ import (
 // --json setting leaks, both calls would emit JSON and the second call's
 // human-text assertion would fail.
 //
-// One sentinel test is enough — every command's RunE installs the same
-// `defer resetCmdFlags(cmd)` defense, so verifying the pattern once on the
-// most-leak-prone command (verify, which has a boolean shorthand flag with
-// historical leak reports) covers the class.
+// One sentinel test is enough for the class of standard pflag types —
+// every command's RunE installs the same `defer resetCmdFlags(cmd)`
+// defense. The companion TestTribalFlagValue_ResetClearsState below
+// covers the one custom pflag.Value (tribalFlagValue) that needs its own
+// regression guard because it validates Set() arguments and would
+// otherwise reject the "" reset call from resetCmdFlags.
 func TestNoFlagStateLeakBetweenInvocations(t *testing.T) {
 	dir := t.TempDir()
 
@@ -55,4 +57,44 @@ func TestNoFlagStateLeakBetweenInvocations(t *testing.T) {
 	if !strings.Contains(got, "Verification Report") && !strings.Contains(got, "No AI context files found") {
 		t.Errorf("expected human output (report header or no-files message) in second invocation; got: %q", got)
 	}
+}
+
+// TestTribalFlagValue_ResetClearsState guards the custom pflag.Value used
+// for --tribal: resetCmdFlags calls f.Value.Set(f.DefValue), and pflag
+// captures DefValue from String() at registration — which is "" because
+// zero-valued tribalFlagValue stores "". If Set("") errors (the original
+// bug surfaced by wave-2 review), resetCmdFlags logs a warning and clears
+// Changed but does NOT revert val, so a previously-set --tribal=llm leaks
+// into the next invocation. This test pins the reset semantics directly
+// on the type so the leak cannot regress.
+func TestTribalFlagValue_ResetClearsState(t *testing.T) {
+	t.Parallel()
+
+	for _, mode := range []string{"deterministic", "llm"} {
+		t.Run("after_"+mode, func(t *testing.T) {
+			t.Parallel()
+			tv := &tribalFlagValue{}
+			if err := tv.Set(mode); err != nil {
+				t.Fatalf("Set(%q) failed: %v", mode, err)
+			}
+			if tv.String() != mode {
+				t.Fatalf("String() after Set(%q) = %q, want %q", mode, tv.String(), mode)
+			}
+			// The reset path resetCmdFlags exercises:
+			if err := tv.Set(""); err != nil {
+				t.Fatalf("Set(\"\") (the reset path) failed: %v", err)
+			}
+			if tv.String() != "" {
+				t.Errorf("after reset, String() = %q, want \"\" (state leaked)", tv.String())
+			}
+		})
+	}
+
+	t.Run("invalid_still_rejected", func(t *testing.T) {
+		t.Parallel()
+		tv := &tribalFlagValue{}
+		if err := tv.Set("bogus"); err == nil {
+			t.Fatalf("Set(\"bogus\") should error; the empty-string allow-list must not relax non-empty validation")
+		}
+	})
 }
