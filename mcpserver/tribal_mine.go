@@ -232,23 +232,7 @@ func TribalMineOnDemandHandler(pool *DBPool, factory MiningServiceFactory) ToolH
 
 		// Translate structured MiningError into safe, caller-facing results.
 		if mineErr != nil {
-			var me *tribal.MiningError
-			if errors.As(mineErr, &me) {
-				// For budget exhaustion, the service may have produced partial
-				// results before the budget tripped. Surface whatever is in
-				// `results` alongside a safe error message. The MCP contract
-				// allows either an error result OR a success result with
-				// partial data; we choose an error result for clarity.
-				return NewErrorResultf(
-					"tribal_mine_on_demand: %s", me.SafeMessage(),
-				), nil
-			}
-			// Context cancellation or other unstructured errors. Return a
-			// generic message so internal paths never reach the caller.
-			if errors.Is(mineErr, context.Canceled) || errors.Is(mineErr, context.DeadlineExceeded) {
-				return NewErrorResult("tribal_mine_on_demand: request canceled"), nil
-			}
-			return NewErrorResult("tribal_mine_on_demand: mining failed"), nil
+			return renderMineError(mineErr), nil
 		}
 
 		// --- Build response ---
@@ -272,6 +256,48 @@ func TribalMineOnDemandHandler(pool *DBPool, factory MiningServiceFactory) ToolH
 		}
 		return NewTextResult(string(data)), nil
 	}
+}
+
+// renderMineError translates a non-nil mining error from MineSymbol/MineFile
+// into a caller-safe ToolResult. Classification order matters:
+//
+//  1. tribal.ErrMineThrottled — surfaced FIRST so MCP clients can detect
+//     the per-file rate-limit denial via
+//     errors.Is(ResultCause(r), tribal.ErrMineThrottled) and implement
+//     backoff. Mirrors the ErrRateLimited cause-attachment pattern in
+//     TribalMineOnDemandRateLimitedHandler. The user-visible text reuses
+//     the wording from MiningError.SafeMessage("mine_throttled") and adds
+//     a brief retry hint; the typed cause is never serialized to the wire
+//     (server-side discriminator only).
+//  2. context.Canceled / context.DeadlineExceeded — request lifecycle, not
+//     a mining-domain failure. Distinct generic message.
+//  3. Any *tribal.MiningError — render via SafeMessage() which omits paths
+//     and wrapped error chains.
+//  4. Anything else — a single safe fallback so internal error text never
+//     reaches the caller.
+//
+// renderMineError MUST NOT be invoked with a nil error; callers gate this on
+// `mineErr != nil` upstream.
+func renderMineError(err error) ToolResult {
+	if errors.Is(err, tribal.ErrMineThrottled) {
+		return NewErrorResultWithCause(
+			"tribal_mine_on_demand: per-file mining rate limit reached; "+
+				"retry after a short pause",
+			tribal.ErrMineThrottled,
+		)
+	}
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return NewErrorResult("tribal_mine_on_demand: request canceled")
+	}
+	var me *tribal.MiningError
+	if errors.As(err, &me) {
+		// For budget exhaustion, the service may have produced partial
+		// results before the budget tripped. The MCP contract allows
+		// either an error result OR a success result with partial data;
+		// we choose an error result for clarity.
+		return NewErrorResultf("tribal_mine_on_demand: %s", me.SafeMessage())
+	}
+	return NewErrorResult("tribal_mine_on_demand: mining failed")
 }
 
 // buildTribalMineResponse shapes the MCP response from a slice of MiningResult

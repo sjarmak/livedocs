@@ -716,3 +716,123 @@ func TestBuildTribalMineResponse_NilResults(t *testing.T) {
 		t.Error("expected non-empty fallback text on all-nil results")
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Tests for m7v.30 — distinguishable response for tribal.ErrMineThrottled.
+//
+// MineFile returns a *tribal.MiningError{Code:"mine_throttled", Err:ErrMineThrottled}
+// when its per-key rate limiter denies a request (extractor/tribal/service.go).
+// The handler must surface this denial with a programmatically-discoverable
+// cause so MCP clients can implement backoff without string-matching the
+// caller-facing text. The cause is server-side only (mirrors the
+// ErrRateLimited pattern in TribalMineOnDemandRateLimitedHandler), so the
+// over-the-wire user-visible text remains free to be reworded.
+// ---------------------------------------------------------------------------
+
+// m7v.30: a throttled MineSymbol/MineFile error must be rendered with the
+// tribal.ErrMineThrottled sentinel attached as the typed cause AND a
+// distinct caller-facing text that signals retry-after semantics — distinct
+// from the generic "mining service unavailable" / "mining failed" shapes.
+func TestTribalMineOnDemand_ThrottleYieldsDistinctResponse(t *testing.T) {
+	// The throttled MiningError as MineFile would emit it (see
+	// extractor/tribal/service.go: the limiter-denied branch returns
+	// &MiningError{Code:"mine_throttled", Err:ErrMineThrottled}). Building
+	// the value directly here keeps the test focused on the handler's
+	// response-shaping contract; the propagation path through MineSymbol
+	// is exercised by the tribal package's own tests.
+	throttled := &tribal.MiningError{
+		Code:    "mine_throttled",
+		Message: "mine rate limit reached for \"pkg/handler.go\"",
+		Err:     tribal.ErrMineThrottled,
+	}
+
+	result := renderMineError(throttled)
+	if result == nil {
+		t.Fatal("renderMineError(throttled) returned nil result")
+	}
+	if !result.IsError() {
+		t.Fatalf("throttled error must yield IsError()==true; got text=%q", result.Text())
+	}
+
+	// Primary discriminator: typed cause. MCP middleware and tests detect
+	// throttle denials with errors.Is(ResultCause(r), tribal.ErrMineThrottled)
+	// without depending on the user-facing text wording.
+	if cause := ResultCause(result); !errors.Is(cause, tribal.ErrMineThrottled) {
+		t.Errorf("expected cause errors.Is tribal.ErrMineThrottled, got %v", cause)
+	}
+
+	// User-visible text must be safe (short, no internal paths) and signal
+	// retry semantics so a human reader still understands the denial.
+	text := result.Text()
+	if len(text) > 512 {
+		t.Errorf("throttle text too long — possible leak: %q", text)
+	}
+	if !strings.Contains(strings.ToLower(text), "rate limit") {
+		t.Errorf("throttle text should mention 'rate limit'; got %q", text)
+	}
+	if !strings.Contains(strings.ToLower(text), "retry") {
+		t.Errorf("throttle text should hint at retry; got %q", text)
+	}
+	// The MineFile-side internal Message ("mine rate limit reached for
+	// \"pkg/handler.go\"") embeds the file path — that detail must NOT
+	// leak to the caller.
+	if strings.Contains(text, "pkg/handler.go") {
+		t.Errorf("throttle text leaked internal file path: %q", text)
+	}
+	// The sentinel's Error() string is not user-friendly; it should not
+	// appear verbatim in the caller text (matches the ErrRateLimited
+	// discipline in tribal_mine_ratelimit_test.go).
+	if strings.Contains(text, tribal.ErrMineThrottled.Error()) {
+		t.Errorf("user-facing text leaked sentinel Error() string: %q", text)
+	}
+}
+
+// m7v.30: non-throttle MiningError codes must NOT carry the throttle cause
+// (regression guard against an over-broad branch). budget_exceeded,
+// extraction_failed, etc. continue to render through SafeMessage with no
+// typed cause attached.
+func TestTribalMineOnDemand_NonThrottleErrorHasNoThrottleCause(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+	}{
+		{
+			name: "budget_exceeded",
+			err: &tribal.MiningError{
+				Code:    "budget_exceeded",
+				Message: "daily LLM call budget reached",
+			},
+		},
+		{
+			name: "extraction_failed",
+			err: &tribal.MiningError{
+				Code:    "extraction_failed",
+				Message: "extract PR comments for pkg/x.go",
+				Err:     errors.New("transient gh failure"),
+			},
+		},
+		{
+			name: "context.Canceled",
+			err:  context.Canceled,
+		},
+		{
+			name: "unstructured",
+			err:  errors.New("some other failure"),
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			result := renderMineError(tc.err)
+			if result == nil {
+				t.Fatal("renderMineError returned nil")
+			}
+			if !result.IsError() {
+				t.Fatalf("expected error result; got text=%q", result.Text())
+			}
+			if errors.Is(ResultCause(result), tribal.ErrMineThrottled) {
+				t.Errorf("non-throttle error %s leaked ErrMineThrottled cause: %v",
+					tc.name, ResultCause(result))
+			}
+		})
+	}
+}
