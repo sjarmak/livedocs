@@ -19,7 +19,11 @@ jobs:
       # future jobs added to this workflow don't silently inherit OIDC issuance.
       id-token: write
     env:
-      GORELEASER_CROSS_VERSION: v1.23.0
+      # Bumped v1.23.0 → v1.25.9 for homebrew_casks support (requires
+      # goreleaser ≥ 2.10; v1.23.0 shipped 2.2.0, v1.25.9 ships 2.15.2).
+      # v1.25.9 also ships Go 1.25.7 matching go.mod, avoiding toolchain
+      # auto-download.
+      GORELEASER_CROSS_VERSION: v1.25.9
     steps:
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2

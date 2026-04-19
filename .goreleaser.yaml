@@ -53,10 +53,12 @@ builds:
 
 archives:
   - id: default
-    format: tar.gz
+    formats:
+      - tar.gz
     format_overrides:
       - goos: darwin
-        format: zip
+        formats:
+          - zip
     name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
     files:
       - LICENSE*
@@ -110,20 +112,17 @@ changelog:
       - "^test:"
       - "^chore:"
 
-brews:
+homebrew_casks:
   - name: livedocs
     repository:
       owner: sjarmak
       name: homebrew-tap
       token: "{{ .Env.HOMEBREW_TAP_GITHUB_TOKEN }}"
-    directory: Formula
+    directory: Casks
     homepage: "https://github.com/sjarmak/livedocs"
     description: "Live documentation for codebases"
-    license: "MIT"
-    install: |
-      bin.install "livedocs"
-    test: |
-      system "#{bin}/livedocs", "version"
+    binaries:
+      - livedocs
 
 release:
   github:
