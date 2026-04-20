@@ -16,6 +16,7 @@
 package mcpserver
 
 import (
+	"context"
 	"fmt"
 	"log/slog"
 )
@@ -65,10 +66,19 @@ func NewSlogMineLogger(l *slog.Logger) MineLogger {
 // single INFO-level slog record. Matches the signature of the MineLogger
 // interface and of the existing *log.Logger.Printf method, so the two
 // are freely interchangeable at call sites.
+//
+// Short-circuits via l.Enabled when the handler is configured above INFO:
+// in that case the Sprintf result would be discarded anyway, so skipping
+// the format work saves an allocation per suppressed call. Matters for
+// hot paths like per-session rate-limit accounting that can fire thousands
+// of times per minute in production.
 func (s *SlogMineLogger) Printf(format string, args ...any) {
 	l := s.logger
 	if l == nil {
 		l = slog.Default()
+	}
+	if !l.Enabled(context.Background(), slog.LevelInfo) {
+		return
 	}
 	l.Info(fmt.Sprintf(format, args...))
 }

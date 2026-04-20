@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"log"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -96,6 +97,14 @@ See SETUP.md for Cursor and Windsurf configuration.`,
 		}
 
 		cfg.Telemetry = telemetry || os.Getenv("LIVEDOCS_TELEMETRY") == "1"
+
+		// Route MineLogger through slog so per-attempt accounting and
+		// error logs land in the project's structured-logging pipeline.
+		// slog.Default() writes to stderr by default, which is the same
+		// destination log.Printf used pre-m7v.48 — stdio MCP traffic runs
+		// on stdout so this does not contaminate the JSON-RPC stream.
+		cfg.MineLogger = mcpserver.NewSlogMineLogger(slog.Default())
+
 		srv, err := mcpserver.New(cfg)
 		if err != nil {
 			return fmt.Errorf("create mcp server: %w", err)

@@ -111,12 +111,12 @@ func TestSlogMineLogger_SatisfiesMineLogger(t *testing.T) {
 // also safe to use — matching the permissive contract of the existing
 // `log` package default logger.
 func TestNewSlogMineLogger_NilFallsBackToDefault(t *testing.T) {
-	t.Parallel()
+	// MUST NOT be t.Parallel(): this test mutates slog.Default(), a
+	// process-global. A parallel test — anywhere in this test binary — that
+	// reads slog.Default() (including our own adapter's nil-fallback path
+	// from the other tests in this file) would race against the SetDefault
+	// call below. The race detector flags it under -race -count=N.
 
-	// Swap slog.Default so the fallback is observable without racing other
-	// tests that inspect slog.Default concurrently. t.Parallel is safe
-	// because we restore prev in Cleanup and no other test here mutates
-	// slog.Default.
 	prev := slog.Default()
 	t.Cleanup(func() { slog.SetDefault(prev) })
 

@@ -49,6 +49,11 @@ func TestAllSubcommands_HelpSmokeRunsWithoutPanic(t *testing.T) {
 		rootCmd.SetArgs(nil)
 	})
 
+	// WARNING: do NOT call t.Parallel() on the subtests below. They share
+	// the package-global rootCmd and mutate rootCmd.SetArgs/SetOut/SetErr
+	// on every iteration; parallelizing would race on that shared state.
+	// A future-you who wants speedup should instead construct per-iteration
+	// cobra.Command fixtures, not parallelize against the global.
 	for _, leaf := range leaves {
 		path := commandPath(leaf)
 		t.Run(strings.Join(path, "_"), func(t *testing.T) {
