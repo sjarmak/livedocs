@@ -52,8 +52,15 @@ func resetCmdFlags(cmd *cobra.Command) {
 // same cmd via Flags().StringVar* / Flags().BoolVar* / etc., normally inside
 // the package's init() functions.
 
+// flagPanic panics with a wrapped error value (not a formatted string).
+//
+// Panicking with an error follows the Go 'must'-pattern convention
+// (regexp.MustCompile, template.Must, etc.): any recovery code can type-assert
+// the panic value back to error, and errors.Is/As/Unwrap work against the
+// wrapped cause. We use %w (not %v) so the original pflag error stays
+// inspectable via errors.Unwrap — see live_docs-m7v.49.
 func flagPanic(cmd *cobra.Command, name, kind string, err error) {
-	panic(fmt.Sprintf("livedocs: missing or wrong-typed %s flag %q on command %q: %v",
+	panic(fmt.Errorf("livedocs: missing or wrong-typed %s flag %q on command %q: %w",
 		kind, name, cmd.Name(), err))
 }
 

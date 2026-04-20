@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
@@ -236,4 +237,56 @@ func TestMustGet_WrongType(t *testing.T) {
 	cmd.Flags().String("name", "x", "")
 	assertPanicContains(t, func() { mustGetBool(cmd, "name") },
 		"name", "test")
+}
+
+// TestMustGet_PanicsWithErrorValue verifies that flagPanic panics with an error
+// value (not a string), following the Go 'must'-pattern convention
+// (regexp.MustCompile, template.Must, etc.). The panic value must:
+//  1. Satisfy the error interface, so recovery code can type-assert it back.
+//  2. Wrap the underlying cobra/pflag error via %w, so errors.Unwrap returns
+//     the original error and errors.Is/As work against it.
+//
+// See live_docs-m7v.49 for the rationale (Wave 3 final review nit from m7v.46).
+func TestMustGet_PanicsWithErrorValue(t *testing.T) {
+	cmd := &cobra.Command{Use: "test"}
+	cmd.Flags().String("name", "x", "")
+
+	// First, capture the underlying cobra error we expect to be wrapped, so
+	// we can compare against it via errors.Is below.
+	_, innerErr := cmd.Flags().GetBool("name") // wrong type on purpose
+	if innerErr == nil {
+		t.Fatalf("expected pflag to return an error for wrong-typed GetBool; got nil")
+	}
+
+	defer func() {
+		r := recover()
+		if r == nil {
+			t.Fatalf("expected panic, got none")
+		}
+		err, ok := r.(error)
+		if !ok {
+			t.Fatalf("panic value is %T (%v), want an error value", r, r)
+		}
+		// The wrapped error must be reachable via errors.Unwrap, proving %w
+		// was used (not %v/%s).
+		unwrapped := errors.Unwrap(err)
+		if unwrapped == nil {
+			t.Fatalf("errors.Unwrap(panic) = nil; flagPanic must wrap the original error with %%w")
+		}
+		// errors.Is should match the original cobra error text-equivalently.
+		// We compare messages because pflag returns a freshly allocated error
+		// each call, so pointer equality is not guaranteed.
+		if unwrapped.Error() != innerErr.Error() {
+			t.Errorf("errors.Unwrap(panic) = %q, want %q", unwrapped.Error(), innerErr.Error())
+		}
+		// The outer message must still contain the structural breadcrumbs.
+		msg := err.Error()
+		for _, want := range []string{"name", "test", "bool"} {
+			if !strings.Contains(msg, want) {
+				t.Errorf("panic error message %q missing %q", msg, want)
+			}
+		}
+	}()
+
+	mustGetBool(cmd, "name")
 }
