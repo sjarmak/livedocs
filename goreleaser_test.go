@@ -20,11 +20,14 @@ type goreleaserConfig struct {
 		Goos   []string `yaml:"goos"`
 		Goarch []string `yaml:"goarch"`
 	} `yaml:"builds"`
+	// Goreleaser v2 schema: `formats` (plural) replaces `format`, and
+	// format_overrides entries also use `formats`. The YAML accepts either a
+	// single string or a list; we model it as a slice here.
 	Archives []struct {
-		Format          string `yaml:"format"`
+		Formats         []string `yaml:"formats"`
 		FormatOverrides []struct {
-			Goos   string `yaml:"goos"`
-			Format string `yaml:"format"`
+			Goos    string   `yaml:"goos"`
+			Formats []string `yaml:"formats"`
 		} `yaml:"format_overrides"`
 	} `yaml:"archives"`
 	Checksum struct {
@@ -38,9 +41,10 @@ type goreleaserConfig struct {
 		Certificate string   `yaml:"certificate"`
 		Args        []string `yaml:"args"`
 	} `yaml:"signs"`
-	Brews []struct {
+	// Goreleaser v2 schema: `homebrew_casks` replaces the legacy `brews` block.
+	HomebrewCasks []struct {
 		Name string `yaml:"name"`
-	} `yaml:"brews"`
+	} `yaml:"homebrew_casks"`
 }
 
 func TestGoreleaserConfig(t *testing.T) {
@@ -121,17 +125,30 @@ func TestGoreleaserConfig(t *testing.T) {
 			t.Fatal("no archives defined")
 		}
 		a := cfg.Archives[0]
-		if a.Format != "tar.gz" {
-			t.Errorf("expected default format 'tar.gz', got %q", a.Format)
+		hasTarGz := false
+		for _, f := range a.Formats {
+			if f == "tar.gz" {
+				hasTarGz = true
+				break
+			}
+		}
+		if !hasTarGz {
+			t.Errorf("expected default formats to include 'tar.gz', got %v", a.Formats)
 		}
 		darwinZip := false
 		for _, o := range a.FormatOverrides {
-			if o.Goos == "darwin" && o.Format == "zip" {
-				darwinZip = true
+			if o.Goos != "darwin" {
+				continue
+			}
+			for _, f := range o.Formats {
+				if f == "zip" {
+					darwinZip = true
+					break
+				}
 			}
 		}
 		if !darwinZip {
-			t.Error("expected darwin format override to zip")
+			t.Error("expected darwin format override to include 'zip'")
 		}
 	})
 
@@ -142,11 +159,11 @@ func TestGoreleaserConfig(t *testing.T) {
 	})
 
 	t.Run("homebrew tap configured", func(t *testing.T) {
-		if len(cfg.Brews) == 0 {
-			t.Fatal("no homebrew tap configured")
+		if len(cfg.HomebrewCasks) == 0 {
+			t.Fatal("no homebrew_casks tap configured")
 		}
-		if cfg.Brews[0].Name != "livedocs" {
-			t.Errorf("expected brew name 'livedocs', got %q", cfg.Brews[0].Name)
+		if cfg.HomebrewCasks[0].Name != "livedocs" {
+			t.Errorf("expected homebrew_casks[0].name 'livedocs', got %q", cfg.HomebrewCasks[0].Name)
 		}
 	})
 
