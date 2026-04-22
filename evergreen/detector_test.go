@@ -53,9 +53,26 @@ func TestDetect_NilDoc(t *testing.T) {
 	}
 }
 
-func TestDetect_NilClaims(t *testing.T) {
-	if _, err := Detect(context.Background(), &Document{}, nil); err == nil {
-		t.Fatal("expected error for nil claims")
+// Nil ClaimsReader is a supported graceful-degradation path: per-entry
+// findings are skipped but doc-scoped findings (age-based Cold) still fire.
+func TestDetect_NilClaims_AgeFindingsStillFire(t *testing.T) {
+	now := time.Date(2026, 4, 22, 12, 0, 0, 0, time.UTC)
+	doc := &Document{
+		ID:              "d",
+		MaxAgeDays:      7,
+		LastRefreshedAt: now.Add(-30 * 24 * time.Hour),
+		Manifest: []ManifestEntry{
+			// A per-entry candidate that would normally produce a finding —
+			// must be skipped because claims is nil.
+			{SymbolID: id(42), Repo: "r"},
+		},
+	}
+	got, err := Detect(context.Background(), doc, nil, WithNow(now))
+	if err != nil {
+		t.Fatalf("nil claims must not error, got %v", err)
+	}
+	if len(got) != 1 || got[0].Severity != ColdSeverity || got[0].ChangeKind != AgeChange {
+		t.Errorf("expected single cold/age finding, got %+v", got)
 	}
 }
 

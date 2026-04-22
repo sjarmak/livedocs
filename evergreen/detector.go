@@ -14,6 +14,10 @@ import (
 // Detect is a pure function: its only I/O is reading through the provided
 // ClaimsReader. It does not persist, mutate doc, log, or time-out.
 //
+// When claims is nil, Detect skips per-entry classification and returns
+// only doc-scoped findings (e.g. age-based Cold). This is the supported
+// graceful-degradation path for installs without a populated claims DB.
+//
 // Severity rules (see also package doc):
 //   - OrphanedSeverity: a cited symbol has been renamed or deleted. Refresh
 //     should be blocked pending human review.
@@ -44,9 +48,6 @@ func Detect(ctx context.Context, doc *Document, claims ClaimsReader, opts ...Det
 	if doc == nil {
 		return nil, errors.New("evergreen: Detect requires a non-nil Document")
 	}
-	if claims == nil {
-		return nil, errors.New("evergreen: Detect requires a non-nil ClaimsReader")
-	}
 	cfg := detectConfig{now: time.Now()}
 	for _, opt := range opts {
 		opt(&cfg)
@@ -54,15 +55,21 @@ func Detect(ctx context.Context, doc *Document, claims ClaimsReader, opts ...Det
 
 	var findings []Finding
 
-	// Per-entry drift classification.
-	for i := range doc.Manifest {
-		entry := &doc.Manifest[i] // stable address into the slice for Finding.Entry
-		f, err := classifyEntry(ctx, doc.ID, entry, claims)
-		if err != nil {
-			return nil, err
-		}
-		if f != nil {
-			findings = append(findings, *f)
+	// Per-entry drift classification is skipped entirely when no
+	// ClaimsReader is available (e.g. installs without a populated claims
+	// DB). Doc-scoped findings like age-based Cold still fire. This is a
+	// graceful-degradation path used by the MCP tools so they remain useful
+	// even when the caller has not wired a claims reader.
+	if claims != nil {
+		for i := range doc.Manifest {
+			entry := &doc.Manifest[i] // stable address into the slice for Finding.Entry
+			f, err := classifyEntry(ctx, doc.ID, entry, claims)
+			if err != nil {
+				return nil, err
+			}
+			if f != nil {
+				findings = append(findings, *f)
+			}
 		}
 	}
 
