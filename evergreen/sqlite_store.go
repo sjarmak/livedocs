@@ -71,18 +71,22 @@ func NewSQLiteStore(db *sql.DB, opts ...SQLiteOption) (*SQLiteStore, error) {
 	return s, nil
 }
 
-// OpenSQLiteStore opens (or creates) a SQLite database at path, applies WAL
-// mode and sensible pragmas, runs Migrate, and returns a store that owns
-// the DB handle. Call Close to release it.
+// OpenSQLiteStore opens (or creates) a SQLite database at path, applies
+// sensible pragmas (busy_timeout, foreign_keys, immediate-lock BEGIN),
+// runs Migrate, and returns a store that owns the DB handle. Call Close
+// to release it.
+//
+// WAL mode is NOT enabled by default — the immediate-lock + busy_timeout
+// combination already serializes writers correctly, and WAL introduces a
+// per-open fsync that doubles test runtimes without improving correctness.
+// Callers that want WAL (e.g. for high-read-concurrency production
+// deployments) can execute PRAGMA journal_mode=WAL on the returned
+// store's *sql.DB handle themselves.
 func OpenSQLiteStore(ctx context.Context, path string, opts ...SQLiteOption) (*SQLiteStore, error) {
 	dsn := path + "?_pragma=busy_timeout%3d5000&_pragma=foreign_keys%3d1&_txlock=immediate"
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("evergreen: open sqlite %q: %w", path, err)
-	}
-	if _, err := db.ExecContext(ctx, "PRAGMA journal_mode=WAL"); err != nil {
-		db.Close()
-		return nil, fmt.Errorf("evergreen: set WAL mode: %w", err)
 	}
 	s, err := NewSQLiteStore(db, opts...)
 	if err != nil {
