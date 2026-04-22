@@ -19,7 +19,16 @@ This capability must serve two distinct audiences without dragging one into the 
 1. **OSS live_docs users** installing alongside any GitHub repo(s). For them, live_docs is the **whole system**: save query → store manifest → detect drift → optionally re-run. The `RefreshExecutor` backing the re-run can be a local deepsearch MCP, a simple "re-run this prompt" wrapper around Claude/Anthropic, or any other backend they configure.
 2. **Sourcegraph's evergreen deepsearch product.** Sourcegraph already owns the durable-query model (`evergreen_deepsearch` + `evergreen_deepsearch_versions` tables), a 24h auto-refresh worker, per-user quota, and first-class citations (`sources[]` on each question). What it **lacks** is (a) a structured dependency manifest, (b) drift-tier staleness classification beyond worker state, (c) symbol-precise "what changed" diffs, (d) an MCP surface for agents. live_docs supplies those as an adapter layer.
 
-**The live_docs OSS product ships only the generic capability.** The sourcegraph-specific adapter (ConnectRPC wrapper for `RefreshEvergreenDeepSearch`, `sources[]` → manifest lift, MCP-tool registration into sourcegraph's MCP server, optional upstream schema change) lives in a **sourcegraph repo branch**, tracked as a separate roadmap but not merged into live_docs. This keeps the open-source product clean while the sourcegraph integration remains shareable with the Sourcegraph team.
+**The live_docs OSS product ships only the generic capability.** The sourcegraph-specific adapter (ConnectRPC wrapper for `RefreshEvergreenDeepSearch`, `sources[]` → manifest lift, MCP-tool registration into sourcegraph's MCP server, optional upstream schema change) lives on branch **`sj/egds-livedocs`** of the sourcegraph repo, tracked as a separate roadmap but not merged into live_docs. This keeps the open-source product clean while the sourcegraph integration remains shareable with the Sourcegraph team.
+
+### Minimal-footprint principle (binding constraint)
+
+The sourcegraph-side addition on `sj/egds-livedocs` **must be as small as possible** — a thin bridge, not a reimplementation. Target: ~4 files, ~150 lines total. That constraint flows back into live_docs' interface design:
+
+- **No concrete implementations cross the boundary.** live_docs exposes `DocumentStore`, `RefreshExecutor`, and an MCP-tool factory as *interfaces*. The adapter supplies its own `DocumentStore` impl backed by sourcegraph's existing `evergreen_deepsearch` / `evergreen_deepsearch_versions` tables — it does not maintain a parallel SQLite store.
+- **The detector is a pure function.** No embedded store, no embedded executor — just `Detect(doc, claimsReader) []Finding`. The adapter passes documents it pulled from upstream tables straight in.
+- **The MCP tool handlers are constructor functions.** `NewStatusTool(store, detector)` / `NewRefreshTool(store, executor, limiter)` return handler values the adapter registers into sourcegraph's MCP server via a single call.
+- **Anything that would force the adapter to carry live_docs' OSS-specific state (SQLite files, CLI flag parsing, watch-loop integration) is out of the adapter's boundary by construction.**
 
 ### What the sourcegraph audit found (evidence for the split)
 
@@ -63,27 +72,34 @@ The central abstraction that enables dual-purpose deployment:
 │ live_docs OSS (this repo)                                       │
 │                                                                  │
 │  evergreen/                                                      │
-│  ├── document.go         // Document, ManifestEntry types       │
-│  ├── detector.go         // Drift-tier classification           │
-│  ├── store.go            // SQLite-backed persistence           │
-│  ├── executor.go         // RefreshExecutor interface           │
+│  ├── types.go            // Document, ManifestEntry, Finding    │
+│  ├── detector.go         // Detect(doc, claimsReader) []Finding │
+│  ├── interfaces.go       // DocumentStore, RefreshExecutor,     │
+│  │                       //   ClaimsReader, RateLimiter         │
+│  ├── mcptools.go         // NewStatusTool, NewRefreshTool       │
+│  │                       //   (factory functions, no globals)   │
+│  ├── sqlite_store.go     // default DocumentStore impl (OSS)    │
 │  └── executors/                                                  │
-│      ├── deepsearch_mcp.go   // Local deepsearch MCP (generic)  │
-│      └── prompt_replay.go    // Simple LLM re-run (generic)     │
+│      └── deepsearch_mcp.go  // default RefreshExecutor (OSS)    │
 │                                                                  │
-│  cmd/livedocs evergreen ...  // CLI                             │
-│  mcpserver/evergreen_*.go    // MCP tools                       │
+│  cmd/livedocs evergreen ...  // CLI (OSS only, thin wrapper)    │
+│  mcpserver/evergreen.go      // wires factories for OSS server  │
 └─────────────────────────────────────────────────────────────────┘
                             ▲
                             │ go-get dependency
+                            │ (live_docs as a library)
                             │
 ┌─────────────────────────────────────────────────────────────────┐
-│ sourcegraph branch (separate repo, not shipped in live_docs)    │
+│ sourcegraph repo, branch sj/egds-livedocs                       │
+│ (NOT shipped in live_docs — private integration)                │
 │                                                                  │
-│  evergreen-livedocs-adapter/                                     │
-│  ├── connectrpc_executor.go    // RefreshEvergreenDeepSearch    │
-│  ├── sources_to_manifest.go    // Lifts sources[] into manifest │
-│  └── mcp_registration.go       // Adds evergreen_* to SG MCP    │
+│  egds/livedocs/                                                  │
+│  ├── store.go        // DocumentStore impl over upstream tables │
+│  ├── executor.go     // ConnectRPC RefreshEvergreenDeepSearch   │
+│  ├── manifest.go     // sources[] → ManifestEntry lift          │
+│  └── register.go     // registers factories into SG MCP server  │
+│                                                                  │
+│  Target size: ~150 lines total. No SQLite, no CLI, no watch.    │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
@@ -115,14 +131,14 @@ The detector, store, CLI, and MCP surface are all executor-agnostic. Swapping fr
 
 ### Must-Have (Phase 1 — alert-first, provider-agnostic)
 
-- **`evergreen/` package with Document + ManifestEntry types**
-  - Acceptance: `Document{id, query, rendered_answer, manifest, last_refreshed_at, status, refresh_policy, max_age_days}` and `ManifestEntry{symbol_id?, content_hash_at_render, repo, commit_sha, file_path, fuzzy}` defined in `evergreen/document.go`. JSON marshalling stable. Null-safe fuzzy fallback path. Unit tests.
+- **`evergreen/` package: types + interfaces (adapter contract surface)**
+  - Acceptance: `Document`, `ManifestEntry`, `Finding`, `RefreshResult` types in `evergreen/types.go`. `DocumentStore`, `RefreshExecutor`, `ClaimsReader`, `RateLimiter` interfaces in `evergreen/interfaces.go`. All types exported, JSON-stable, documented. This file is the public contract the sourcegraph adapter compiles against — **changes here are breaking changes and must be semver-signaled**.
 
-- **SQLite-backed document store (local to live_docs install)**
-  - Acceptance: `deep_search_documents` table with indexed `id`, `last_refreshed_at`, `status`. Forward-only migration. Store interface: `Save`, `Get`, `List`, `Delete`, `UpdateStatus`. Append-only revision history (configurable cap, default 5). Note: this is the live_docs OSS store. The sourcegraph adapter does not write here — it reads documents from sourcegraph's own tables and hands them to the detector in `Document` shape.
+- **Default `DocumentStore` impl (SQLite, OSS-only)**
+  - Acceptance: `evergreen/sqlite_store.go` implements `DocumentStore` with the `deep_search_documents` table (indexed `id`, `last_refreshed_at`, `status`). Forward-only migration. Append-only revision history (cap 5). Used by OSS install; sourcegraph adapter supplies its own impl backed by upstream tables.
 
-- **`RefreshExecutor` interface + default executor**
-  - Acceptance: Interface as sketched above, in `evergreen/executor.go`. Default executor `executors/deepsearch_mcp.go` wraps the existing `sourcegraph.Client` (from `sourcegraph/client.go` in this repo — which talks to the deepsearch MCP, not the sourcegraph ConnectRPC evergreen API). Second executor `executors/prompt_replay.go` for users without deepsearch MCP access: simple LLM re-run of the stored query text. Unit tests with mock executors.
+- **`RefreshExecutor` default impl (deepsearch-MCP-backed, OSS)**
+  - Acceptance: `executors/deepsearch_mcp.go` implements `RefreshExecutor` by wrapping the existing `sourcegraph.Client` in this repo (the deepsearch MCP client, *not* the sourcegraph ConnectRPC evergreen API). Unit tests with a mock MCP. Note: we ship exactly one default executor; the second (`prompt_replay.go`) proposed in v1 is cut to minimize surface. Users who want LLM-replay can implement the interface themselves; it's ~20 lines.
 
 - **Staleness detector (hot/warm/cold/orphaned)**
   - Acceptance: `evergreen.Detect(doc, claimsDB) ([]Finding, error)`. Severity rules:
@@ -135,8 +151,8 @@ The detector, store, CLI, and MCP surface are all executor-agnostic. Swapping fr
 - **`livedocs evergreen` CLI**
   - Acceptance: Subcommands `list`, `save`, `check`, `refresh <id>`, `delete <id>`. `check` runs detector across all docs and prints findings grouped by severity. `refresh` invokes the configured `RefreshExecutor` and updates the store. `--dry-run` on `refresh`. `--executor=<name>` flag picks non-default executor. `--help` lists all.
 
-- **MCP tools: `evergreen_status`, `evergreen_refresh`**
-  - Acceptance: Registered in `mcpserver/`. `evergreen_status(doc_id?)` returns findings for one/all docs, including per-entry drift details. `evergreen_refresh(doc_id)` triggers the configured executor (subject to rate limit). Adapter pattern: these tools call into `evergreen/` and are unaware of which backend is configured.
+- **MCP tool factories: `NewStatusTool`, `NewRefreshTool`**
+  - Acceptance: `evergreen/mcptools.go` exports constructor functions that take a `DocumentStore`, a `RefreshExecutor`, and a `RateLimiter` and return registerable MCP tool handlers. No globals. `mcpserver/evergreen.go` wires the OSS-default triple (SQLite store + deepsearch-MCP executor + KeyedLimiter). The sourcegraph adapter calls the same factories with its own triple — one call per tool, zero duplicated handler logic.
 
 - **Orphaned-document quarantine (never-delete)**
   - Acceptance: When detector returns `orphaned`, document status transitions to `orphaned` and `refresh` is blocked pending human review (CLI: `livedocs evergreen force-refresh <id>`; MCP: explicit `acknowledge_orphan=true` param). Manifest preserved for provenance. Tests.
@@ -191,21 +207,24 @@ The detector, store, CLI, and MCP surface are all executor-agnostic. Swapping fr
 
 ## Sourcegraph Adapter — Scoped Out (Roadmap Only)
 
-The adapter is **not built in this repo**. It lives on a branch of the sourcegraph repo (specific branch name + fork ownership TBD with the Sourcegraph team). This PRD notes its scope so the live_docs-side interfaces are shaped correctly for it to plug in; the adapter's own PRD is a sourcegraph-side artifact.
+The adapter is **not built in this repo**. It lives on branch **`sj/egds-livedocs`** of the sourcegraph repo. This PRD notes its scope only so the live_docs-side interfaces are shaped correctly for it to plug in; the adapter's own PRD is a sourcegraph-side artifact.
 
-**Adapter responsibilities (sourcegraph branch, not this repo):**
+**Target footprint: ~4 files, ~150 lines total.** Anything larger means a live_docs-side interface is the wrong shape and should be reshaped before the adapter ships, not after.
 
-1. **`ConnectRPCExecutor implements evergreen.RefreshExecutor`** — Calls sourcegraph's `RefreshEvergreenDeepSearch` ConnectRPC method; polls version state; returns the completed conversation's answer + lifted manifest.
-2. **`sources[] → ManifestEntry` lift** — For each `DeepSearchQuestion.sources[i]`, parse the `link` (repo path + line ranges) into `ManifestEntry{repo, commit_sha, file_path, line_range}`; resolve to `symbol_id` via live_docs' claims DB when possible (fuzzy otherwise).
-3. **MCP-tool registration into sourcegraph's MCP server** — The adapter wraps live_docs' `evergreen_status` / `evergreen_refresh` handlers and registers them against sourcegraph's `getDeepSearchHandler`.
-4. **Optional: upstream schema change** — JSONB `dependency_manifest` column on `evergreen_deepsearch_versions` so manifest is authoritative upstream. Requires sourcegraph migration + code review. Until/unless that lands, adapter stores manifest in a live_docs-side sidecar keyed by `(evergreen_id, version_id)`.
-5. **Config flag `--defer-auto-refresh-to-upstream`** on live_docs side — disables live_docs' Phase 2 auto-refresh so it doesn't double-fire against sourcegraph's 24h worker.
+**Adapter responsibilities (on `sj/egds-livedocs`, not this repo):**
+
+1. **`ConnectRPCExecutor` implements `evergreen.RefreshExecutor`** — Calls sourcegraph's `RefreshEvergreenDeepSearch` ConnectRPC method; polls version state; returns the completed conversation's answer + lifted manifest. ~40 lines.
+2. **`sources[] → []ManifestEntry` lift** — For each `DeepSearchQuestion.sources[i]`, parse the `link` (repo path + line ranges) into `ManifestEntry{repo, commit_sha, file_path, line_range}`; resolve to `symbol_id` via live_docs' claims DB when available (fuzzy otherwise). ~30 lines.
+3. **`UpstreamStore` implements `evergreen.DocumentStore`** — Reads documents directly from `evergreen_deepsearch` + `evergreen_deepsearch_versions`; materializes `Document` shape on read. No writes — sourcegraph owns the source of truth. `Save`/`UpdateStatus` are no-ops or push to an optional sidecar. ~50 lines.
+4. **Registration** — `Register(mcp *mcpserver.Server, db *database.DB)` calls live_docs' `NewStatusTool` and `NewRefreshTool` factories with the adapter's `UpstreamStore` + `ConnectRPCExecutor` and registers the returned handlers on sourcegraph's MCP server. ~30 lines.
+
+**Optional, deferred:** JSONB `dependency_manifest` column on `evergreen_deepsearch_versions` for authoritative upstream manifest storage. Until/unless sourcegraph team approves the migration, the adapter either stores manifest in a sidecar keyed by `(evergreen_id, version_id)` or re-derives it from `sources[]` on each read.
 
 **Coordination items with Sourcegraph team:**
 
-- Branch location and ownership of the adapter code.
-- Willingness to review an optional upstream schema change, or preference for sidecar-only.
-- Integration test strategy (live sourcegraph instance vs. recorded fixtures).
+- Upstream schema change appetite (JSONB `dependency_manifest` column vs. sidecar-only).
+- Whether the adapter registers via sourcegraph's existing `getDeepSearchHandler` or a new handler.
+- Integration test strategy (live sourcegraph instance vs. recorded ConnectRPC fixtures).
 
 ---
 
