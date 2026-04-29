@@ -16,9 +16,16 @@ import (
 // setupEvergreenTest installs a temporary DB path on the evergreenCmd tree
 // and swaps the executor factory with a stub. Returns the DB path plus a
 // cleanup function that restores globals.
+//
+// The DB file is pre-populated from a per-binary migrated template — see
+// evergreen_template_test.go — to keep parallel `go test ./...` from
+// thrashing the modernc.org/sqlite connection pool with ~17 fresh schema
+// builds. The CLI's eventual OpenSQLiteStore still runs Migrate; every DDL
+// becomes a no-op.
 func setupEvergreenTest(t *testing.T, exec *stubExecutor) string {
 	t.Helper()
 	dbPath := filepath.Join(t.TempDir(), "evergreen_cli.db")
+	copyEvergreenTemplate(t, dbPath)
 
 	prevFactory := evergreenExecutorFactory
 	evergreenExecutorFactory = func() (evergreen.RefreshExecutor, func(), error) {

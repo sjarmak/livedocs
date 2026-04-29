@@ -17,9 +17,16 @@ var _ DocumentStore = (*SQLiteStore)(nil)
 // testStore returns an opened, migrated store backed by a tempfile. The
 // store's Close runs on cleanup. File-backed (not :memory:) to avoid the
 // connection-pool-shared-cache gotcha with modernc.org/sqlite.
+//
+// The DB is seeded by copying a per-binary pre-migrated template — see
+// sqlite_store_template_test.go — so each call only pays the file-copy cost
+// (~50us) instead of running CREATE TABLE/INDEX (~50ms). OpenSQLiteStore's
+// Migrate is still invoked on the copy and remains correct; every CREATE IF
+// NOT EXISTS becomes a no-op.
 func testStore(t *testing.T, opts ...SQLiteOption) *SQLiteStore {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "evergreen_test.db")
+	copyTemplateTo(t, path)
 	s, err := OpenSQLiteStore(context.Background(), path, opts...)
 	if err != nil {
 		t.Fatalf("OpenSQLiteStore: %v", err)
@@ -474,7 +481,6 @@ func TestNewSQLiteStore_EnablesForeignKeys(t *testing.T) {
 		t.Errorf("orphaned revisions after Delete = %d, want 0 (foreign_keys not enabled)", count)
 	}
 }
-
 
 func TestClose_NoOpForExternalDB(t *testing.T) {
 	// Build a store from an externally-opened DB. Close must not release it.
