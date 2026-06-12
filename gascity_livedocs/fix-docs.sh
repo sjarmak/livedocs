@@ -26,6 +26,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DOCS_DIR="${SCRIPT_DIR}/docs"
 DOC_MAP="${SCRIPT_DIR}/doc-map.yaml"
 LIVEDOCS="${LIVEDOCS_BIN:-livedocs}"
+# Multi-account router: a capped default account must not kill the run.
+CLAUDE_BIN="${CLAUDE_BIN:-claude-auto}"
 BRANCH="docs/auto-update-$(date +%Y-%m-%d)"
 DRY_RUN=0
 
@@ -37,7 +39,7 @@ die() { echo "ERROR: $*" >&2; exit 1; }
 
 check_prereqs() {
   command -v "$LIVEDOCS" >/dev/null 2>&1 || die "livedocs not found"
-  command -v claude >/dev/null 2>&1 || die "claude CLI not found"
+  command -v "$CLAUDE_BIN" >/dev/null 2>&1 || die "claude CLI not found ($CLAUDE_BIN)"
   command -v gh >/dev/null 2>&1 || die "gh CLI not found"
   command -v jq >/dev/null 2>&1 || die "jq not found (needed for JSON parsing)"
   [[ -n "${SRC_ACCESS_TOKEN:-}" ]] || die "SOURCEGRAPH_ACCESS_TOKEN not found in ~/.env"
@@ -204,7 +206,7 @@ INSTRUCTIONS:
 EOF
 )"
 
-  claude -p \
+  "$CLAUDE_BIN" -p \
     --model haiku \
     --output-format text \
     --system-prompt "You are a precise technical documentation editor. Output only the corrected markdown section, nothing else." \
