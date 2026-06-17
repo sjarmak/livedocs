@@ -1,0 +1,231 @@
+// Views over the livedocs model. Planned (#planned) and research (#research)
+// elements/relationships are dimmed + dashed so the "what exists vs what is
+// proposed" split is readable at a glance.
+
+views {
+
+  // Landscape — the whole system in context.
+  view index {
+    title 'Livedocs — system landscape'
+    include *
+
+    style * {
+      opacity 25%
+    }
+    style element.tag == #built, element.tag == #evolving {
+      opacity 100%
+    }
+    style element.tag == #planned {
+      color muted
+      border dashed
+    }
+    style element.tag == #research {
+      color indigo
+      border dashed
+    }
+  }
+
+  // The livedocs system, decomposed into its containers.
+  view livedocsSystem of livedocs {
+    title 'Livedocs — containers (built vs planned)'
+    include *
+
+    style element.tag == #planned {
+      color muted
+      border dashed
+    }
+    style element.tag == #research {
+      color indigo
+      border dashed
+    }
+  }
+
+  // ── Per-container component views ─────────────────────────────────────────
+
+  view extractorContainer of livedocs.extractor {
+    title 'Extractor — deep-Go / tree-sitter / tribal miners'
+    include *
+
+    style element.tag == #evolving {
+      color amber
+    }
+  }
+
+  view pipelineContainer of livedocs.pipeline {
+    title 'Extraction pipeline — file sources & cache'
+    include *
+  }
+
+  view dbContainer of livedocs.db {
+    title 'Claims store — schema, tribal facts, cross-repo xref'
+    include *
+  }
+
+  view mcpContainer of livedocs.mcp {
+    title 'MCP server — transports, pool, routing, tools'
+    include *
+
+    style element.tag == #evolving {
+      color amber
+    }
+  }
+
+  view driftContainer of livedocs.drift {
+    title 'Drift detection — structural / cross-repo / semantic / tribal'
+    include *
+
+    style element.tag == #evolving {
+      color amber
+    }
+  }
+
+  view semanticContainer of livedocs.semantic {
+    title 'Semantic claim generator — generate / verify / LLM clients'
+    include *
+
+    style element.tag == #evolving {
+      color amber
+    }
+  }
+
+  view sgContainer of livedocs.sgIntegration {
+    title 'Sourcegraph integration — MCP client & enrichment'
+    include *
+
+    style element.tag == #evolving {
+      color amber
+    }
+  }
+
+  view evergreenContainer of livedocs.evergreen {
+    title 'Evergreen documents — detector, store, executor, tools'
+    include *
+
+    style element.tag == #evolving {
+      color amber
+    }
+  }
+
+  view supportContainer of livedocs.support {
+    title 'Supporting utilities — check / prbot / aicontext / init'
+    include *
+  }
+
+  // Risks & open questions — the elements that carry a #risk flag, with the
+  // open question stated in each box's description. The things a reviewer
+  // should probe, surfaced rather than discovered mid-meeting.
+  view risks {
+    title 'Risks & open questions'
+    include
+      livedocs,
+      element.tag == #risk,
+      livedocs.extractor.tribal,
+      livedocs.db,
+      livedocs.drift,
+      livedocs.semantic,
+      livedocs.sgIntegration,
+      livedocs.mcp
+
+    style * {
+      opacity 30%
+    }
+    style element.tag == #risk {
+      opacity 100%
+      color red
+    }
+  }
+
+  // ───────────────────────────────────────────────────────────────────────
+  // Walkthrough flows (dynamic views) — the narrative spine of the review.
+  // ───────────────────────────────────────────────────────────────────────
+
+  // Flow 1 — extracting a local repo into claims.
+  dynamic view extractFlow {
+    title 'Walkthrough — extract a repo into claims'
+    description 'Build needs CGO (tree-sitter), so run via `make build` / CGO_ENABLED=1. The cache keys on content + extractor + grammar versions, so a second run only touches changed files.'
+
+    livedocs.cli -> livedocs.pipeline.localSource 'livedocs extract — read files'
+    livedocs.pipeline.localSource -> livedocs.pipeline.cache 'unchanged? skip'
+    livedocs.pipeline.cache -> livedocs.extractor 'parse changed files'
+    livedocs.extractor.tsFast -> treeSitter 'tree-sitter parse (Go/Py/TS/Bash)'
+    livedocs.extractor.goDeep -> livedocs.scip 'attach SCIP symbols (Go)'
+    livedocs.extractor.tribal -> github 'optional: mine PR comments (--tribal=llm)'
+    livedocs.extractor -> livedocs.db 'upsert symbols + structural claims'
+    livedocs.extractor.tribal -> livedocs.db 'upsert tribal facts + provenance'
+  }
+
+  // Flow 2 — an agent querying claims at runtime.
+  dynamic view mcpQueryFlow {
+    title 'Walkthrough — agent queries claims over MCP'
+    description 'describe_package returns ~30–50 tokens per claim instead of raw source — the ~50x context reduction. Staleness is checked lazily on the call, within a 5s budget.'
+
+    agent -> livedocs.mcp 'describe_package(repo, import_path)'
+    livedocs.mcp.dbpool -> livedocs.db 'lazy-load <repo>.claims.db'
+    livedocs.mcp.staleness -> livedocs.pipeline 're-extract if file hash changed (5s)'
+    livedocs.mcp.claimTools -> livedocs.renderer 'render package Markdown'
+    livedocs.renderer -> livedocs.db 'exports / deps / interfaces'
+    livedocs.mcp -> agent 'compact Markdown (~50x fewer tokens than source)'
+    agent -> livedocs.mcp 'tribal_why_this_way(symbol)'
+    livedocs.mcp.tribalTools -> livedocs.db 'rationale + invariant facts w/ provenance'
+  }
+
+  // Flow 3 — drift detection in CI.
+  dynamic view driftFlow {
+    title 'Walkthrough — drift detection in CI'
+    description 'The GitHub Action runs the fast manifest scan first (sub-2s, no DB), escalating to claim-level structural and LLM semantic checks only when docs are touched.'
+
+    maintainer -> livedocs.cli 'livedocs check / verify (CI / Action)'
+    livedocs.cli -> livedocs.support 'fast manifest scan'
+    livedocs.support.check -> livedocs.support.gitdiff 'git-diff vs manifest'
+    livedocs.cli -> livedocs.drift 'verify-claims --check-existing'
+    livedocs.drift.structural -> livedocs.db 'claim vs current source (AST)'
+    livedocs.drift.anchor -> livedocs.db 're-read claim by file:line'
+    livedocs.drift.semanticDrift -> llm 'README section vs code behavior'
+    livedocs.drift.crossRepo -> livedocs.db 'referenced symbol still exists?'
+  }
+
+  // Flow 4 — remote extraction + enrichment via Sourcegraph (no clone).
+  dynamic view remoteFlow {
+    title 'Walkthrough — remote extraction & enrichment (no clone)'
+    description 'Requires SRC_ACCESS_TOKEN; the Sourcegraph MCP server is spawned via npx on demand. Files are read remotely, extracted locally, then enriched with semantic properties.'
+
+    livedocs.cli -> livedocs.pipeline 'extract --source sourcegraph --repo org/repo'
+    livedocs.pipeline.sgSource -> livedocs.sgIntegration.sgClient 'read_file / list_files'
+    livedocs.sgIntegration.sgClient -> sourcegraph 'MCP over npx'
+    livedocs.pipeline -> livedocs.extractor 'extract remote bytes'
+    livedocs.extractor -> livedocs.db 'upsert claims'
+    livedocs.cli -> livedocs.sgIntegration.enrich 'livedocs enrich'
+    livedocs.sgIntegration.enrich -> sourcegraph 'deepsearch semantic properties'
+    livedocs.sgIntegration.enrich -> livedocs.db 'write enriched properties'
+  }
+
+  // Planned-only lens: the planned + research tracks in context.
+  view planned {
+    title 'Planned & research work'
+    include
+      livedocs,
+      livedocs.fingerprint,
+      livedocs.autoRefresh,
+      livedocs.persistentMining,
+      livedocs.db,
+      livedocs.db.tribalStore,
+      livedocs.extractor.tribal,
+      livedocs.evergreen,
+      livedocs.evergreen.detector,
+      sourcegraph
+
+    style * {
+      opacity 30%
+    }
+    style element.tag == #planned {
+      opacity 100%
+      color muted
+      border dashed
+    }
+    style element.tag == #research {
+      opacity 100%
+      color indigo
+      border dashed
+    }
+  }
+}

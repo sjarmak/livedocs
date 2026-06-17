@@ -1,0 +1,477 @@
+// Livedocs — keep documentation in sync with code.
+//
+// Livedocs extracts STRUCTURAL claims (exports, types, signatures, deps,
+// interface implementations) and mined TRIBAL knowledge (ownership, rationale,
+// invariants, quirks) from source into per-repo SQLite `.claims.db` files,
+// then serves them to AI coding agents over MCP (or static Markdown) so agents
+// can understand a codebase without expensive grep/read cycles. It also detects
+// documentation drift and watches repos to refresh claims incrementally —
+// including remote repos pulled via Sourcegraph MCP without cloning.
+//
+// One Go binary (`livedocs`, module github.com/sjarmak/livedocs, Go 1.25, CGO
+// for tree-sitter) hosts every container as an internal package. Delivery state
+// is tagged per element (see spec.c4); planned/research work renders distinctly.
+//
+// Every element links to its real source path (relative to architecture/) and,
+// where one exists, to the PRD / premortem behind it (docs/design/).
+
+model {
+
+  agent = actor 'AI coding agent' {
+    description 'Claude Code / Cursor / any MCP client — queries claims to understand a codebase without raw grep/read'
+  }
+
+  maintainer = actor 'Repo maintainer / CI' {
+    description 'Runs the livedocs CLI locally and in CI; reviews drift findings and proposed tribal facts'
+  }
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // External systems — the substrates livedocs reads, calls, and ships into.
+  // ─────────────────────────────────────────────────────────────────────────
+
+  sourcegraph = externalSystem 'Sourcegraph' {
+    description 'Code-intelligence platform reached via its MCP server (npx). Remote file reads, code search, and semantic enrichment — no local clone needed (requires SRC_ACCESS_TOKEN)'
+  }
+
+  github = externalSystem 'GitHub' {
+    description 'Source of PR review comments (via gh CLI) for tribal mining, and host of the Livedocs GitHub Action for CI drift checks'
+  }
+
+  llm = externalSystem 'LLM (Anthropic / Claude CLI)' {
+    description 'Generates and adversarially verifies semantic (non-structural) claims, and classifies PR-comment tribal facts. Reached over the Anthropic HTTP API or the local `claude` CLI'
+  }
+
+  treeSitter = externalSystem 'tree-sitter grammars' {
+    description 'CGO-linked grammars (Go, Python, TypeScript, Bash) used by the fast structural extractor'
+  }
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // The livedocs system.
+  // ─────────────────────────────────────────────────────────────────────────
+
+  livedocs = system 'Livedocs' {
+    description 'Extract → store → serve → verify pipeline turning source into queryable, drift-checked claims'
+    link ../README.md 'README'
+    link ../AGENTS.md 'AGENTS.md (project rules)'
+    link ../docs/design 'docs/design — PRDs & premortems'
+
+    // ── CLI: the operator surface ──────────────────────────────────────────
+    cli = container 'livedocs CLI' {
+      #built
+      description 'cmd/livedocs — cobra command tree (init, extract, mcp, context, check, diff, export, verify, verify-claims, tribal, watch, enrich, prbot, evergreen, extract-schedule). The single entry point that wires every other container'
+      technology 'Go / cobra'
+      link ../cmd/livedocs 'cmd/livedocs/'
+    }
+
+    // ── Extraction: source → raw claims ──────────────────────────────────────
+    extractor = container 'Extractor' {
+      description 'extractor/ — turns source files into structural claims and mined tribal facts'
+      technology 'Go / tree-sitter (CGO) / go-types'
+      link ../extractor 'extractor/'
+
+      registry = component 'language registry' {
+        #built
+        description 'Maps file extension → extractor (deep-Go vs tree-sitter fast path)'
+        link ../extractor/registry.go 'registry.go'
+      }
+      goDeep = component 'Go deep extractor' {
+        #built
+        description 'go/packages + go/types + go/doc → high-fidelity Go claims (signatures, interface satisfaction) with SCIP symbols attached'
+        link ../extractor/goextractor 'goextractor/'
+      }
+      tsFast = component 'tree-sitter fast extractor' {
+        #built
+        description 'Structural claims (defines / imports / exports / has_doc / is_test) for Go, Python, TypeScript, Bash'
+        link ../extractor/treesitter 'treesitter/'
+      }
+      tribal = component 'tribal/ — deterministic miners' {
+        #built
+        description 'git blame ownership, commit rationale, CODEOWNERS, inline TODO/FIXME/HACK markers — model=NULL, fully reproducible'
+        link ../extractor/tribal 'tribal/'
+
+        prMine = component 'PR-comment miner (LLM)' {
+          #evolving
+          #risk
+          description 'Fetches PR review comments via gh CLI and classifies them into rationale/invariant/quirk facts via the LLM. RISK: opt-in & gated behind --tribal=llm (non-deterministic); requires PII redaction (sanitize.go) before any comment reaches the model'
+          link ../extractor/tribal/pr_comment.go 'pr_comment.go'
+        }
+      }
+    }
+
+    // ── Pipeline: orchestration + caching + file sourcing ────────────────────
+    pipeline = container 'Extraction pipeline' {
+      #built
+      description 'pipeline/ — orchestrates walk → extract → cache → reconcile (deletion-aware) across local and remote file sources'
+      technology 'Go'
+      link ../pipeline 'pipeline/'
+
+      localSource = component 'local file source' {
+        #built
+        description 'Reads files from disk for the local-repo path'
+        link ../pipeline/filesource_local.go 'filesource_local.go'
+      }
+      sgSource = component 'Sourcegraph file source' {
+        #built
+        description 'Reads remote files through the Sourcegraph MCP client — extract without cloning'
+        link ../pipeline/filesource_sourcegraph.go 'filesource_sourcegraph.go'
+      }
+      cache = component 'content-hash cache' {
+        #built
+        description 'cache/ — SHA-256(file + extractor-version + grammar-version) keyed cache so unchanged files are skipped on re-extract'
+        link ../cache/cache.go 'cache.go'
+      }
+    }
+
+    // ── SCIP: symbol identity ────────────────────────────────────────────────
+    scip = container 'SCIP symbol layer' {
+      #built
+      description 'scip/ — formats/parses SCIP (Sourcegraph Code Intelligence Protocol) symbols and maps them to claims. Wired into the Go deep extractor for stable cross-repo symbol identity'
+      technology 'Go / SCIP protobuf'
+      link ../scip 'scip/'
+    }
+
+    // ── Storage: per-repo SQLite + cross-repo xref ───────────────────────────
+    db = container 'Claims store' {
+      description 'db/ — per-repo SQLite (<repo>.claims.db): symbols, structural+semantic claims, tribal facts/evidence/corrections, plus a shared cross-repo xref index'
+      technology 'Go / SQLite (modernc, WAL)'
+      link ../db 'db/'
+
+      claims = datastore 'claims schema' {
+        #built
+        description 'symbols + claims (structural/semantic/meta tiers) + source_files + extraction_meta. Serialized writes via RunInTransaction mutex'
+        link ../db/claims.go 'claims.go'
+      }
+      tribalStore = datastore 'tribal facts + evidence' {
+        #built
+        #risk
+        description 'tribal_facts / tribal_evidence / tribal_corrections — status-transitioned (active→stale/quarantined/superseded), never hard-deleted, with a full provenance envelope. RISK: liveness is file-anchored, so symbol renames surface as quarantined rather than tracked (per-symbol fingerprinting is a planned upgrade)'
+        link ../db/tribal.go 'tribal.go'
+      }
+      xref = datastore 'cross-repo xref index' {
+        #built
+        description 'Shared symbol-key → (repo, symbol) index enabling cross-repo search and routing'
+        link ../db/rank_files.go 'rank_files.go'
+      }
+    }
+
+    // ── Semantic: LLM-backed non-structural claims ───────────────────────────
+    semantic = container 'Semantic claim generator' {
+      #evolving
+      #risk
+      description 'semantic/ — generates Tier-2 prose claims (package purpose, usage, rationale) via the LLM, then adversarially verifies each (second LLM pass) and gates on a 0.7 confidence floor. RISK: only validated on the Kubernetes corpus so far; hallucination is held off by the verify gate, not yet calibrated across diverse repos'
+      technology 'Go / Anthropic API + claude CLI'
+      link ../semantic 'semantic/'
+
+      generator = component 'generator' {
+        #evolving
+        description 'structural claims → prompt → LLM → parse → store; batch mode over many packages'
+        link ../semantic/generator.go 'generator.go'
+      }
+      verifier = component 'adversarial verifier' {
+        #built
+        description 'Two-stage: subject-exists structural check, then a second-LLM review that downgrades weak claims'
+        link ../semantic/verifier.go 'verifier.go'
+      }
+      llmClient = component 'LLM clients (anthropic / claude-cli)' {
+        #built
+        description 'Anthropic HTTP client and a local `claude` CLI fallback behind one LLMClient interface'
+        link ../semantic/anthropic.go 'anthropic.go'
+      }
+    }
+
+    // ── Sourcegraph integration: remote read + enrichment ────────────────────
+    sgIntegration = container 'Sourcegraph integration' {
+      description 'sourcegraph/ — MCP client, remote-extraction queue, query routing, and semantic enrichment of claims'
+      technology 'Go / MCP (npx)'
+      link ../sourcegraph 'sourcegraph/'
+
+      sgClient = component 'MCP client' {
+        #built
+        description 'Spawns and speaks to the Sourcegraph MCP server (read_file, list_files, search)'
+        link ../sourcegraph/client.go 'client.go'
+      }
+      enrich = component 'enrichment pipeline' {
+        #evolving
+        #risk
+        description 'Augments claims with semantic properties (purpose, complexity, stability) via Sourcegraph deepsearch. RISK: tested against mocked MCP responses; full-corpus live enrichment not yet validated'
+        link ../sourcegraph/enrich.go 'enrich.go'
+      }
+    }
+
+    // ── Renderer: claims → Markdown ──────────────────────────────────────────
+    renderer = container 'Renderer' {
+      #built
+      description 'renderer/ — claims → compact Markdown (exports, dependencies, reverse-deps, interface implementations). Powers describe_package and `livedocs context`'
+      technology 'Go'
+      link ../renderer 'renderer/'
+    }
+
+    // ── Drift: keep claims & docs honest ─────────────────────────────────────
+    drift = container 'Drift detection' {
+      description 'drift/ + anchor/ — compares stored claims against current source across four modes'
+      technology 'Go'
+      link ../drift 'drift/'
+
+      structural = component 'structural drift' {
+        #built
+        description 'AST-level diff: claim predicate (signature/export) vs current source'
+        link ../drift/drift.go 'drift.go'
+      }
+      crossRepo = component 'cross-repo drift' {
+        #built
+        description 'Validates a dependency / referenced symbol still exists in another repo'
+        link ../drift/crossrepo.go 'crossrepo.go'
+      }
+      semanticDrift = component 'semantic drift (LLM)' {
+        #evolving
+        #risk
+        description 'LLM check of a README section against current code behavior. RISK: not intent-aware — an intent shift with no code change is not detected (documented gap)'
+        link ../drift/semantic.go 'semantic.go'
+      }
+      tribalDrift = component 'tribal liveness / reverify' {
+        #built
+        description 'Status-transitions tribal facts whose source moved or vanished; reverify updates confidence rather than deleting'
+        link ../drift/tribal.go 'tribal.go'
+      }
+      anchor = component 'anchor/ — source anchoring' {
+        #built
+        description 'Maps each claim to a file:line range so it can be re-read and re-verified'
+        link ../anchor/anchor.go 'anchor.go'
+      }
+    }
+
+    // ── MCP server: the agent-facing surface ─────────────────────────────────
+    mcp = container 'MCP server' {
+      description 'mcpserver/ — serves claims over the Model Context Protocol (stdio + HTTP/SSE), single- or multi-repo'
+      technology 'Go / mcp-go (mark3labs)'
+      link ../mcpserver 'mcpserver/'
+
+      server = component 'server + transports' {
+        #built
+        description 'Tool registry over stdio (single client) and HTTP/SSE (multi-client) transports'
+        link ../mcpserver/server.go 'server.go'
+      }
+      dbpool = component 'DB pool + manifest discovery' {
+        #built
+        description 'Lazy LRU pool (max ~20 DBs) auto-discovering repos via extraction_meta.repo_root'
+        link ../mcpserver/dbpool.go 'dbpool.go'
+      }
+      routing = component 'routing index' {
+        #built
+        description 'Symbol-prefix → repo index so cross-repo search fans out only when needed'
+        link ../mcpserver/routing.go 'routing.go'
+      }
+      claimTools = component 'claim tools' {
+        #built
+        description 'list_repos, list_packages, describe_package, search_symbols, query_claims'
+        link ../mcpserver/tools.go 'tools.go'
+      }
+      tribalTools = component 'tribal tools' {
+        #built
+        description 'tribal_context_for_symbol, tribal_owners, tribal_why_this_way, tribal_search, tribal_propose (agent write-back)'
+        link ../mcpserver/tribal_tools.go 'tribal_tools.go'
+      }
+      mineTool = component 'tribal_mine (rate-limited)' {
+        #evolving
+        description 'On-demand re-mining for a symbol, throttled per agent by a keyed limiter'
+        link ../mcpserver/tribal_mine.go 'tribal_mine.go'
+      }
+      staleness = component 'lazy staleness checker' {
+        #built
+        #risk
+        description 'On describe_package, re-extracts files whose hash changed (5s timeout, recover-guarded). RISK: MCP + watch can contend on the WAL — held off by WAL mode + 5s busy_timeout, not yet stress-tested at scale'
+        link ../mcpserver/staleness.go 'staleness.go'
+      }
+    }
+
+    // ── Watch: incremental refresh ───────────────────────────────────────────
+    watch = container 'Watcher' {
+      #built
+      description 'watch/ — polls repos (local or Sourcegraph), git-diffs since last state, and re-extracts only changed files; persists watch state'
+      technology 'Go'
+      link ../watch 'watch/'
+    }
+
+    // ── Evergreen: keep saved prose answers fresh ────────────────────────────
+    evergreen = container 'Evergreen documents' {
+      #evolving
+      description 'evergreen/ — pairs a saved deep-search prose answer with a dependency manifest, then classifies drift (hot/warm/cold/orphaned) as the cited code evolves. Interface-driven so an external (Sourcegraph) adapter can reuse the detector + tools'
+      technology 'Go'
+      link ../evergreen 'evergreen/'
+      link ../docs/design/prd_evergreen_refresh.md 'PRD — evergreen refresh'
+
+      detector = component 'drift detector' {
+        #built
+        description 'Diffs a document manifest vs current claims → hot/warm/cold/orphaned findings'
+        link ../evergreen/detector.go 'detector.go'
+      }
+      egStore = component 'SQLite document store' {
+        #built
+        description 'Default OSS DocumentStore — append-only version history (cap 5) in the per-repo DB'
+        link ../evergreen/sqlite_store.go 'sqlite_store.go'
+      }
+      egExecutor = component 'deepsearch refresh executor' {
+        #evolving
+        description 'Default OSS RefreshExecutor — re-runs the saved query via the Sourcegraph client to produce a fresh answer + manifest'
+        link ../evergreen/executors 'executors/'
+      }
+      egTools = component 'MCP tools + webhook' {
+        #evolving
+        description 'evergreen status/refresh MCP tools and a GitHub webhook handler. Phase-1 is alert-first; auto-refresh on hot findings is PLANNED'
+        link ../evergreen/webhook.go 'webhook.go'
+      }
+    }
+
+    // ── Supporting utilities ─────────────────────────────────────────────────
+    support = container 'Supporting utilities' {
+      #built
+      description 'Cross-cutting helpers wired into the CLI flows'
+      technology 'Go'
+      link ../config 'config/'
+
+      check = component 'check/ — fast manifest scan' {
+        #built
+        description 'Sub-2s git-diff vs flat-file manifest; no DB touch (used by `livedocs check` and the GitHub Action)'
+        link ../check/check.go 'check.go'
+      }
+      prbot = component 'prbot/ — PR context pack' {
+        #built
+        description 'Turns a PR diff into a documentation-impact comment for human + agent reviewers'
+        link ../prbot/prbot.go 'prbot.go'
+      }
+      aicontext = component 'aicontext/ — AI-context validation' {
+        #built
+        description 'Validates CLAUDE.md / .cursorrules for broken symbol references (check_ai_context)'
+        link ../aicontext/aicontext.go 'aicontext.go'
+      }
+      gitdiff = component 'gitdiff/' {
+        #built
+        description 'Parses git diff output for diff, prbot, and watch flows'
+        link ../gitdiff/gitdiff.go 'gitdiff.go'
+      }
+      versionnorm = component 'versionnorm/' {
+        #built
+        description 'Normalizes version strings for module-version-aware SCIP symbols'
+        link ../versionnorm/normalize.go 'normalize.go'
+      }
+      audit = component 'audit/' {
+        #built
+        description 'Audits a claims DB for orphaned/stale rows and missing references'
+        link ../audit/audit.go 'audit.go'
+      }
+      initcmd = component 'initcmd/' {
+        #built
+        description 'Initializes the .livedocs/ directory + manifest and the editor MCP hook'
+        link ../initcmd/init.go 'init.go'
+      }
+      config = component 'config/' {
+        #built
+        description 'Loads & validates .livedocs.yaml'
+        link ../config/config.go 'config.go'
+      }
+    }
+
+    // ── Planned / research tracks (from docs/design) ─────────────────────────
+    fingerprint = container 'Per-symbol tribal fingerprinting' {
+      #planned
+      description 'Planned upgrade so tribal facts survive renames/moves instead of quarantining — fingerprint liveness rather than file-anchored liveness'
+      link ../docs/design/prd_tribal_knowledge_mapping.md 'PRD — tribal knowledge mapping'
+    }
+    autoRefresh = container 'Evergreen auto-refresh + SG adapter' {
+      #planned
+      description 'Phase-2 evergreen: auto-refresh on hot findings and an external Sourcegraph-backed DocumentStore/Executor (sj/egds-livedocs branch) reusing this detector'
+      link ../docs/design/prd_evergreen_refresh.md 'PRD — evergreen refresh (Phase 2)'
+    }
+    persistentMining = container 'Persistent tribal mining' {
+      #research
+      description 'Speculative: mine rationale/invariants from Slack, Jira, and incident records — beyond git/CODEOWNERS/PR sources'
+      link ../docs/design/prd_tribal_knowledge_mapping.md 'PRD — future sources'
+    }
+  }
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // Relationships.
+  // ─────────────────────────────────────────────────────────────────────────
+
+  // Operator drives everything through the CLI.
+  maintainer -> livedocs.cli 'init / extract / verify / watch / mcp / enrich'
+  livedocs.cli -> livedocs.pipeline 'extract / watch → run pipeline'
+  livedocs.cli -> livedocs.mcp 'mcp (stdio | http)'
+  livedocs.cli -> livedocs.drift 'verify / verify-claims / check-existing'
+  livedocs.cli -> livedocs.renderer 'context / export → Markdown'
+  livedocs.cli -> livedocs.semantic 'extract --tier2 → semantic claims'
+  livedocs.cli -> livedocs.sgIntegration 'enrich / extract --source sourcegraph'
+  livedocs.cli -> livedocs.evergreen 'evergreen save / check / refresh / list'
+  livedocs.cli -> livedocs.support 'check / prbot / verify (ai-context) / init'
+
+  // Extraction pipeline (source → claims).
+  livedocs.pipeline -> livedocs.extractor 'dispatch files to language extractors'
+  livedocs.pipeline.localSource -> livedocs.extractor 'local file bytes'
+  livedocs.pipeline.sgSource -> livedocs.sgIntegration.sgClient 'remote file bytes (no clone)'
+  livedocs.pipeline.cache -> livedocs.db 'records content hashes per source file'
+  livedocs.extractor.tsFast -> treeSitter 'parse via CGO grammars'
+  livedocs.extractor.goDeep -> livedocs.scip 'format stable SCIP symbols'
+  livedocs.extractor.tribal -> github 'PR review comments (LLM miner, via gh)'
+  livedocs.extractor.tribal.prMine -> llm 'classify comment → rationale/invariant'
+  livedocs.pipeline -> livedocs.db 'upsert symbols + structural claims'
+  livedocs.extractor.tribal -> livedocs.db 'upsert tribal facts + evidence'
+
+  // Semantic (LLM) claims.
+  livedocs.semantic.generator -> livedocs.db 'read structural claims'
+  livedocs.semantic.generator -> livedocs.llmClient 'generate prose claims'
+  livedocs.semantic.verifier -> llm 'adversarial review'
+  livedocs.semantic -> livedocs.db 'write Tier-2 claims (conf ≥ 0.7)'
+  livedocs.semantic.llmClient -> llm 'Anthropic API / claude CLI'
+
+  // Sourcegraph enrichment.
+  livedocs.sgIntegration.sgClient -> sourcegraph 'MCP: read_file / search'
+  livedocs.sgIntegration.enrich -> sourcegraph 'deepsearch semantic properties'
+  livedocs.sgIntegration.enrich -> livedocs.db 'write enriched claim properties'
+
+  // Render + drift read the store.
+  livedocs.renderer -> livedocs.db 'query exports / deps / interfaces'
+  livedocs.drift.structural -> livedocs.db 'claim vs current source'
+  livedocs.drift.semanticDrift -> llm 'README section vs code behavior'
+  livedocs.drift.crossRepo -> livedocs.db 'referenced symbol still exists?'
+  livedocs.drift.tribalDrift -> livedocs.db 'status-transition stale facts'
+  livedocs.drift.anchor -> livedocs.db 're-read claim by file:line'
+
+  // MCP server surface.
+  agent -> livedocs.mcp 'query_claims / describe_package / tribal_* (stdio | http/sse)'
+  livedocs.mcp.dbpool -> livedocs.db 'lazy-load per-repo DBs'
+  livedocs.mcp.claimTools -> livedocs.renderer 'pre-rendered package Markdown'
+  livedocs.mcp.tribalTools -> livedocs.db 'tribal facts with provenance'
+  livedocs.mcp.mineTool -> livedocs.extractor.tribal 'on-demand re-mine'
+  livedocs.mcp.staleness -> livedocs.pipeline 're-extract changed files (5s budget)'
+
+  // Watch loop.
+  livedocs.watch -> livedocs.pipeline 're-extract changed files'
+  livedocs.watch -> github 'poll local / git state'
+  livedocs.watch -> sourcegraph 'watch --source sourcegraph (remote repos)'
+
+  // Evergreen.
+  livedocs.evergreen.detector -> livedocs.db 'manifest vs current claims'
+  livedocs.evergreen.egStore -> livedocs.db 'persist documents + versions'
+  livedocs.evergreen.egExecutor -> livedocs.sgIntegration.sgClient 'rerun deep-search query'
+  github -> livedocs.evergreen.egTools 'webhook: code pushed'
+
+  // Supporting utilities.
+  livedocs.support.prbot -> github 'post PR documentation-impact comment'
+  livedocs.support.prbot -> livedocs.support.gitdiff 'parse PR diff'
+  livedocs.support.check -> livedocs.support.gitdiff 'git-diff vs manifest'
+  livedocs.support.aicontext -> livedocs.db 'validate referenced symbols exist'
+
+  // Planned / research wiring.
+  livedocs.fingerprint -> livedocs.db 'fingerprint-based tribal liveness' {
+    #planned
+  }
+  livedocs.autoRefresh -> livedocs.evergreen.detector 'auto-refresh on hot finding' {
+    #planned
+  }
+  livedocs.autoRefresh -> sourcegraph 'external SG-backed store/executor' {
+    #planned
+  }
+  livedocs.persistentMining -> livedocs.extractor.tribal 'Slack / Jira / incident sources' {
+    #research
+  }
+}

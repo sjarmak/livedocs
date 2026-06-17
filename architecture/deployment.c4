@@ -1,0 +1,83 @@
+// Deployment model — where each piece runs at review time.
+//
+// Livedocs is one Go binary (CGO for tree-sitter) deployed three ways:
+//   1. Developer / CI host — the CLI extracts and verifies, writing per-repo
+//      <repo>.claims.db SQLite files, and runs the MCP server over stdio for a
+//      local agent.
+//   2. Hosted MCP — the same binary in a container (Dockerfile / Smithery)
+//      serving claims over HTTP/SSE to multiple agents.
+//   3. GitHub Actions — `livedocs check` as a CI drift gate.
+// External substrates (Sourcegraph, GitHub, the LLM) are reached over the
+// network. This is the "what runs where / where's the data boundary" view.
+
+deployment {
+
+  devHost = host 'Developer / CI host' {
+    description 'Local toolchain — extracts claims, runs drift checks, and serves a local agent over stdio'
+
+    cliProc = proc 'livedocs CLI (CGO binary)' {
+      description 'extract / verify / watch / context / enrich — writes the claims DBs'
+      instanceOf livedocs.cli
+    }
+    stdioMcp = proc 'livedocs mcp (stdio)' {
+      description 'Single-client MCP transport spawned by the editor / agent'
+      instanceOf livedocs.mcp
+    }
+    claimsDb = proc 'per-repo <repo>.claims.db (SQLite, WAL)' {
+      description 'Generated artifact under .livedocs/ or a --data-dir. CLI writes; MCP server reads (and lazily re-extracts on staleness)'
+    }
+  }
+
+  mcpHost = host 'Hosted MCP host (container)' {
+    description 'Dockerfile / Smithery deployment — multi-client claims server'
+
+    httpMcp = proc 'livedocs mcp --transport http (SSE)' {
+      description 'Multi-client MCP over HTTP/Server-Sent-Events; default container CMD'
+      instanceOf livedocs.mcp
+    }
+    hostedDb = proc 'mounted claims DBs (--data-dir)' {
+      description 'Read-only claims store mounted into the container'
+    }
+  }
+
+  ciHost = host 'GitHub Actions runner' {
+    description 'CI drift gate via the Livedocs Action (action.yml)'
+
+    actionProc = proc 'livedocs check (Action)' {
+      description 'Fast manifest scan + drift check; fails the build past a configurable threshold'
+      instanceOf livedocs.support
+    }
+  }
+
+  sgHost = host 'Sourcegraph (remote)' {
+    description 'Code-intelligence platform — remote file reads, search, enrichment (requires SRC_ACCESS_TOKEN)'
+    instanceOf sourcegraph
+  }
+
+  githubHost = host 'GitHub (remote)' {
+    description 'PR review comments (tribal mining) and Action / webhook host'
+    instanceOf github
+  }
+
+  llmHost = host 'LLM endpoint (remote / local CLI)' {
+    description 'Anthropic API or local `claude` CLI — semantic claim generation, verification, tribal classification'
+    instanceOf llm
+  }
+
+  // Runtime data & control flow between processes / hosts.
+  cliProc -> claimsDb 'writes symbols + claims + tribal facts'
+  stdioMcp -> claimsDb 'reads (lazy re-extract on staleness)'
+  cliProc -> sgHost 'remote extraction + enrichment'
+  cliProc -> githubHost 'mine PR comments (--tribal=llm)'
+  cliProc -> llmHost 'semantic generation + verification'
+  httpMcp -> hostedDb 'serves claims to agents'
+  actionProc -> githubHost 'post drift comment / set status'
+}
+
+views {
+
+  deployment view deployment {
+    title 'Deployment — where each piece runs'
+    include *
+  }
+}
